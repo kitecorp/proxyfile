@@ -17,7 +17,8 @@ auth:
   when_unavailable: deny
   send: [authorization]
   accept: [x-identity]
-origins: origins.json
+origins:
+  only: {hosts: [gateway.example.net], origins: ["https://app.example.net"]}
 routes:
   - rpc:
       to:

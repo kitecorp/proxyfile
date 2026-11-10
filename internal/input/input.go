@@ -4,8 +4,6 @@
 package input
 
 import (
-	"errors"
-	"io/fs"
 	"os"
 
 	"github.com/kitecorp/proxyfile/internal/format"
@@ -13,14 +11,20 @@ import (
 	"github.com/kitecorp/proxyfile/internal/tree"
 )
 
-// Checked reads the file at path as YAML and returns its tree when spec accepts it. Otherwise it returns the
-// problems of the first step that finds any, sorted: reading the file, its syntax, then the check against spec.
+// Checked reads the file at path with the YAML front. The origins and methods files are JSON, which the YAML front
+// reads.
 func Checked(path string, spec format.Field) (*tree.Node, []model.Problem) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, model.FileProblem(path, "the file cannot be read: "+withoutPath(err))
-	}
-	root, problems := tree.FromYAML(path, data)
+	return CheckedWith(path, spec, YAMLFile)
+}
+
+// CheckedWith reads the file at path with front and returns its tree when spec accepts it. Otherwise it returns the
+// problems of the first step that finds any, sorted: reading the file, its syntax, then the check against spec.
+//
+// Each front reads its own file, rather than taking bytes read here, because the HOCON library resolves an include
+// relative to the including file only when it opens that file itself.
+func CheckedWith(path string, spec format.Field,
+	front func(path string) (*tree.Node, []model.Problem)) (*tree.Node, []model.Problem) {
+	root, problems := front(path)
 	if problems != nil {
 		return nil, problems
 	}
@@ -30,10 +34,11 @@ func Checked(path string, spec format.Field) (*tree.Node, []model.Problem) {
 	return root, nil
 }
 
-// The problem already starts with the path, so the path inside an os error would be written twice.
-func withoutPath(err error) string {
-	if pathErr, ok := errors.AsType[*fs.PathError](err); ok {
-		return pathErr.Err.Error()
+// YAMLFile is the YAML front: it reads the file at path and builds its tree.
+func YAMLFile(path string) (*tree.Node, []model.Problem) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, []model.Problem{model.CannotRead(path, err)}
 	}
-	return err.Error()
+	return tree.FromYAML(path, data)
 }

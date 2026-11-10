@@ -217,8 +217,9 @@ func wholeNumberIn(text string, lowest, highest int64) bool {
 	return number >= lowest && (highest == 0 || number <= highest)
 }
 
-// choose picks the choice that fits n: for a mapping, the Map choice whose Select key it has, else the Map choice
-// without Select; for a single value, the Text choice. It returns nil when no choice fits n's kind.
+// choose picks the choice that fits n: for a mapping, the Map choice whose Select key it has, else the Map or Dict
+// choice without Select, as a Dict's keys are the writer's and none can select it; for a single value, the Text
+// choice. It returns nil when no choice fits n's kind.
 func choose(choices []Field, n *tree.Node) *Field {
 	var fallback *Field
 	for i := range choices {
@@ -228,7 +229,7 @@ func choose(choices []Field, n *tree.Node) *Field {
 			if n.Get(choice.Select) != nil {
 				return choice
 			}
-		case n.Kind == tree.Map && choice.Kind == Map, n.Kind == tree.Scalar && choice.Kind == Text:
+		case n.Kind == tree.Map && (choice.Kind == Map || choice.Kind == Dict), n.Kind == tree.Scalar && choice.Kind == Text:
 			fallback = choice
 		}
 	}

@@ -259,9 +259,9 @@ type splice struct {
 	node *yaml.Node
 }
 
-// virtualHost is the data of one environment's virtual host. The RBAC principals and the CORS list take the origins
-// file's origins and patterns from the same lists, so CORS admits no origin RBAC refuses. RBAC also admits an origin on
-// one of the environment's own hosts (SameOriginRegex), which the CORS list does not hold.
+// virtualHost is the data of one environment's virtual host. The RBAC principals and the CORS list take the
+// environment's origins and patterns from the same lists, so CORS admits no origin RBAC refuses. RBAC also admits an
+// origin on one of the environment's own hosts (SameOriginRegex), which the CORS list does not hold.
 func virtualHost(environment origins.Environment, cors origins.CORS) data {
 	sameOrigin := make([]string, len(environment.Hosts))
 	for i, host := range environment.Hosts {

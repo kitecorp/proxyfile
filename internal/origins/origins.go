@@ -1,5 +1,5 @@
-// Package origins reads the origins file: the CORS settings every environment shares and, for each environment,
-// its hosts and the browser origins it admits.
+// Package origins reads the browser origins: the CORS settings every environment shares and, for each environment,
+// its hosts and the browser origins it admits. They are written in the proxyfile, or in an origins file it names.
 package origins
 
 import (
@@ -13,7 +13,7 @@ import (
 	"github.com/kitecorp/proxyfile/internal/tree"
 )
 
-// File is the origins file after reading, with every rule below checked.
+// File is the origins after reading, from either place, with every rule below checked.
 type File struct {
 	CORS         CORS
 	Environments []Environment // written order
@@ -24,7 +24,7 @@ type CORS struct{ AllowMethods, AllowHeaders, ExposeHeaders, MaxAge string } // 
 type Environment struct {
 	Name                     string
 	Hosts, Origins, Patterns []string  // nil when not written or empty
-	Pos                      model.Pos // the environment's mapping
+	Pos                      model.Pos // the environment's mapping in an origins file; its key in the proxyfile
 }
 
 // list is the rule of one list of an environment: each value has the form valid admits, and the values are sorted
@@ -61,7 +61,37 @@ func Read(path string) (*File, []model.Problem) {
 	if problems != nil {
 		return nil, problems
 	}
-	cors := root.Get("cors")
+	holder := root.Get("environments")
+	var list []writtenEnvironment
+	for _, item := range holder.Items {
+		name := item.Get("name")
+		list = append(list, writtenEnvironment{name: name.Text, namePos: name.Pos, pos: item.Pos, item: item})
+	}
+	return read(root.Get("cors"), holder, "the file names no environment", list)
+}
+
+// Inline reads the origins written in the proxyfile: environments is its origins mapping, which the format check
+// accepted, and cors its cors mapping, or nil when not written. Each entry is one environment, named by its key.
+func Inline(cors, environments *tree.Node) (*File, []model.Problem) {
+	var list []writtenEnvironment
+	for _, entry := range environments.Entries {
+		list = append(list, writtenEnvironment{name: entry.Key, namePos: entry.KeyPos, pos: entry.KeyPos, item: entry.Value})
+	}
+	return read(cors, environments, `"origins" names no environment`, list)
+}
+
+// writtenEnvironment is one environment as either place writes it: its name, where a problem with the name points,
+// where the environment is, and the mapping of its lists.
+type writtenEnvironment struct {
+	name         string
+	namePos, pos model.Pos
+	item         *tree.Node
+}
+
+// read fills the File from the CORS mapping and the environments, applying every rule below, and returns it or the
+// problems, sorted. holder is the node that holds the environments, and none the message when it holds none, which
+// each place words for itself.
+func read(cors, holder *tree.Node, none string, list []writtenEnvironment) (*File, []model.Problem) {
 	r := reader{names: map[string]bool{}, firstWithHost: map[string]int{}}
 	file := &File{
 		CORS: CORS{
@@ -70,7 +100,7 @@ func Read(path string) (*File, []model.Problem) {
 			ExposeHeaders: cors.GetText("expose_headers"),
 			MaxAge:        cors.GetText("max_age"),
 		},
-		Environments: r.environments(root.Get("environments")),
+		Environments: r.environments(holder, none, list),
 	}
 	if problems := r.Sorted(); problems != nil {
 		return nil, problems
@@ -87,16 +117,15 @@ type reader struct {
 	firstWithHost map[string]int // the index of the first environment that lists the host
 }
 
-func (r *reader) environments(n *tree.Node) []Environment {
+func (r *reader) environments(holder *tree.Node, none string, list []writtenEnvironment) []Environment {
 	// The generator writes one virtual host per environment, and Envoy's router answers a request no route takes with
-	// 404 (source/common/router/router.cc), so a file with none would refuse every request.
-	if len(n.Items) == 0 {
-		r.Add(n.Pos, "the file names no environment")
+	// 404 (source/common/router/router.cc), so origins with no environment would refuse every request.
+	if len(list) == 0 {
+		r.Add(holder.Pos, "%s", none)
 	}
 	var environments []Environment
-	for i, item := range n.Items {
-		nameNode, hosts := item.Get("name"), item.Get("hosts")
-		name := nameNode.Text
+	for i, w := range list {
+		name, item, hosts := w.name, w.item, w.item.Get("hosts")
 		// The generator names each virtual host after its environment, and Envoy refuses a virtual host with an empty
 		// name (min_len 1 on VirtualHost.name) or with no domain (min_items 1 on VirtualHost.domains), both in
 		// api/envoy/config/route/v3/route_components.proto. The message about an empty name counts the environment from
@@ -104,9 +133,9 @@ func (r *reader) environments(n *tree.Node) []Environment {
 		// environment with no name is not also reported as listed twice.
 		switch {
 		case name == "":
-			r.Add(nameNode.Pos, "environment %d: the name is empty", i+1)
+			r.Add(w.namePos, "environment %d: the name is empty", i+1)
 		case r.names[name]:
-			r.Add(item.Pos, "environment %q is listed twice", name)
+			r.Add(w.pos, "environment %q is listed twice", name)
 		}
 		r.names[name] = true
 		if len(hosts.Items) == 0 {
@@ -118,7 +147,7 @@ func (r *reader) environments(n *tree.Node) []Environment {
 			Hosts:    r.values(name, item, hostList),
 			Origins:  r.values(name, item, originList),
 			Patterns: r.values(name, item, patternList),
-			Pos:      item.Pos,
+			Pos:      w.pos,
 		})
 	}
 	return environments

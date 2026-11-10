@@ -9,6 +9,7 @@ import (
 
 	"github.com/kitecorp/proxyfile/internal/model"
 	"github.com/kitecorp/proxyfile/internal/testsupport"
+	"github.com/kitecorp/proxyfile/internal/tree"
 )
 
 func TestPatternRegex(t *testing.T) {
@@ -164,6 +165,50 @@ func TestRead(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, &c.want) {
 				t.Errorf("Read() = %#v, want %#v", got, &c.want)
+			}
+		})
+	}
+}
+
+// The environments written in the proxyfile are each named by their key and placed at it, keep the order written,
+// and follow the rules of an origins file. The first row is TestRead's first row written in the proxyfile.
+func TestInline(t *testing.T) {
+	cases := []struct {
+		name, document string
+		want           *File // nil when the row expects problems
+		problems       []string
+	}{
+		{name: "every key", document: testsupport.Document{
+			`cors: {allow_methods: "GET,POST", allow_headers: authorization, expose_headers: x-request-id, max_age: "600"}`,
+			`origins:`,
+			`  test: {hosts: [api.example.com, example.com], origins: ["https://example.com", "https://www.example.com"], patterns: ["http://localhost:*", "https://*.example.com"]}`,
+			`  live: {hosts: [api.example.org]}`,
+		}.String(), want: &File{
+			CORS: CORS{AllowMethods: "GET,POST", AllowHeaders: "authorization", ExposeHeaders: "x-request-id", MaxAge: "600"},
+			Environments: []Environment{
+				{Name: "test", Hosts: []string{"api.example.com", "example.com"},
+					Origins:  []string{"https://example.com", "https://www.example.com"},
+					Patterns: []string{"http://localhost:*", "https://*.example.com"}, Pos: model.Pos{File: "g.yaml", Line: 3, Column: 3}},
+				{Name: "live", Hosts: []string{"api.example.org"}, Pos: model.Pos{File: "g.yaml", Line: 4, Column: 3}},
+			},
+		}},
+		{name: "no environment", document: "origins: {}\n",
+			problems: []string{`g.yaml:1:10: "origins" names no environment`}},
+		{name: "host in two environments", document: "origins: {a: {hosts: [x.example]}, b: {hosts: [x.example]}}\n",
+			problems: []string{`g.yaml:1:48: environment "b": the host "x.example" is in two environments`}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root, problems := tree.FromYAML("g.yaml", []byte(c.document))
+			if problems != nil {
+				t.Fatalf("FromYAML problems = %q, want none", testsupport.ProblemStrings(problems))
+			}
+			got, problems := Inline(root.Get("cors"), root.Get("origins"))
+			if gotProblems := testsupport.ProblemStrings(problems); !slices.Equal(gotProblems, c.problems) {
+				t.Errorf("problems = %q, want %q", gotProblems, c.problems)
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("Inline() = %#v, want %#v", got, c.want)
 			}
 		})
 	}

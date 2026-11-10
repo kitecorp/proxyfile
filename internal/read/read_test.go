@@ -24,6 +24,18 @@ var b = testsupport.Document{
 	"  - {name: web, prefix: /, to: web}",
 }
 
+// bHOCON is b written in HOCON, which the HOCON rows change, one change each.
+var bHOCON = `listen = 8000
+services {
+  web { http = 3000 }
+  rpc-backend { grpc = 5000 }
+}
+origins = origins.json
+routes = [
+  { name = web, prefix = /, to = web }
+]
+`
+
 func TestReadProblems(t *testing.T) {
 	cases := []struct {
 		name string
@@ -60,8 +72,23 @@ func TestReadProblems(t *testing.T) {
 			want: []string{`g.yaml:8:8: listen and admin are the same port 8000`}},
 		{name: "address", document: b.Replaced(3, 3, "  web: {http: 3000, address: localhost}"),
 			want: []string{`g.yaml:3:30: service "web": the address "localhost" is not an IP address`}},
+		{name: "cors with an origins file", document: b.Inserted(6, `cors: {max_age: "600"}`),
+			want: []string{`g.yaml:6:1: "cors" is written in the origins file when "origins" names a file`}},
+		// The origins are read in the meaning rules' stage, so one run names the problems of both, sorted.
+		{name: "origins and meaning in one stage", document: b.Replaced(5, 7, "origins:", "  live: {hosts: [b.example, a.example]}",
+			"routes:", "  - {name: web, prefix: /, to: web, auth: off}"),
+			want: []string{
+				`g.yaml:6:17: environment "live": the hosts are not sorted, or list one twice`,
+				`g.yaml:8:43: route "web" turns auth off, but no auth is declared`,
+			}},
 		{name: "file name", file: "g.txt", document: b.String(),
-			want: []string{`g.txt: proxyfile reads files ending in .yaml or .yml`}},
+			want: []string{`g.txt: proxyfile reads a file named Proxyfile or ending in .conf, .yaml or .yml`}},
+		// The name is matched exactly and by case: a file with none of the three extensions is read only when it is
+		// named Proxyfile.
+		{name: "file name by case", file: "proxyfile", document: bHOCON,
+			want: []string{`proxyfile: proxyfile reads a file named Proxyfile or ending in .conf, .yaml or .yml`}},
+		{name: "file name ending in Proxyfile", file: "myProxyfile", document: bHOCON,
+			want: []string{`myProxyfile: proxyfile reads a file named Proxyfile or ending in .conf, .yaml or .yml`}},
 		// A gateway with no service or no route would start and answer 404 to every request.
 		{name: "no service", document: b.Replaced(2, 4, "services: {}"), want: []string{
 			`g.yaml:2:1: no service is declared`,
@@ -134,6 +161,44 @@ func TestReadProblems(t *testing.T) {
 		{name: "file missing", file: "missing.yaml", absent: true,
 			want: []string{`missing.yaml: the file cannot be read: no such file or directory`}},
 		{name: "yml file name", file: "g.yml", document: b.String()},
+		// A HOCON value has no line, so a problem found after the syntax names the value's key path. The first three rows
+		// show that the key paths reach the rules, the decoded routes and the check; the YAML text row shows that the
+		// name picks the form, not the content.
+		{name: "HOCON: rules", file: "Proxyfile", document: strings.Replace(bHOCON, "to = web }", "to = wbe }", 1),
+			want: []string{`Proxyfile: routes[0].to: route "web": the service "wbe" is not declared`}},
+		{name: "HOCON: route position", file: "g.conf",
+			document: strings.Replace(bHOCON, "\n]", "\n  { name = web2, prefix = /, to = web }\n]", 1),
+			want:     []string{`g.conf: routes[1]: route "web2" matches what route "web" at routes[0] matches`}},
+		{name: "HOCON: two rpc entries", file: "g.conf",
+			document: strings.Replace(bHOCON, "routes = [\n",
+				"routes = [\n  { rpc { to { \"*\" = rpc-backend } } }\n  { rpc { to { \"*\" = rpc-backend } } }\n", 1),
+			want: []string{`g.conf: routes[1]: the routes have more than one rpc entry (the first is at routes[0])`}},
+		{name: "HOCON: format check", file: "g.conf", document: strings.Replace(bHOCON, "listen = 8000", "liste = 8000", 1),
+			want: []string{
+				`g.conf: "listen" is required here`,
+				`g.conf: liste: unknown key "liste"; known here: admin, auth, cors, limits, listen, log, namespace, origins, remove_from_clients, routes, rpc, services, timeouts`,
+			}},
+		{name: "HOCON: YAML text", file: "g.conf", document: b.String(),
+			want: []string{`g.conf:3:6: unexpected token 11`}},
+		// An unquoted dot in a HOCON key starts a nested key, so this RPC pattern becomes three keys deep, not one.
+		{name: "HOCON: dotted rpc key", file: "g.conf",
+			document: strings.Replace(bHOCON, "routes = [\n", "routes = [\n  { rpc { to { example.v1.x = rpc-backend } } }\n", 1),
+			want: []string{
+				`g.conf: routes[0].rpc.to.example: "service" is required here`,
+				`g.conf: routes[0].rpc.to.example.v1: unknown key "v1"; known here: name, service`,
+			}},
+		{name: "HOCON: route names twice", file: "g.conf",
+			document: strings.Replace(bHOCON, "\n]", "\n  { name = web, path = /a, to = web }\n]", 1),
+			want:     []string{`g.conf: routes[1].name: route "web" is declared twice (the first is at routes[0].name)`}},
+		// The origins written in the proxyfile follow the origins file's rules, and cors the check's rules.
+		{name: "HOCON: origins inline", file: "g.conf",
+			document: strings.Replace(bHOCON, "origins = origins.json", "origins { live { hosts = [b.example, a.example] } }", 1),
+			want:     []string{`g.conf: origins.live.hosts: environment "live": the hosts are not sorted, or list one twice`}},
+		{name: "HOCON: max_age as a number", file: "g.conf", document: strings.Replace(bHOCON, "origins = origins.json",
+			"cors { max_age = 600 }\norigins { live { hosts = [a.example] } }", 1),
+			want: []string{`g.conf: cors.max_age: "max_age" must be text; quote it`}},
+		{name: "HOCON: file missing", file: "missing.conf", absent: true,
+			want: []string{`missing.conf: the file cannot be read: no such file or directory`}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -142,12 +207,12 @@ func TestReadProblems(t *testing.T) {
 			if !c.absent {
 				testsupport.WriteFile(t, path, c.document)
 			}
-			g, problems := Proxyfile(path)
+			file, problems := Proxyfile(path)
 			got := testsupport.ProblemStringsIn(dir, problems)
 			if !slices.Equal(got, c.want) {
 				t.Errorf("problems = %q, want %q", got, c.want)
 			}
-			if gotModel, wantModel := g != nil, len(c.want) == 0; gotModel != wantModel {
+			if gotModel, wantModel := file != nil, len(c.want) == 0; gotModel != wantModel {
 				t.Errorf("model returned = %t, want %t", gotModel, wantModel)
 			}
 		})
@@ -168,13 +233,13 @@ func runChecks(t *testing.T, checks []check) {
 	}
 }
 
-func readExample(t *testing.T, name string) *model.Gateway {
+func readExample(t *testing.T, name string) *File {
 	t.Helper()
-	g, problems := Proxyfile("../../examples/" + name + "/gateway.yaml")
+	file, problems := Proxyfile("../../examples/" + name + "/gateway.yaml")
 	if problems != nil {
 		t.Fatalf("problems = %q, want none", testsupport.ProblemStrings(problems))
 	}
-	return g
+	return file
 }
 
 func ports(g *model.Gateway) []string {
@@ -261,7 +326,18 @@ func millis(ts ...*model.Time) []int64 {
 }
 
 func TestReadFullExample(t *testing.T) {
-	g := readExample(t, "full")
+	file := readExample(t, "full")
+	g := file.Gateway
+	if file.Origins == nil {
+		t.Fatal("Origins = nil, want the origins the example writes")
+	}
+	if file.MethodsKey == nil {
+		t.Fatal("MethodsKey = nil, want the methods key the example writes")
+	}
+	var environments []string
+	for _, environment := range file.Origins.Environments {
+		environments = append(environments, environment.Name)
+	}
 	runChecks(t, []check{
 		{"namespace", g.Namespace, "example.gateway"},
 		{"listen", g.Listen.Number, int64(10000)},
@@ -281,7 +357,8 @@ func TestReadFullExample(t *testing.T) {
 		{"accept", headers(g.Auth.Accept), []string{"x-user- prefix", "x-tier- prefix"}},
 		{"remove from clients", headers(g.RemoveFromClients),
 			[]string{"x-user- prefix", "x-client- prefix", "x-tier- prefix", "x-gateway- prefix"}},
-		{"origins", g.Origins.Value, "origins.json"},
+		{"origins", g.Origins.Value, ""},
+		{"environments", strings.Join(environments, ","), "live,test,local"},
 		{"routes", routes(g), []string{"accounts-events pattern", "rpc", "accounts-webhooks path", "shop prefix"}},
 		{"route keys", routeKeys(g), []string{
 			`accounts-events "^/events/[a-z0-9-]+$" "" to accounts rewrite "" auth off true retries 0`,
@@ -292,7 +369,9 @@ func TestReadFullExample(t *testing.T) {
 		{"targets", targets(g), []string{"example.shop.* shop shop", "* accounts accounts-rpc"}},
 		{"log", fmt.Sprint(g.Log.StatusFrom, g.Log.SamplePercent), "400 1"},
 		{"services key", g.ServicesPos, model.Pos{File: "../../examples/full/gateway.yaml", Line: 14, Column: 1}},
-		{"routes key", g.RoutesPos, model.Pos{File: "../../examples/full/gateway.yaml", Line: 27, Column: 1}},
+		{"routes key", g.RoutesPos, model.Pos{File: "../../examples/full/gateway.yaml", Line: 44, Column: 1}},
+		{"methods", len(file.Methods), 3},
+		{"methods key", *file.MethodsKey, model.Pos{File: "../../examples/full/gateway.yaml", Line: 54, Column: 3}},
 	})
 }
 
@@ -300,7 +379,7 @@ func TestReadFullExample(t *testing.T) {
 // denies, and addresses that are not the default.
 func TestReadOtherExamples(t *testing.T) {
 	t.Run("minimal", func(t *testing.T) {
-		g := readExample(t, "minimal")
+		g := readExample(t, "minimal").Gateway
 		runChecks(t, []check{
 			{"namespace", g.Namespace, "proxyfile"},
 			{"admin", g.Admin, (*model.Port)(nil)},
@@ -315,7 +394,7 @@ func TestReadOtherExamples(t *testing.T) {
 		})
 	})
 	t.Run("partial", func(t *testing.T) {
-		g := readExample(t, "partial")
+		g := readExample(t, "partial").Gateway
 		runChecks(t, []check{
 			{"namespace", g.Namespace, "proxyfile"},
 			{"admin", g.Admin, (*model.Port)(nil)},

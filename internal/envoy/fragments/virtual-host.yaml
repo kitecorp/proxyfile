@@ -1,6 +1,7 @@
-# One virtual host per environment of the origins file. Each key of typed_per_filter_config names an http filter by
-# its name in the listener's list (Envoy 1.40.2, http_filters.rst, "Route specific config"). No route sets its own
-# for these two filters, so these settings hold for every route of the virtual host.
+# One virtual host per environment of the origins, written in the proxyfile or in an origins file. Each key of
+# typed_per_filter_config names an http filter by its name in the listener's list (Envoy 1.40.2, http_filters.rst,
+# "Route specific config"). No route sets its own for these two filters, so these settings hold for every route of
+# the virtual host.
 name: {{q .Name}}
 domains: [{{range $i, $host := .Hosts}}{{if $i}}, {{end}}{{q $host}}{{end}}]
 typed_per_filter_config:
@@ -12,7 +13,7 @@ typed_per_filter_config:
         policies:
           # Envoy matches the principals with OR semantics (config/rbac/v3/rbac.proto), so a request passes when it
           # carries no Origin, when its Origin is one of the virtual host's own domains on either scheme and any port,
-          # or when the origins file admits it; a single permission with any covers every request.
+          # or when the environment's origins or patterns admit it; a single permission with any covers every request.
           browser-origins:
             permissions: [{any: true}]
             principals:

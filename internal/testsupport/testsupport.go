@@ -48,6 +48,15 @@ func WriteFile(t testing.TB, path, text string) {
 	}
 }
 
+// PartialMethods is the rpc.methods block that, appended to examples/partial/gateway.yaml, writes in the proxyfile
+// what examples/partial/methods.json lists, so a render that reads it must give that example's committed files.
+const PartialMethods = "rpc:\n  methods:\n" +
+	"    - {service: example.backend.v1.ReportService, method: ListReports, action: read, reports: [export, share]}\n"
+
+// MinimalInlineOrigins is the origins block of examples/minimal/gateway.yaml. The tests that need the file form, which
+// no example writes, replace it with "origins: <file>".
+const MinimalInlineOrigins = "origins:\n  all: {hosts: [localhost], origins: [\"http://localhost:3000\"]}\n"
+
 // Document is a valid file kept one line per item, so that each test row changes it by line number and the row's
 // expected positions can be counted from the change alone.
 type Document []string

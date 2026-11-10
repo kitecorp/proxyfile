@@ -1,7 +1,7 @@
 # A browser origin the request's virtual host does not admit is refused here with 403, preflight, request and
 # WebSocket upgrade alike, before CORS, ext_authz or any upstream sees it; a request without an Origin header passes.
-# The rules are per virtual host (from the origins file); this filter has none of its own, and without rules it
-# enforces nothing (Envoy 1.40.2, rbac.proto: "If absent, no RBAC enforcement occurs").
+# The rules are per virtual host, so per environment of the origins; this filter has none of its own, and without
+# rules it enforces nothing (Envoy 1.40.2, rbac.proto: "If absent, no RBAC enforcement occurs").
 name: envoy.filters.http.rbac
 typed_config:
   "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBAC

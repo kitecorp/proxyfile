@@ -10,17 +10,22 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/kitecorp/proxyfile/internal/format"
 	"github.com/kitecorp/proxyfile/internal/model"
 	"github.com/kitecorp/proxyfile/internal/render"
 )
 
-const usage = `usage: proxyfile render <file> -o <envoy.yaml> [--rpc-methods <methods.json>] [--rpc-table <table.json>]
-       proxyfile check <file> -o <envoy.yaml> [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+const usage = `usage: proxyfile render [<file>] -o <envoy.yaml> [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+       proxyfile check [<file>] -o <envoy.yaml> [--rpc-methods <methods.json>] [--rpc-table <table.json>]
        proxyfile schema
        proxyfile version
 `
+
+// defaultNames are the files render and check look for in the working directory when no file is given, in the order
+// the messages list them.
+var defaultNames = []string{"Proxyfile", "proxyfile.conf", "proxyfile.yaml", "proxyfile.yml"}
 
 // The exit codes: done, a problem in the input or a difference check found, and wrong usage.
 const (
@@ -86,7 +91,9 @@ func Run(args []string, stdout, stderr io.Writer, version string) int {
 }
 
 // request reads the arguments of render and check. Go's flag package stops at the first argument that is not a flag,
-// so the file may come before the flags only if each positional argument is taken off and the rest parsed again.
+// so the file may come before the flags only if each positional argument is taken off and the rest parsed again. With
+// no file argument, the default file is looked for after the other argument checks, so a mistake in the arguments is
+// reported whatever the working directory holds.
 func request(command string, args []string) (render.Request, error) {
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	// Run writes every message itself, so the package's own usage text never appears.
@@ -108,21 +115,49 @@ func request(command string, args []string) (render.Request, error) {
 	switch {
 	case *out == "":
 		return render.Request{}, errors.New("-o is required")
-	case len(files) != 1:
+	case len(files) > 1:
 		return render.Request{}, errors.New("give exactly one file")
-	case *table != "" && *methods == "":
-		return render.Request{}, errors.New("--rpc-table needs --rpc-methods")
+	}
+	if len(files) == 0 {
+		file, err := defaultFile()
+		if err != nil {
+			return render.Request{}, err
+		}
+		files = []string{file}
 	}
 	return render.Request{Proxyfile: files[0], Out: *out, RPCMethods: *methods, RPCTable: *table}, nil
 }
 
-// outputs reads every input of req and returns every output in memory, or the problems of the inputs, or the usage
-// error of an output that would overwrite an input. That rule runs after the read, because the origins file is named
-// in the proxyfile, not on the command line.
+// defaultFile returns the one name of defaultNames that is a regular file in the working directory. Two or more are
+// refused rather than ranked: two files that may disagree are a mistake, and choosing one would hide the other.
+func defaultFile() (string, error) {
+	var found []string
+	for _, name := range defaultNames {
+		if info, err := os.Stat(name); err == nil && info.Mode().IsRegular() {
+			found = append(found, name)
+		}
+	}
+	switch len(found) {
+	case 0:
+		last := len(defaultNames) - 1
+		return "", fmt.Errorf("no file given and no %s or %s here", strings.Join(defaultNames[:last], ", "), defaultNames[last])
+	case 1:
+		return found[0], nil
+	}
+	return "", fmt.Errorf("more than one default file here: %s; give the file", strings.Join(found, ", "))
+}
+
+// outputs reads every input of req and returns every output in memory, or the problems of the inputs, or a usage
+// error: an RPC table with no methods to fill it, or an output that would overwrite an input. Both rules run after
+// the read, because the proxyfile may write the methods and name the origins file, neither of which the command line
+// shows.
 func outputs(req render.Request) ([]render.File, []model.Problem, error) {
 	run, problems := render.Read(req)
 	if problems != nil {
 		return nil, problems, nil
+	}
+	if req.RPCTable != "" && !run.HasMethods() {
+		return nil, nil, errors.New("--rpc-table needs rpc.methods or --rpc-methods")
 	}
 	if overwritesAnInput(req, run.Inputs()) {
 		return nil, nil, errors.New("an output path names an input or the other output")

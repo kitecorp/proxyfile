@@ -57,7 +57,7 @@ func TestCheck(t *testing.T) {
 		{name: "full example", spec: Proxyfile, file: "../../examples/full/gateway.yaml"},
 		{name: "unknown key", spec: Proxyfile, document: m.Replaced(1, 1, "liste: 8000"), want: []string{
 			`g.yaml:1:1: "listen" is required here`,
-			`g.yaml:1:1: unknown key "liste"; known here: admin, auth, limits, listen, log, namespace, origins, remove_from_clients, routes, services, timeouts`,
+			`g.yaml:1:1: unknown key "liste"; known here: admin, auth, cors, limits, listen, log, namespace, origins, remove_from_clients, routes, rpc, services, timeouts`,
 		}},
 		{name: "wrong kind", spec: Proxyfile, document: m.Replaced(2, 3, "services: 5"),
 			want: []string{`g.yaml:2:11: "services" must be a mapping`}},
@@ -125,6 +125,25 @@ func TestCheck(t *testing.T) {
 		// The name matches its pattern, but a YAML reader takes 404 as a number, which the JSON Schema refuses.
 		{name: "plain number as text", spec: Proxyfile, document: m.Replaced(6, 6, "  - {name: 404, prefix: /, to: app}"),
 			want: []string{`g.yaml:6:12: "name" must be text; quote it`}},
+		// origins holds the environments by name, or names an origins file as in 1.0; m writes the file form.
+		{name: "origins inline", spec: Proxyfile, document: m.Replaced(4, 4, "origins:", "  all: {hosts: [localhost]}")},
+		{name: "origins a list", spec: Proxyfile, document: m.Replaced(4, 4, "origins: [a]"),
+			want: []string{`g.yaml:4:10: "origins" must be a mapping of environments by name, or a file name`}},
+		{name: "environment name empty", spec: Proxyfile, document: m.Replaced(4, 4, "origins:", "  \"\": {hosts: [localhost]}"),
+			want: []string{`g.yaml:5:3: the environment name "" must be one character or more`}},
+		// The key is the environment's name, so the name key of an origins file's environment is not known here.
+		{name: "environment with a name key", spec: Proxyfile,
+			document: m.Replaced(4, 4, "origins:", "  all: {hosts: [localhost], name: all}"),
+			want:     []string{`g.yaml:5:29: unknown key "name"; known here: hosts, origins, patterns`}},
+		{name: "cors max_age a number", spec: Proxyfile,
+			document: m.Replaced(4, 4, "cors: {max_age: 600}", "origins:", "  all: {hosts: [localhost]}"),
+			want:     []string{`g.yaml:4:17: "max_age" must be text; quote it`}},
+		// The RPC methods may be written in the proxyfile, as the methods file writes them; rpc holds nothing else, so
+		// an rpc written without them is a mistake.
+		{name: "rpc methods inline", spec: Proxyfile,
+			document: m.Inserted(7, "rpc: {methods: [{service: shop.v1.CartService, method: AddItem}]}")},
+		{name: "rpc without methods", spec: Proxyfile, document: m.Inserted(7, "rpc: {}"),
+			want: []string{`g.yaml:7:6: "methods" is required here`}},
 	})
 }
 

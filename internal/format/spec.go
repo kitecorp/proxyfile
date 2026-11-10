@@ -44,8 +44,8 @@ type Field struct {
 	Expect   string   // Text, Key, Either: completes "must be ..."
 	Min, Max int64    // Int; Max 0 is no maximum. int64, not int, so a uint32 limit fits on a 32-bit build too
 	Values   []string // Enum
-	Choices  []Field  // Either: a Text choice and Map choices
-	Select   string   // a Map choice of an Either: chosen when the node has this key; the Map choice without Select is the default
+	Choices  []Field  // Either: a Text choice, and Map or Dict choices
+	Select   string   // a Map choice of an Either: chosen when the node has this key; the Map or Dict choice without Select is the default
 }
 
 const (
@@ -152,8 +152,13 @@ var Proxyfile = Field{
 			headers("accept", "The headers of the check's answer that reach the service; a name ending in * is a prefix."),
 		}},
 		headers("remove_from_clients", "Headers removed from every client request before routing and before any filter; a name ending in * is a prefix."),
-		{Name: "origins", Doc: "The origins file, relative to this file: the CORS settings and, for each environment, its hosts and the browser origins it admits.",
-			Kind: Text, Required: true, Pattern: `^[^\t\n\f\r ]+$`, Expect: "a file name"},
+		corsField,
+		{Name: "origins", Doc: "The browser origins each environment admits, by environment name; or, as in 1.0, the name of an origins file, relative to this file.",
+			Kind: Either, Required: true, Expect: "a mapping of environments by name, or a file name", Choices: []Field{
+				{Kind: Text, Pattern: `^[^\t\n\f\r ]+$`, Expect: "a file name"},
+				{Kind: Dict, Key: &Field{Name: "environment name", Kind: Text, Pattern: `[\s\S]`, Expect: "one character or more"},
+					Item: &Field{Doc: "One environment: its hosts and the browser origins it admits.", Kind: Map, Fields: environmentLists}},
+			}},
 		{Name: "routes", Doc: "The routes, tried in the order written; the rpc entry marks where the RPC routes go.", Kind: List, Required: true,
 			Item: &Field{Kind: Either, Expect: "a mapping: a route or an rpc entry", Choices: []Field{
 				{Doc: "The place in the order where the RPC routes go.", Kind: Map, Select: "rpc", Fields: []Field{
@@ -189,6 +194,10 @@ var Proxyfile = Field{
 					retries("How many times a request that never reached the service is tried again."),
 				}},
 			}}},
+		{Name: "rpc", Doc: "The RPC methods the gateway routes; the routes' rpc entry maps them to services.", Kind: Map, Fields: []Field{
+			{Name: "methods", Doc: "One entry for each RPC method the gateway routes, as a build writes them from the gRPC descriptors.",
+				Kind: List, Required: true, Item: &methodField},
+		}},
 		{Name: "log", Doc: "Which requests the request log writes.", Kind: Map, Fields: []Field{
 			{Name: "status_from", Doc: "The lowest status that is always logged.", Kind: Int, Required: true, Min: 100, Max: 599},
 			{Name: "sample", Doc: "The share of the other requests that is logged.", Kind: Text, Required: true,
@@ -197,26 +206,35 @@ var Proxyfile = Field{
 	},
 }
 
+// corsField and environmentLists are written once and used by both places the origins may be written: the proxyfile,
+// where each environment is named by its key, and an origins file, where it is named by its name key. So a key means
+// the same in both places and is checked by the same rule.
+var (
+	corsField = Field{Name: "cors", Doc: "The CORS settings every environment shares.", Kind: Map, Fields: []Field{
+		{Name: "allow_methods", Doc: "The value of Access-Control-Allow-Methods.", Kind: Text},
+		{Name: "allow_headers", Doc: "The value of Access-Control-Allow-Headers.", Kind: Text},
+		{Name: "expose_headers", Doc: "The value of Access-Control-Expose-Headers.", Kind: Text},
+		{Name: "max_age", Doc: "The value of Access-Control-Max-Age: how long a browser may keep a preflight answer.",
+			Kind: Text, Pattern: `^[0-9]+$`, Expect: "a number of seconds"},
+	}}
+	environmentLists = []Field{
+		texts("hosts", "The host names the environment serves, without a port.", true),
+		texts("origins", "The browser origins admitted exactly, each scheme://host[:port].", false),
+		texts("patterns", "The browser origins admitted by pattern, where * matches any run of characters.", false),
+	}
+)
+
 // The rules for hosts, origins and patterns belong to the origins reader, which names the environment in its
 // messages; this description checks only the keys and the kinds.
 var Origins = Field{
 	Doc:  "The origins file: the CORS settings and, for each environment, its hosts and the browser origins it admits.",
 	Kind: Map,
 	Fields: []Field{
-		{Name: "cors", Doc: "The CORS settings every environment shares.", Kind: Map, Fields: []Field{
-			{Name: "allow_methods", Doc: "The value of Access-Control-Allow-Methods.", Kind: Text},
-			{Name: "allow_headers", Doc: "The value of Access-Control-Allow-Headers.", Kind: Text},
-			{Name: "expose_headers", Doc: "The value of Access-Control-Expose-Headers.", Kind: Text},
-			{Name: "max_age", Doc: "The value of Access-Control-Max-Age: how long a browser may keep a preflight answer.",
-				Kind: Text, Pattern: `^[0-9]+$`, Expect: "a number of seconds"},
-		}},
+		corsField,
 		{Name: "environments", Doc: "The environments, each with its hosts and the browser origins it admits.", Kind: List, Required: true,
-			Item: &Field{Doc: "One environment.", Kind: Map, Fields: []Field{
+			Item: &Field{Doc: "One environment.", Kind: Map, Fields: slices.Concat([]Field{
 				{Name: "name", Doc: "The environment's name.", Kind: Text, Required: true},
-				texts("hosts", "The host names the environment serves, without a port.", true),
-				texts("origins", "The browser origins admitted exactly, each scheme://host[:port].", false),
-				texts("patterns", "The browser origins admitted by pattern, where * matches any run of characters.", false),
-			}}},
+			}, environmentLists)}},
 	},
 }
 
@@ -225,12 +243,16 @@ var Origins = Field{
 var Methods = Field{
 	Doc:  "The RPC methods the gateway routes, each with what the check is told about it.",
 	Kind: List,
-	Item: &Field{Doc: "One RPC method.", Kind: Map, Fields: []Field{
-		{Name: "service", Doc: "The full name of the method's service.", Kind: Text, Required: true,
-			Pattern: `^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$`, Expect: "a full service name such as shop.v1.CartService"},
-		{Name: "method", Doc: "The method's name.", Kind: Text, Required: true,
-			Pattern: `^[A-Za-z_][A-Za-z0-9_]*$`, Expect: "a method name such as AddItem"},
-		{Name: "action", Doc: "The action the check is told for this method.", Kind: Text},
-		texts("reports", "The reports the check is told for this method.", false),
-	}},
+	Item: &methodField,
 }
+
+// methodField is written once and used by both places the RPC methods may be written: the methods file and the
+// proxyfile's rpc.methods, so a method is checked by the same rules in both.
+var methodField = Field{Doc: "One RPC method.", Kind: Map, Fields: []Field{
+	{Name: "service", Doc: "The full name of the method's service.", Kind: Text, Required: true,
+		Pattern: `^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$`, Expect: "a full service name such as shop.v1.CartService"},
+	{Name: "method", Doc: "The method's name.", Kind: Text, Required: true,
+		Pattern: `^[A-Za-z_][A-Za-z0-9_]*$`, Expect: "a method name such as AddItem"},
+	{Name: "action", Doc: "The action the check is told for this method.", Kind: Text},
+	texts("reports", "The reports the check is told for this method.", false),
+}}

@@ -13,7 +13,7 @@ type Gateway struct {
 	ServicesPos       Pos       // the `services` key
 	Auth              *Auth
 	RemoveFromClients []Header
-	Origins           Text    // as written: absolute, or relative to the proxyfile's directory
+	Origins           Text    // the origins file as written, absolute or relative to the proxyfile's directory; "" when the proxyfile writes the origins
 	Routes            []Route // written order
 	RoutesPos         Pos     // the `routes` key
 	Log               *Log

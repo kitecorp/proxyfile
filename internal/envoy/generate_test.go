@@ -9,10 +9,10 @@ import (
 	"github.com/kitecorp/proxyfile/internal/origins"
 )
 
-// A value from the input comes out as written, whatever it holds. The origins file gives an environment's name no
-// pattern, so it can be any text. One that reads like a place to splice stays text: q writes it in quotes, and only a
-// plain $name is replaced. One with a line break stays in q's quotes too: as a literal block, a first line that starts
-// with a tab would not read back.
+// A value from the input comes out as written, whatever it holds. An environment's name can be any text: an origins
+// file gives it no pattern, and the proxyfile asks only for one character or more. One that reads like a place to
+// splice stays text: q writes it in quotes, and only a plain $name is replaced. One with a line break stays in q's
+// quotes too: as a literal block, a first line that starts with a tab would not read back.
 func TestInputTextComesOutAsWritten(t *testing.T) {
 	cases := []struct{ name, environment string }{
 		{"environment named like the routes' place", "$routes"},

@@ -64,6 +64,30 @@
       ],
       "type": "object"
     },
+    "cors": {
+      "additionalProperties": false,
+      "description": "The CORS settings every environment shares.",
+      "properties": {
+        "allow_headers": {
+          "description": "The value of Access-Control-Allow-Headers.",
+          "type": "string"
+        },
+        "allow_methods": {
+          "description": "The value of Access-Control-Allow-Methods.",
+          "type": "string"
+        },
+        "expose_headers": {
+          "description": "The value of Access-Control-Expose-Headers.",
+          "type": "string"
+        },
+        "max_age": {
+          "description": "The value of Access-Control-Max-Age: how long a browser may keep a preflight answer.",
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "limits": {
       "additionalProperties": false,
       "description": "Limits on memory, connections and request headers.",
@@ -138,9 +162,50 @@
       "type": "string"
     },
     "origins": {
-      "description": "The origins file, relative to this file: the CORS settings and, for each environment, its hosts and the browser origins it admits.",
-      "pattern": "^[^\\t\\n\\f\\r ]+$",
-      "type": "string"
+      "description": "The browser origins each environment admits, by environment name; or, as in 1.0, the name of an origins file, relative to this file.",
+      "oneOf": [
+        {
+          "pattern": "^[^\\t\\n\\f\\r ]+$",
+          "type": "string"
+        },
+        {
+          "additionalProperties": {
+            "additionalProperties": false,
+            "description": "One environment: its hosts and the browser origins it admits.",
+            "properties": {
+              "hosts": {
+                "description": "The host names the environment serves, without a port.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "origins": {
+                "description": "The browser origins admitted exactly, each scheme://host[:port].",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "patterns": {
+                "description": "The browser origins admitted by pattern, where * matches any run of characters.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "hosts"
+            ],
+            "type": "object"
+          },
+          "propertyNames": {
+            "pattern": "[\\s\\S]"
+          },
+          "type": "object"
+        }
+      ]
     },
     "remove_from_clients": {
       "description": "Headers removed from every client request before routing and before any filter; a name ending in * is a prefix.",
@@ -294,6 +359,52 @@
         ]
       },
       "type": "array"
+    },
+    "rpc": {
+      "additionalProperties": false,
+      "description": "The RPC methods the gateway routes; the routes' rpc entry maps them to services.",
+      "properties": {
+        "methods": {
+          "description": "One entry for each RPC method the gateway routes, as a build writes them from the gRPC descriptors.",
+          "items": {
+            "additionalProperties": false,
+            "description": "One RPC method.",
+            "properties": {
+              "action": {
+                "description": "The action the check is told for this method.",
+                "type": "string"
+              },
+              "method": {
+                "description": "The method's name.",
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                "type": "string"
+              },
+              "reports": {
+                "description": "The reports the check is told for this method.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "service": {
+                "description": "The full name of the method's service.",
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)+$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "service",
+              "method"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "methods"
+      ],
+      "type": "object"
     },
     "services": {
       "additionalProperties": {

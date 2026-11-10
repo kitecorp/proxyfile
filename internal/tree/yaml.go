@@ -14,12 +14,15 @@ import (
 	"github.com/kitecorp/proxyfile/internal/model"
 )
 
-// The block syntax has no aliases, merge keys or tags, and both syntaxes must accept the same files, so the YAML
-// front refuses all three rather than reading them its own way. Merge keys and tags have a second reason: they change
-// what a YAML reader takes the file to say, while the tree keeps only the text written, so proxyfile would read
-// another value than the reader does. When go-yaml decodes into a map, a merge key copies another mapping's keys in
-// (decoder.mapping and decoder.merge in decode.go), where the tree would hold one key named "<<"; and it decodes
-// "!!binary aGVsbG8=" as "hello" (decoder.scalar in decode.go), where the tree would hold the base64 text.
+// A YAML position is the line and column of a value's text, and an alias's text sits at its anchor, so a problem
+// reported at the alias would point at the anchor, where a fix changes every place that uses it. HOCON substitutions
+// are resolved by the library before the tree exists and each resolved value is placed by its own key path, so the
+// question does not arise there. So the YAML front refuses aliases, merge keys and tags rather than reading them its
+// own way. Merge keys and tags have a second reason: they change what a YAML reader takes the file to say, while the
+// tree keeps only the text written, so proxyfile would read another value than the reader does. When go-yaml decodes
+// into a map, a merge key copies another mapping's keys in (decoder.mapping and decoder.merge in decode.go), where the
+// tree would hold one key named "<<"; and it decodes "!!binary aGVsbG8=" as "hello" (decoder.scalar in decode.go),
+// where the tree would hold the base64 text.
 const (
 	aliasMessage = "aliases are not read; write the value out"
 	mergeMessage = "merge keys are not read; write the keys out"
