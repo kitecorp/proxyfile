@@ -1,5 +1,0 @@
-[
-  {"service": "example.shop.v1.CartService", "method": "GetCart", "action": "browse"},
-  {"service": "example.accounts.v1.ProfileService", "method": "GetProfile"},
-  {"service": "example.shop.v1.CartService", "method": "AddItem", "action": "buy", "reports": ["browse"]}
-]

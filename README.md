@@ -3,10 +3,11 @@ Generates a proxy's config from a short file. Envoy first.
 
 ## What proxyfile is
 
-A proxyfile is a short YAML file that describes one gateway: the services behind it, the routes to them, an optional
-external auth check, and the browser origins it admits. `proxyfile render` turns it into a complete Envoy
-configuration, written for Envoy 1.40. The same input always gives the same bytes, so you can commit the generated file
-and let `proxyfile check` fail a build when someone edits it by hand or forgets to render.
+A proxyfile is a short file, written in YAML or in HOCON, that describes one gateway: the services behind it, the routes
+to them, an optional external auth check, the browser origins it admits and, for RPC routes, the methods. `proxyfile
+render` turns it into a complete Envoy configuration, written for Envoy 1.40. The same input always gives the same
+bytes, so you can commit the generated file and let `proxyfile check` fail a build when someone edits it by hand or
+forgets to render.
 
 ## Install
 
@@ -15,8 +16,8 @@ The release has `proxyfile-linux-amd64`, `proxyfile-linux-arm64`, `proxyfile-dar
 `proxyfile-darwin-arm64`, with `checksums.txt` and `proxyfile.schema.json` beside them.
 
 ```sh
-curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v1.0.0/proxyfile-linux-amd64
-curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v1.0.0/checksums.txt
+curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v1.1.0/proxyfile-linux-amd64
+curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v1.1.0/checksums.txt
 shasum -a 256 -c --ignore-missing checksums.txt
 install -m 0755 proxyfile-linux-amd64 /usr/local/bin/proxyfile
 ```
@@ -24,36 +25,40 @@ install -m 0755 proxyfile-linux-amd64 /usr/local/bin/proxyfile
 In a Dockerfile, copy the program out of the image. The image holds `/proxyfile` and nothing else.
 
 ```dockerfile
-COPY --from=ghcr.io/kitecorp/proxyfile:1.0.0 /proxyfile /usr/local/bin/proxyfile
+COPY --from=ghcr.io/kitecorp/proxyfile:1.1.0 /proxyfile /usr/local/bin/proxyfile
 ```
 
 With Go installed (the Go version `go.mod` names or newer):
 
 ```sh
-go install github.com/kitecorp/proxyfile/cmd/proxyfile@v1.0.0
+go install github.com/kitecorp/proxyfile/cmd/proxyfile@v1.1.0
 ```
 
 ## Commands
 
 ```
-usage: proxyfile render <file> -o <envoy.yaml> [--rpc-methods <methods.json>] [--rpc-table <table.json>]
-       proxyfile check <file> -o <envoy.yaml> [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+usage: proxyfile render [<file>] -o <envoy.yaml> [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+       proxyfile check [<file>] -o <envoy.yaml> [--rpc-methods <methods.json>] [--rpc-table <table.json>]
        proxyfile schema
        proxyfile version
 ```
 
+With no file, proxyfile reads `Proxyfile`, `proxyfile.conf`, `proxyfile.yaml` or `proxyfile.yml` from the working
+directory, and exactly one of them must exist.
+
 | Command | What it does |
 |---|---|
-| `render` | Reads the proxyfile, the origins file it names and, with `--rpc-methods`, the methods file. Writes the Envoy configuration to the `-o` path, and with `--rpc-table` the RPC table too. It writes every output only when the whole input is free of problems. |
+| `render` | Reads the proxyfile, the origins file when it names one and the RPC methods, which come from its `rpc.methods` or, with `--rpc-methods`, from the methods file, never both. Writes the Envoy configuration to the `-o` path, and with `--rpc-table` the RPC table too, which needs one of the two. It writes every output only when the whole input is free of problems. |
 | `check` | Renders in memory and compares the bytes with the files on disk. It writes nothing. A missing output file differs. |
 | `schema` | Prints the JSON Schema of the proxyfile format on standard output. |
 | `version` | Prints `proxyfile <version>`. |
 
 `--help`, `-h` and `help` print the usage text on standard output and exit with 0.
 
-The flags may stand before or after the file. `--rpc-methods` is required when the proxyfile has an `- rpc:` entry
-and refused otherwise. `--rpc-table` needs `--rpc-methods`. An output path may not be the same file as an input or as
-the other output.
+The flags may stand before or after the file. A proxyfile with an rpc entry (`- rpc:` in YAML, `{ rpc { ... } }` in
+HOCON) takes its methods from `rpc.methods` or from `--rpc-methods`, never from both, and methods given with no rpc
+entry are refused. `--rpc-table` needs one of the two. An output path may not name the proxyfile, its origins file or
+its methods file, nor the other output.
 
 The generated file starts with this line, and the same input always gives the same bytes:
 
@@ -71,20 +76,26 @@ Exit codes:
 
 Each problem in the input is printed on standard error as `<file>:<line>:<column>: <message>`, as
 `<file>:<line>: <message>` when it has no column (a YAML syntax error names only its line), or as `<file>: <message>`
-when it is about the file as a whole, such as a file that cannot be read. The proxyfile is read first, and a run that
+when it is about the file as a whole, such as a file that cannot be read. A HOCON file gives a line and column only for
+a syntax error, and names every other problem by its key path instead, as `<file>: <key path>: <message>` (see "The
+HOCON form", which also says how a problem in an included file reads). The proxyfile is read first, and a run that
 finds problems in it reports all the problems of the first stage that finds any: reading and syntax, then the format of
-each key, then the rules that compare keys with each other. When the proxyfile is free of problems, the problems of the
-origins file and the methods file are reported together. For example, a misspelled `listen` gives:
+each key, then the rules that compare keys with each other. When the proxyfile is free of problems, the problems of
+the origins file, when `origins` names one, and of the methods are reported together. For example, a misspelled
+`listen` in a YAML file gives:
 
 ```
 gateway.yaml:3:1: "listen" is required here
-gateway.yaml:3:1: unknown key "liste"; known here: admin, auth, limits, listen, log, namespace, origins, remove_from_clients, routes, services, timeouts
+gateway.yaml:3:1: unknown key "liste"; known here: admin, auth, cors, limits, listen, log, namespace, origins, remove_from_clients, routes, rpc, services, timeouts
 ```
 
 ## The format
 
-`examples/full/gateway.yaml` holds every key a proxyfile can have, with invented values. Only `listen`, `services`,
-`origins` and `routes` are required. The rest is left out when you do not need it.
+`examples/full/gateway.yaml` holds every key a proxyfile can have except `services.<name>.address`, with invented
+values: `cors`, the `origins` by environment and `rpc.methods` are among them. `examples/partial/gateway.yaml` writes
+`address` and gives its methods the 1.0 way, with `--rpc-methods examples/partial/methods.json`, and its HOCON twin
+through `include required("rpc-methods.conf")`. Only `listen`, `services`, `origins` and `routes` are required. The rest
+is left out when you do not need it.
 
 ```yaml
 # yaml-language-server: $schema=../../schema/proxyfile.schema.json
@@ -112,7 +123,24 @@ auth:
   send: [authorization, x-country]
   accept: [x-user-*, x-tier-*]
 remove_from_clients: [x-user-*, x-client-*, x-tier-*, x-gateway-*]
-origins: origins.json
+cors:
+  allow_methods: "*"
+  allow_headers: "*"
+  expose_headers: "Content-Disposition,X-Request-Id"
+  max_age: "600"
+origins:
+  live:
+    hosts: [api.example.com, api.example.org]
+    origins: ["https://example.com", "https://www.example.com"]
+    patterns: ["https://*.example.com"]
+  test:
+    hosts: [api.test.example.com]
+    origins: ["http://localhost:3000", "https://test.example.com"]
+    patterns: ["https://*.test.example.com"]
+  local:
+    hosts: [127.0.0.1, localhost]
+    origins: []
+    patterns: ["http://*.example.com:*", "http://localhost:*"]
 routes:
   - {name: accounts-events, pattern: "^/events/[a-z0-9-]+$", to: accounts, auth: off}
   - rpc:
@@ -122,13 +150,19 @@ routes:
         "*": accounts
   - {name: accounts-webhooks, path: /api/webhooks, method: POST, to: accounts, rewrite: /hooks/payments, auth: off}
   - {name: shop, prefix: /, to: shop, retries: 1}
+rpc:
+  methods:
+    - {service: example.shop.v1.CartService, method: GetCart, action: browse}
+    - {service: example.accounts.v1.ProfileService, method: GetProfile}
+    - {service: example.shop.v1.CartService, method: AddItem, action: buy, reports: [browse]}
 log: {status_from: 400, sample: 1%}
 ```
 
 The first line points an editor at the schema in this repository. In your own files, use the URL under "Editors".
 
-A proxyfile file name ends in `.yaml` or `.yml`. An unknown key anywhere is a problem, and the message lists the keys
-that are known at that place.
+The examples in this section are YAML, whose file name ends in `.yaml` or `.yml`; "The HOCON form" gives the other
+names and the same keys in HOCON. An unknown key anywhere is a problem, and the message lists the keys that are known
+at that place.
 
 Sizes are a whole number with `KiB`, `MiB` or `GiB`, such as `192MiB`. Times are a whole number with `ms`, `s`, `m` or
 `h`, such as `125s`, and at most `9223372035s` (about 292 years), the largest whole number of seconds below the limit
@@ -166,19 +200,27 @@ Envoy sets on a duration. `auth.timeout` has a lower limit, which its row gives.
 | `auth.send` | The request headers the check is sent. A name ending in `*` is a prefix. | A list of lower-case header names or prefixes ending in `*`. |
 | `auth.accept` | The headers of the check's answer that reach the service. A name ending in `*` is a prefix. | The same form as `send`. |
 | `remove_from_clients` | Headers removed from every client request before routing and before any filter, so no route, filter or service sees a client's copy. A name ending in `*` is a prefix. | A list of lower-case header names or prefixes ending in `*`. Envoy holds header names in lower case, so a name with a capital would never match. |
-| `origins` | The origins file, relative to this file: the CORS settings and, for each environment, its hosts and the browser origins it admits. | Required. A file name. See the next section. |
-| `routes` | The routes, tried in the order written. The `- rpc:` entry marks where the RPC routes go. | Required. A list, not empty. See "Route rules". |
+| `cors` | The CORS settings every environment shares: `allow_methods`, `allow_headers`, `expose_headers` and `max_age`, each optional, with the rules of the origins section below. | A mapping. Not written when `origins` names a file, which holds its own `cors`. |
+| `origins` | The browser origins each environment admits, by environment name: each environment is a key holding its `hosts`, `origins` and `patterns`. As in 1.0, it may instead name an origins file, relative to this file. | Required. A mapping with at least one environment, or a file name. See the origins section below. |
+| `routes` | The routes, tried in the order written. The rpc entry (`- rpc:` in YAML, `{ rpc { ... } }` in HOCON) marks where the RPC routes go. | Required. A list, not empty. See "Route rules". |
+| `rpc` | The RPC methods the gateway routes, written here instead of in a methods file. | A mapping with the one key `methods`. Not given together with `--rpc-methods`. |
+| `rpc.methods` | One entry for each RPC method, with the keys of the methods section below. Which service a method goes to is decided by the rpc entry of `routes`. | Required in `rpc`. A list, which may be empty. |
 | `log` | Which requests the request log writes. Without `log`, every request is logged. | A mapping with `status_from` and `sample`, both required. |
 | `log.status_from` | The lowest status that is always logged. | A whole number from 100 to 599. |
 | `log.sample` | The share of the other requests that is logged. | A whole percentage such as `1%`. |
 
-A proxyfile also has these rules, each reported with the file and line:
+A proxyfile also has these rules, each reported with the file and where the problem is, a line in YAML and a key path in
+HOCON:
 
 - `listen` and `admin` are not the same port.
 - At least one service is declared, and each service has at least one port.
 - A route, `auth.ask` or an RPC mapping names a service that is declared and has a port of the protocol it needs: `http`
   for a route and for `auth.ask`, `grpc` for an RPC mapping.
 - `auth: off` on a route needs an `auth` key.
+- `cors` is not written when `origins` names a file, because the generator takes the CORS settings from that file and
+  would ignore this key.
+- The RPC methods come from one place: `rpc.methods` or `--rpc-methods`, not both. They need an rpc entry in `routes`,
+  and the rpc entry needs them.
 
 ### Route rules
 
@@ -198,18 +240,19 @@ Each plain route is a mapping with these keys:
 
 How routes are matched:
 
-- The routes are tried in the order written, and the first that matches wins. Every environment of the origins file
-  gets the same list. Put a `prefix: /` route last, because it matches every path.
+- The routes are tried in the order written, and the first that matches wins. Every environment gets the same list. Put
+  a `prefix: /` route last, because it matches every path.
 - Write exactly one of `prefix`, `path` and `pattern` on each route.
 - Two routes with the same kind of match, the same text and the same `method` are a problem, because the later one is
   never reached.
 - A retry happens only when the request never reached the service (Envoy's `connect-failure` and
   `reset-before-request` conditions), so a request that the service saw is never sent twice.
 
-The `- rpc:` entry is a place in the list. It holds one route for each method of the methods file, matched on the exact
-path a call carries, `/<package>.<Service>/<Method>`. Those routes are sorted by path and written where the entry
-stands, so a plain route written above the entry is tried before the RPC routes, and one written below it after them.
-A file has at most one `- rpc:` entry, and it needs `--rpc-methods` when it has one.
+The rpc entry (`- rpc:` in YAML, `{ rpc { ... } }` in HOCON) is a place in the list. It holds one route for each method
+of `rpc.methods` or of the methods file, matched on the exact path a call carries, `/<package>.<Service>/<Method>`.
+Those routes are sorted by path and written where the entry stands, so a plain route written above the entry is tried
+before the RPC routes, and one written below it after them. A file has at most one rpc entry, and it needs methods:
+`rpc.methods` or `--rpc-methods`, never both.
 
 | Key | Meaning | Rule |
 |---|---|---|
@@ -244,14 +287,116 @@ service needs no Envoy-specific type.
 - A check sent on a connection the auth service is closing fails. Set `timeouts.upstream_idle` under the auth service's
   own idle timeout, so the gateway closes an idle connection first.
 
+## The HOCON form
+
+The same gateway can be written in [HOCON](https://github.com/lightbend/config/blob/main/HOCON.md) (Human-Optimized
+Config Object Notation, as the Lightbend specification defines it). Every key has the same name, meaning and rules as
+in the YAML form, and the generated file is the same, byte for byte.
+
+A proxyfile's file name decides its form, never its content. A file named `Proxyfile`, with a capital P, or a name
+ending in `.conf` is HOCON, a name ending in `.yaml` or `.yml` is YAML, and any other name is refused.
+
+```hocon
+# The smallest proxyfile, in HOCON: one service, one route, and the browser origins it admits.
+listen = 8000
+services {
+  app { http = 3000 }
+}
+origins {
+  all { hosts = [localhost], origins = ["http://localhost:3000"] }
+}
+routes = [
+  { name = app, prefix = /, to = app }
+]
+```
+
+[`examples/full/gateway.conf`](examples/full/gateway.conf) writes every key but `services.<name>.address` and sits
+beside [`examples/full/gateway.yaml`](examples/full/gateway.yaml), which gives the same file.
+[`examples/partial/gateway.conf`](examples/partial/gateway.conf) pulls its methods in with
+`include required("rpc-methods.conf")`: a plain `include` is skipped when the file is missing, and `required` refuses it
+by name.
+
+The rules of the form:
+
+- **Routes are an array.** `routes = [ ... ]` lists the routes in the order they are tried, and the rpc entry is the
+  item `{ rpc { ... } }`, where YAML writes `- rpc:`. It is an array, not an object, because the first route that
+  matches wins and HOCON does not require a reader to keep the order of an object's keys.
+- **Quote what HOCON would read differently.** Quote a key that holds `.` or `*`, as in `"example.shop.*" = shop` and
+  `"*" = web`: an unquoted dotted key is a path (`a.b = 1` means `a { b = 1 }`), and `*` is a syntax error outside
+  quotes. Quote any value that holds anything but letters, digits, spaces and `.`, `-`, `_`, `/` and `%` (a
+  substitution, below, is the one exception). HOCON refuses most other characters outside quotes, such as `*`, `:`,
+  `$`, `^`, `+`, `?`, `=` and `[`, with a syntax error that does not say to quote, except the one for `+`, which says
+  `outside quotes`. HOCON starts a comment at `#` and at `//`, so `rewrite = /a#b` is read as `/a`, and proxyfile
+  cannot see the cut.
+- **A string is text, and a number or a boolean is not.** So `max_age = "600"`, which needs text, and `listen = 8000`,
+  which needs a number. A word written without quotes, such as `allow`, is a string. A quoted number where a number
+  belongs, and a plain number where text belongs, are both refused.
+- **A key written twice keeps the later value.** Two objects under one key merge, and an array written twice keeps the
+  later array: a second `routes = [ ... ]` replaces the first. Two routes with the same name are a problem in both
+  forms. The YAML form refuses a key written twice. HOCON merges a service or an environment written twice and does
+  not report it.
+- **Includes are relative to the file that holds them**, not to the working directory. A relative name may climb out of
+  that directory, as `include "../shared/origins.conf"` does, and an absolute name is read as written, both as HOCON
+  defines. `include "other.conf"` skips a file that is missing, as HOCON defines, and `include required("other.conf")`
+  refuses it by name. Use `required` for a file the gateway cannot do without. The one exception to the first rule is
+  a name inside `file(...)`, as in `include file("other.conf")`, which HOCON does not read relative to the including
+  file: proxyfile reads it relative to the working directory, so write `include "other.conf"` instead.
+- **Substitutions read the files, never the environment.** `${name}` takes another key of the same file or of its
+  includes. It never reads an environment variable, so the same files give the same bytes on every machine, and
+  `listen = ${HOME}` is a problem. The key a substitution reads is a key of the format like any other, so a
+  substitution copies one proxyfile value into another, such as `accept = ${auth.send}`. A key of your own, such as
+  `port = 3000` for `http = ${port}`, is refused as an unknown key:
+  `gateway.conf: port: unknown key "port"; known here: admin, auth, cors, ...`.
+- **The order you write is kept.** The generated file lists the services, their ports and the environments as written.
+  When an object is written twice, the merged object lists the keys of the later one first.
+- **An empty file is an empty object**, so the problems name each required key.
+
+What a problem looks like:
+
+- A syntax error is `<file>:<line>:<column>: <message>`, with a column, which a YAML syntax error does not have, for
+  example `gateway.conf:3:1: unexpected EOF, expected '}'`.
+- Any later problem is `<file>: <key path>: <message>`, because the HOCON reader keeps no line for a value, for example
+  `gateway.conf: services.app.http: "http" must be a whole number from 1 to 65535, not quoted or block text`. The key
+  path joins the keys from the top with dots (`services.app.http`), writes an array item as its index from 0 in square
+  brackets (`routes[1].to`), and quotes a key that holds anything but letters, digits, `-` and `_`
+  (`routes[1].rpc.to."example.shop.*"`). A problem at the top of the file, such as a missing required key, has no key
+  path: `gateway.conf: "listen" is required here`.
+- A message that names another place says `at <key path>` where the YAML form says `on line 7`, for example
+  `gateway.conf: routes[1].name: route "app" is declared twice (the first is at routes[0].name)`.
+- A file that cannot be read is `<file>: the file cannot be read: <reason>`, the same text in both forms. An included
+  file is the exception, below.
+- A problem inside an included file is reported against the file you gave. A syntax error there reads
+  `<file>: parse error at line <n>, col <m>: <message>`, for example
+  `gateway.conf: parse error at line 3, col 1: unexpected EOF, expected '}'`. It has no `:<line>:<column>:` after the
+  file, and the line and column are the included file's, because the HOCON library does not say which file it was. A
+  later problem names the key path the included file wrote, for example
+  `gateway.conf: rpc.methods[0]: the report "x,y" of a.v1.S/M contains a comma, the separator of x-gateway-reports`. A
+  missing `include required(...)` reads `<included file>: cannot read include file: <reason>`.
+- The ending `, not quoted or block text` follows a message about a whole number or `true` or `false` that was written
+  as text. It is the YAML form's wording; in HOCON it means a string, and an unquoted word is one too, so `http = abc`
+  gets it.
+
+**Editors.** IntelliJ's HOCON plugin recognises `.conf` files. A `Proxyfile` has no extension, so map it to the HOCON
+file type under Settings, Editor, File Types.
+
 ## The origins file and the methods file
 
-Both are JSON files. They are read with the YAML reader, so a problem in either names its line and column.
+Since 1.1 both can be written in the proxyfile: the environments under `origins`, the CORS settings under `cors`, and
+the methods under `rpc.methods`. A HOCON proxyfile that wants a separate file uses `include`, as
+`examples/partial/gateway.conf` does for its methods. The 1.0 way stays accepted in every 1.x release, with the same
+rules: `origins: <file>` names a JSON origins file, and `--rpc-methods <file>` a JSON methods file. `rpc.methods` and
+`--rpc-methods` together are refused, and so is `cors` in the proxyfile when `origins` names a file.
+
+The two files are JSON. They are read with the YAML reader, so a problem in either names its line and column.
 
 ### The origins file
 
-The proxyfile's `origins` key names it. A relative path is read from the proxyfile's directory, and an absolute path as
-written.
+When `origins` names a file, a relative path is read from the proxyfile's directory, and an absolute path as written.
+Written in the proxyfile, `origins` is instead a mapping from each environment's name to its `hosts`, `origins` and
+`patterns`, and `cors` is a key of its own beside it, as `examples/full/gateway.yaml` above shows. Every key and rule
+below holds in both places, with two differences. The file writes an environment's name as `name`, and the proxyfile as
+the key. A HOCON proxyfile merges an environment written twice, where the file and the YAML form report it. An origins
+file looks like this:
 
 ```json
 {
@@ -314,8 +459,9 @@ preflight, so an origin removed from the file may keep working that long in a br
 
 ### The methods file
 
-The `--rpc-methods` flag names it. It is a list with one entry for each RPC method the gateway routes. Which service a
-method goes to is decided by the `- rpc:` entry of the proxyfile, not by this file.
+The methods are a list with one entry for each RPC method the gateway routes. They are the proxyfile's `rpc.methods` or,
+the 1.0 way, a JSON file that the `--rpc-methods` flag names. Which service a method goes to is decided by the rpc entry
+of `routes`, not by this list. This is a methods file; written as `rpc.methods`, it is the same list.
 
 ```json
 [
@@ -339,7 +485,7 @@ A method listed twice is a problem.
 `--rpc-table` writes the routes as JSON for other programs to read, for example one that answers the check. It is a JSON
 array with one object per line, sorted by path, and it ends with a newline. Each object has `service`, `method`,
 `action` (empty when not written), `reports` (empty when not written) and `cluster`, the cluster the call goes to. With
-no methods the table is `[]`. This is the table of the methods file above:
+no methods the table is `[]`. This is the table of the methods above:
 
 ```json
 [
@@ -380,7 +526,7 @@ Everything the format has no key for is the same in every gateway proxyfile writ
   check or what the check says.
 - **Retries** happen only on `connect-failure` and `reset-before-request`.
 - **The overload manager** checks every 0.25 seconds. It exists when `limits.heap` or `limits.connections` is written.
-- **The Connect bridge.** Each route of the `- rpc:` entry turns a Connect call into gRPC for the service's gRPC port,
+- **The Connect bridge.** Each route of the rpc entry turns a Connect call into gRPC for the service's gRPC port,
   and the answer back into Connect. Envoy's bridge still writes the HTTP status of an older Connect error-code table
   for four codes, so a small Lua filter sets the current status: `canceled` 499, `deadline_exceeded` 504,
   `failed_precondition` 400 and `unimplemented` 501. Both filters are off for every other route.
@@ -395,7 +541,7 @@ Everything the format has no key for is the same in every gateway proxyfile writ
   `status_from`, every response with a response flag, and `sample` of the rest, chosen by the first eight hex digits of
   `x-request-id`.
 - **The order of the filters:** set metadata (with `auth`), header mutation, the RBAC refusal of a foreign browser
-  origin, CORS, the auth check (with `auth`), the Lua status filter and the Connect bridge (with an `- rpc:` entry), and
+  origin, CORS, the auth check (with `auth`), the Lua status filter and the Connect bridge (with an rpc entry), and
   the router. A foreign origin is refused before the check could be called.
 
 ### Fixed names
@@ -427,15 +573,16 @@ the setting for good, change `auth.enabled` and render again.
 
 ## Editors
 
-The JSON Schema of the format gives completion and checking as you type. Put this line first in a proxyfile, for
-editors that use the YAML language server, such as VS Code with the YAML extension:
+The JSON Schema of the format gives completion and checking as you type. The schema describes the YAML form only. For a
+HOCON proxyfile, see the editor note under "The HOCON form". Put this line first in a YAML proxyfile, for editors that
+use the YAML language server, such as VS Code with the YAML extension:
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/kitecorp/proxyfile/v1.0.0/schema/proxyfile.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kitecorp/proxyfile/v1.1.0/schema/proxyfile.schema.json
 ```
 
 In a JetBrains IDE, open Settings, Languages & Frameworks, Schemas and DTDs, JSON Schema Mappings. Add a mapping with the
-schema URL above and a file pattern that matches your proxyfiles, such as `gateway.yaml`.
+schema URL above and a file pattern that matches your YAML proxyfiles, such as `gateway.yaml`.
 
 `proxyfile schema` prints the same schema, and each release carries it as `proxyfile.schema.json`.
 

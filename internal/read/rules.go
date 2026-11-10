@@ -54,7 +54,7 @@ func (r *rules) routes() {
 			continue
 		}
 		if route != first {
-			r.Add(route.Pos, "the routes have more than one rpc entry (the first is on line %d)", first.Pos.Line)
+			r.Add(route.Pos, "the routes have more than one rpc entry (the first is %s)", first.Pos.Where())
 		}
 		// With no target the entry sends no RPC method anywhere, the same mistake as a routes list with nothing in it.
 		if len(route.RPC.Targets) == 0 {
@@ -73,17 +73,17 @@ func (r *rules) route(route *model.Route, earlier []*model.Route) {
 	if name == "rpc" {
 		r.Add(route.Name.Pos, "a route may not be named rpc: that name marks the place of the RPC routes")
 	}
-	// The block syntax writes a route's name as its block's name and cannot write one twice; refusing it here too
-	// keeps the two syntaxes accepting the same files.
+	// A route's name is what the request log writes for its requests (route: "%ROUTE_NAME%" in
+	// internal/envoy/fragments/log-request.yaml), so two routes with one name could not be told apart there.
 	if i := slices.IndexFunc(earlier, func(e *model.Route) bool { return e.Name.Value == name }); i >= 0 {
-		r.Add(route.Name.Pos, "route %q is declared twice (the first is on line %d)", name, earlier[i].Name.Pos.Line)
+		r.Add(route.Name.Pos, "route %q is declared twice (the first is %s)", name, earlier[i].Name.Pos.Where())
 	}
 	// Routes are tried in the order written, so a later route with the same match is never reached.
 	sameMatch := func(e *model.Route) bool {
 		return e.Match == route.Match && e.Value.Value == route.Value.Value && e.Method == route.Method
 	}
 	if i := slices.IndexFunc(earlier, sameMatch); i >= 0 {
-		r.Add(route.Pos, "route %q matches what route %q on line %d matches", name, earlier[i].Name.Value, earlier[i].Pos.Line)
+		r.Add(route.Pos, "route %q matches what route %q %s matches", name, earlier[i].Name.Value, earlier[i].Pos.Where())
 	}
 	if route.AuthOff != nil && r.g.Auth == nil {
 		r.Add(route.AuthOff.Pos, "route %q turns auth off, but no auth is declared", name)

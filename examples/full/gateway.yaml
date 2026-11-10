@@ -23,7 +23,24 @@ auth:
   send: [authorization, x-country]
   accept: [x-user-*, x-tier-*]
 remove_from_clients: [x-user-*, x-client-*, x-tier-*, x-gateway-*]
-origins: origins.json
+cors:
+  allow_methods: "*"
+  allow_headers: "*"
+  expose_headers: "Content-Disposition,X-Request-Id"
+  max_age: "600"
+origins:
+  live:
+    hosts: [api.example.com, api.example.org]
+    origins: ["https://example.com", "https://www.example.com"]
+    patterns: ["https://*.example.com"]
+  test:
+    hosts: [api.test.example.com]
+    origins: ["http://localhost:3000", "https://test.example.com"]
+    patterns: ["https://*.test.example.com"]
+  local:
+    hosts: [127.0.0.1, localhost]
+    origins: []
+    patterns: ["http://*.example.com:*", "http://localhost:*"]
 routes:
   - {name: accounts-events, pattern: "^/events/[a-z0-9-]+$", to: accounts, auth: off}
   - rpc:
@@ -33,4 +50,9 @@ routes:
         "*": accounts
   - {name: accounts-webhooks, path: /api/webhooks, method: POST, to: accounts, rewrite: /hooks/payments, auth: off}
   - {name: shop, prefix: /, to: shop, retries: 1}
+rpc:
+  methods:
+    - {service: example.shop.v1.CartService, method: GetCart, action: browse}
+    - {service: example.accounts.v1.ProfileService, method: GetProfile}
+    - {service: example.shop.v1.CartService, method: AddItem, action: buy, reports: [browse]}
 log: {status_from: 400, sample: 1%}

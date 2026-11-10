@@ -61,40 +61,157 @@ func TestExamplesAreCurrent(t *testing.T) {
 					}
 					continue
 				}
-				if !bytes.Equal(testsupport.ReadFile(t, file.Path), file.Bytes) {
-					t.Errorf("%s differs from what render writes; run the test with -update", file.Path)
+				if d := committedDifference(t, name, file); d != "" {
+					t.Errorf("%s\n  run the test with -update to write what render writes", d)
 				}
 			}
 		})
 	}
 }
 
+// One gateway, whichever way it is written: every file a render of the HOCON example writes equals the committed file
+// byte for byte, and TestExamplesAreCurrent keeps the committed files equal to the render of the YAML example.
+func TestBothFormsGiveTheSameFiles(t *testing.T) {
+	cases := []struct {
+		name  string
+		files int
+	}{{"minimal", 1}, {"partial", 2}, {"full", 2}}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := requestFor(t, c.name, "envoy.yaml")
+			req.Proxyfile = filepath.Join("..", "..", "examples", c.name, "gateway.conf")
+			// The partial HOCON example includes rpc-methods.conf and the full one writes rpc.methods, so neither takes
+			// the methods file the partial YAML example is rendered with.
+			req.RPCMethods = ""
+			files, problems := render(req)
+			if problems != nil {
+				t.Fatalf("render problems = %q, want none", testsupport.ProblemStrings(problems))
+			}
+			if len(files) != c.files {
+				t.Fatalf("render wrote %d files %q, want %d", len(files), paths(files), c.files)
+			}
+			for _, file := range files {
+				if d := committedDifference(t, c.name, file); d != "" {
+					t.Errorf("rendered from %s: %s", req.Proxyfile, d)
+				}
+			}
+		})
+	}
+}
+
+// committedDifference returns "" when file holds the bytes of the file of the same name committed in
+// examples/<example>, and otherwise names the line, counted from 1, where the two first differ, with that line of
+// each, so a failure points at the line to read instead of printing two whole files.
+func committedDifference(t *testing.T, example string, file File) string {
+	t.Helper()
+	path := filepath.Join("..", "..", "examples", example, filepath.Base(file.Path))
+	committed := testsupport.ReadFile(t, path)
+	if bytes.Equal(file.Bytes, committed) {
+		return ""
+	}
+	line, inCommitted, rendered := firstDifferentLine(committed, file.Bytes)
+	return fmt.Sprintf("%s differs first on line %d:\n  committed: %s\n  rendered:  %s", path, line, inCommitted, rendered)
+}
+
+// firstDifferentLine returns the number, counted from 1, of the line where a and b first differ, and that line of each.
+// The bytes before the first difference are the same in both, so the line starts at the same offset in each.
+func firstDifferentLine(a, b []byte) (int, string, string) {
+	same := 0
+	for same < len(a) && same < len(b) && a[same] == b[same] {
+		same++
+	}
+	start := bytes.LastIndexByte(a[:same], '\n') + 1
+	return bytes.Count(a[:same], []byte("\n")) + 1, lineAt(a, start), lineAt(b, start)
+}
+
+// lineAt returns the line that starts at start, quoted with its newline, so a trailing space, an empty line and a
+// missing last newline each show; or, when the file ends before start, a marker that no quoted line can look like.
+func lineAt(data []byte, start int) string {
+	if start >= len(data) {
+		return "(the file ends here)"
+	}
+	line := data[start:]
+	if end := bytes.IndexByte(line, '\n'); end >= 0 {
+		line = line[:end+1]
+	}
+	return fmt.Sprintf("%q", line)
+}
+
+// minimalNaming returns the minimal example with its inline origins replaced by "origins: <file>": the file form,
+// which no example writes.
+func minimalNaming(t *testing.T, file string) string {
+	t.Helper()
+	example := string(testsupport.ReadFile(t, "../../examples/minimal/gateway.yaml"))
+	if !strings.Contains(example, testsupport.MinimalInlineOrigins) {
+		t.Fatalf("the minimal example holds no %q to replace", testsupport.MinimalInlineOrigins)
+	}
+	return strings.Replace(example, testsupport.MinimalInlineOrigins, "origins: "+file+"\n", 1)
+}
+
+// Inputs is what the command line's output-path rule protects, so it lists the origins file and the methods file
+// only when the run read them: origins and rpc.methods written in the proxyfile have no path of their own.
+func TestInputs(t *testing.T) {
+	dir := t.TempDir()
+	testsupport.WriteFile(t, filepath.Join(dir, "g.yaml"), minimalNaming(t, "origins.json"))
+	testsupport.WriteFile(t, filepath.Join(dir, "origins.json"), string(testsupport.ReadFile(t, "testdata/origins.json")))
+	cases := []struct {
+		name string
+		req  Request
+		want []string // <dir> stands for the test's temporary directory
+	}{
+		{name: "inline origins", req: Request{Proxyfile: "../../examples/minimal/gateway.yaml"},
+			want: []string{"../../examples/minimal/gateway.yaml"}},
+		{name: "origins file", req: Request{Proxyfile: filepath.Join(dir, "g.yaml")},
+			want: []string{"<dir>/g.yaml", "<dir>/origins.json"}},
+		{name: "inline methods", req: Request{Proxyfile: "../../examples/full/gateway.yaml"},
+			want: []string{"../../examples/full/gateway.yaml"}},
+		{name: "methods file",
+			req:  Request{Proxyfile: "../../examples/partial/gateway.yaml", RPCMethods: "../../examples/partial/methods.json"},
+			want: []string{"../../examples/partial/gateway.yaml", "../../examples/partial/methods.json"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			run, problems := Read(c.req)
+			if problems != nil {
+				t.Fatalf("read problems = %q, want none", testsupport.ProblemStrings(problems))
+			}
+			var got []string
+			for _, path := range run.Inputs() {
+				got = append(got, strings.Replace(path, dir, "<dir>", 1))
+			}
+			if !slices.Equal(got, c.want) {
+				t.Errorf("Inputs = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 func TestRenderProblems(t *testing.T) {
-	minimal := strings.Replace(string(testsupport.ReadFile(t, "../../examples/minimal/gateway.yaml")),
-		"origins: origins.json", "origins: missing.json", 1)
+	// The minimal example in the file form, naming an origins file that is not there.
+	minimal := minimalNaming(t, "missing.json")
 	cases := []struct {
 		name, proxyfile string // proxyfile is written to g.yaml in a temporary directory
 		want            []string
 	}{
 		{name: "rpc entry without methods",
 			proxyfile: "listen: 8000\nservices:\n  backend: {grpc: 5000}\norigins: origins.json\nroutes:\n  - rpc: {to: {\"*\": backend}}\n",
-			want:      []string{"g.yaml:6:5: the routes have an rpc entry, so --rpc-methods must name the methods file"}},
+			want:      []string{"g.yaml:6:5: the routes have an rpc entry, so rpc.methods or --rpc-methods must list the RPC methods"}},
 		{name: "origins file missing", proxyfile: minimal,
 			want: []string{"missing.json: the file cannot be read: no such file or directory"}},
 		// An absolute path is read as written, not under the proxyfile's directory, so the problem names it whole.
 		{name: "origins file missing at an absolute path",
 			proxyfile: strings.Replace(minimal, "origins: missing.json", "origins: /proxyfile-test-absent/origins.json", 1),
 			want:      []string{"/proxyfile-test-absent/origins.json: the file cannot be read: no such file or directory"}},
-		// render finds the rpc entry's problem first, and absent.json sorts before g.yaml, so the two come out together
-		// and in this order only when the stages run together and their problems are sorted.
+		// render reads the origins file before it applies the rpc-entry rule, and g.yaml sorts before origins-absent.json,
+		// so the two come out together and in this order only when the stages run together and their problems are sorted.
 		{name: "problems of two inputs, together and sorted",
-			proxyfile: "listen: 8000\nservices:\n  backend: {grpc: 5000}\norigins: absent.json\nroutes:\n  - rpc: {to: {\"*\": backend}}\n",
+			proxyfile: "listen: 8000\nservices:\n  backend: {grpc: 5000}\norigins: origins-absent.json\nroutes:\n  - rpc: {to: {\"*\": backend}}\n",
 			want: []string{
-				"absent.json: the file cannot be read: no such file or directory",
-				"g.yaml:6:5: the routes have an rpc entry, so --rpc-methods must name the methods file",
+				"g.yaml:6:5: the routes have an rpc entry, so rpc.methods or --rpc-methods must list the RPC methods",
+				"origins-absent.json: the file cannot be read: no such file or directory",
 			}},
 	}
-	origins := testsupport.ReadFile(t, "../../examples/minimal/origins.json")
+	origins := testsupport.ReadFile(t, "testdata/origins.json")
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -106,6 +223,68 @@ func TestRenderProblems(t *testing.T) {
 			}
 			if got := testsupport.ProblemStringsIn(dir, problems); !slices.Equal(got, c.want) {
 				t.Errorf("problems = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// The RPC methods written in the proxyfile give what the methods file gives, the two together are refused, and the
+// methods' own rules hold in either form.
+func TestInlineMethods(t *testing.T) {
+	partial := string(testsupport.ReadFile(t, "../../examples/partial/gateway.yaml")) + testsupport.PartialMethods
+	// The minimal example has no rpc entry, so methods written into it are given for no RPC route.
+	minimalMethods := string(testsupport.ReadFile(t, "../../examples/minimal/gateway.yaml")) +
+		"rpc:\n  methods:\n    - {service: example.backend.v1.ReportService, method: ListReports}\n"
+	// The HOCON row writes its own list in place of the partial example's include line. strings.Replace changes nothing
+	// when that line is missing, and the row would then fail on another problem, which does not say why; the guard
+	// does.
+	partialConf := string(testsupport.ReadFile(t, "../../examples/partial/gateway.conf"))
+	const include = `include required("rpc-methods.conf")` + "\n"
+	if !strings.Contains(partialConf, include) {
+		t.Fatalf("the partial HOCON example holds no %q to replace", include)
+	}
+	twice := strings.Replace(partialConf, include, `rpc { methods = [ { service = "example.backend.v1.ReportService", method = ListReports }, `+
+		`{ service = "example.backend.v1.ReportService", method = ListReports } ] }`+"\n", 1)
+	cases := []struct {
+		name, file, proxyfile string // proxyfile is written to file in a temporary directory
+		rpcMethods            string // given as --rpc-methods when set
+		// want is the problems; a row that wants none compares each file with the partial example's committed one.
+		want []string
+	}{
+		{name: "inline gives the flag's table", file: "g.yaml", proxyfile: partial},
+		{name: "both given", file: "g.yaml", proxyfile: partial, rpcMethods: "../../examples/partial/methods.json",
+			want: []string{"g.yaml:30:3: rpc.methods is written here, so --rpc-methods must not be given"}},
+		{name: "HOCON: a method listed twice", file: "g.conf", proxyfile: twice, want: []string{
+			"g.conf: rpc.methods[1]: the method example.backend.v1.ReportService/ListReports is listed twice (first at rpc.methods[0])"}},
+		{name: "inline, no rpc entry", file: "g.yaml", proxyfile: minimalMethods,
+			want: []string{"g.yaml:8:1: RPC methods are given, but the routes have no rpc entry"}},
+		// With both given, one run names the inline methods' own problem as well as the second list, sorted.
+		{name: "both given, no rpc entry", file: "g.yaml", proxyfile: minimalMethods, rpcMethods: "../../examples/partial/methods.json",
+			want: []string{
+				"g.yaml:8:1: RPC methods are given, but the routes have no rpc entry",
+				"g.yaml:11:3: rpc.methods is written here, so --rpc-methods must not be given",
+			}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			req := Request{Proxyfile: filepath.Join(dir, c.file), Out: filepath.Join(dir, "envoy.yaml"),
+				RPCMethods: c.rpcMethods, RPCTable: filepath.Join(dir, "rpc-table.json")}
+			testsupport.WriteFile(t, req.Proxyfile, c.proxyfile)
+			files, problems := render(req)
+			if got := testsupport.ProblemStringsIn(dir, problems); !slices.Equal(got, c.want) {
+				t.Fatalf("problems = %q, want %q", got, c.want)
+			}
+			if c.want != nil {
+				return
+			}
+			if got, want := paths(files), outputs(req); !slices.Equal(got, want) {
+				t.Fatalf("render paths = %q, want %q", got, want)
+			}
+			for _, file := range files {
+				if d := committedDifference(t, "partial", file); d != "" {
+					t.Error(d)
+				}
 			}
 		})
 	}
@@ -193,7 +372,7 @@ typed_per_filter_config:
 	}
 	dir := t.TempDir()
 	testsupport.WriteFile(t, filepath.Join(dir, "g.yaml"), proxyfile)
-	testsupport.WriteFile(t, filepath.Join(dir, "origins.json"), string(testsupport.ReadFile(t, "../../examples/minimal/origins.json")))
+	testsupport.WriteFile(t, filepath.Join(dir, "origins.json"), string(testsupport.ReadFile(t, "testdata/origins.json")))
 	testsupport.WriteFile(t, filepath.Join(dir, "methods.json"), methods)
 	files, problems := render(Request{Proxyfile: filepath.Join(dir, "g.yaml"), Out: filepath.Join(dir, "envoy.yaml"),
 		RPCMethods: filepath.Join(dir, "methods.json")})
@@ -238,7 +417,7 @@ routes:
 	const rpcMethod = `[{"service": "q.v1.S", "method": "Do", "action": "use", "reports": ["operate"]}]`
 	cases := []struct {
 		name, proxyfile, methods string // methods is written to methods.json and given to render when not empty
-		origins                  string // written to origins.json; the minimal example's origins file when empty
+		origins                  string // written to origins.json; testdata/origins.json when empty
 		at                       []any  // the sub-tree the row compares, as valueAt's steps
 		// names compares only the name of each item of the list at at, which keeps the Lua script out of a filter row.
 		names bool
@@ -390,12 +569,12 @@ envoy.filters.http.cors:
   forward_not_matching_preflights: false
 `},
 	}
-	minimalOrigins := string(testsupport.ReadFile(t, "../../examples/minimal/origins.json"))
+	defaultOrigins := string(testsupport.ReadFile(t, "testdata/origins.json"))
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
 			testsupport.WriteFile(t, filepath.Join(dir, "g.yaml"), c.proxyfile)
-			testsupport.WriteFile(t, filepath.Join(dir, "origins.json"), cmp.Or(c.origins, minimalOrigins))
+			testsupport.WriteFile(t, filepath.Join(dir, "origins.json"), cmp.Or(c.origins, defaultOrigins))
 			req := Request{Proxyfile: filepath.Join(dir, "g.yaml"), Out: filepath.Join(dir, "envoy.yaml")}
 			if c.methods != "" {
 				req.RPCMethods = filepath.Join(dir, "methods.json")
@@ -458,17 +637,25 @@ func listAt(t *testing.T, tree any, steps ...any) []any {
 	return list
 }
 
-// requestFor points a request at examples/<name>, with the methods file and the RPC table when the example has
-// methods.json.
+// requestFor points a request at examples/<name>: with the methods file when the example has methods.json, and with
+// the RPC table when it commits rpc-table.json. The two are tested apart, because an example may write its methods
+// in the proxyfile and still commit a table.
 func requestFor(t *testing.T, name, out string) Request {
 	t.Helper()
 	dir := filepath.Join("..", "..", "examples", name)
 	req := Request{Proxyfile: filepath.Join(dir, "gateway.yaml"), Out: out}
-	methods := filepath.Join(dir, "methods.json")
-	if _, err := os.Stat(methods); err == nil {
-		req.RPCMethods, req.RPCTable = methods, filepath.Join(filepath.Dir(out), "rpc-table.json")
+	if methods := filepath.Join(dir, "methods.json"); exists(methods) {
+		req.RPCMethods = methods
+	}
+	if exists(filepath.Join(dir, "rpc-table.json")) {
+		req.RPCTable = filepath.Join(filepath.Dir(out), "rpc-table.json")
 	}
 	return req
+}
+
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // render reads every input and returns every output: Read and Files in one step, as the command line runs them, but

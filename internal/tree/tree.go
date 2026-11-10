@@ -1,5 +1,5 @@
-// Package tree is the boundary between a file's syntax and everything that reads it. Each syntax front (YAML
-// today) fills a Node, and the format check and the decoder read only Nodes, so nothing after this package knows
+// Package tree is the boundary between a file's syntax and everything that reads it. Each syntax front (YAML and
+// HOCON) fills a Node, and the format check and the decoder read only Nodes, so nothing after this package knows
 // which syntax a file used.
 package tree
 
@@ -20,15 +20,15 @@ type Node struct {
 	Text string
 	// Quoted is true for a scalar a YAML reader takes as text whatever it holds: one written in quotes, or as a
 	// literal or folded block. The format check refuses one where a number or a boolean is expected, because the JSON
-	// Schema an editor checks the file with refuses text there. The block-syntax front sets it for its double-quoted
-	// strings.
+	// Schema an editor checks the file with refuses text there. The HOCON front sets it for every HOCON string, quoted
+	// or not, because HOCON types unquoted text as a string.
 	Quoted bool
 	// NumberOrBool is true for a plain scalar go-yaml takes as a number or a boolean, such as 404, 1.5 or true. The
 	// format check refuses one where text is expected, because the JSON Schema refuses a number or a boolean there; the
 	// origins and methods files follow the same rule, because one checker serves all three files. go-yaml also takes
 	// some YAML 1.1 spellings as numbers (1_000, 0b1, 0X1F) that YAML 1.2's core schema reads as text, so an editor
-	// reading YAML 1.2 accepts them as text where the check refuses them: there the check is the stricter side. A front
-	// whose syntax has no such values leaves it false.
+	// reading YAML 1.2 accepts them as text where the check refuses them: there the check is the stricter side. The
+	// HOCON front sets it for every HOCON number and boolean.
 	NumberOrBool bool
 	Items        []*Node
 	Entries      []Entry

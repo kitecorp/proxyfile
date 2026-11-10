@@ -1,9 +1,9 @@
-# One route per method of the methods file, matched on the exact path a call carries (/<package>.<Service>/<Method>),
-# asking the auth check the method's action and reports through the x-gateway- headers its own header_mutation entry
-# adds; its metadata keeps the action for the auth-unavailable log line alone. Each turns on the bridge, which turns
-# the call into gRPC before the router, and the Lua filter that sets Connect's current status on the bridge's errors:
-# a FilterConfig entry turns on, for its route, a filter the listener's list writes as disabled (Envoy 1.40.2,
-# http_filters.rst, "Disabled flag based route filter chain").
+# One route per RPC method, listed in rpc.methods or in the --rpc-methods file, matched on the exact path a call
+# carries (/<package>.<Service>/<Method>), asking the auth check the method's action and reports through the
+# x-gateway- headers its own header_mutation entry adds; its metadata keeps the action for the auth-unavailable log
+# line alone. Each turns on the bridge, which turns the call into gRPC before the router, and the Lua filter that sets
+# Connect's current status on the bridge's errors: a FilterConfig entry turns on, for its route, a filter the
+# listener's list writes as disabled (Envoy 1.40.2, http_filters.rst, "Disabled flag based route filter chain").
 #
 # Written in flow style, so the generated file holds each RPC route on one line.
 {

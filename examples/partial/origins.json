@@ -1,5 +1,0 @@
-{
-  "environments": [
-    {"name": "only", "hosts": ["gateway.example.net"], "origins": ["https://app.example.net"]}
-  ]
-}

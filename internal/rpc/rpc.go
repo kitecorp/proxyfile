@@ -1,5 +1,5 @@
-// Package rpc reads the RPC methods file, gives each method the service the proxyfile's rpc entry maps it to, and
-// writes the RPC table: the routes as JSON, one object per line.
+// Package rpc reads the RPC methods, from the proxyfile's rpc.methods or from a methods file, gives each method the
+// service the proxyfile's rpc entry maps it to, and writes the RPC table: the routes as JSON, one object per line.
 package rpc
 
 import (
@@ -14,7 +14,7 @@ import (
 	"github.com/kitecorp/proxyfile/internal/tree"
 )
 
-// Method is one entry of the methods file.
+// Method is one entry of the methods, as written in either place.
 type Method struct {
 	Service, Method, Action string    // Action is "" when not written
 	Reports                 []string  // nil when not written, and when written as []
@@ -47,8 +47,14 @@ func ReadMethods(path string) ([]Method, []model.Problem) {
 	if problems != nil {
 		return nil, problems
 	}
+	return MethodsOf(root), nil
+}
+
+// MethodsOf reads a list of methods the format check accepted, from a methods file or from the proxyfile's
+// rpc.methods, in written order. It returns nil for an empty list.
+func MethodsOf(list *tree.Node) []Method {
 	var methods []Method
-	for _, item := range root.Items {
+	for _, item := range list.Items {
 		methods = append(methods, Method{
 			Service: item.Get("service").Text,
 			Method:  item.Get("method").Text,
@@ -57,7 +63,7 @@ func ReadMethods(path string) ([]Method, []model.Problem) {
 			Pos:     item.Pos,
 		})
 	}
-	return methods, nil
+	return methods
 }
 
 // texts is nil for a list that was not written and for an empty one, so a reader sees no difference between the two.
@@ -85,14 +91,14 @@ func Resolve(g *model.Gateway, methods []Method) ([]Route, []model.Problem) {
 		problems.Add(g.RoutesPos, "RPC methods are given, but the routes have no rpc entry")
 	}
 	// Only looked up, never ranged: the routes are sorted below.
-	firstLine := map[string]int{}
+	first := map[string]model.Pos{}
 	var routes []Route
 	for _, method := range methods {
 		path := grpcPath(method)
-		if line, seen := firstLine[path]; seen {
-			problems.Add(method.Pos, "the method %s/%s is listed twice (first on line %d)", method.Service, method.Method, line)
+		if pos, seen := first[path]; seen {
+			problems.Add(method.Pos, "the method %s/%s is listed twice (first %s)", method.Service, method.Method, pos.Where())
 		} else {
-			firstLine[path] = method.Pos.Line
+			first[path] = method.Pos
 		}
 		// The route sends the reports to the check as one header value, joined by commas, so a report holding a comma
 		// would arrive as two.
@@ -156,7 +162,7 @@ func better(a, b string) bool {
 
 // Table writes the routes, in the order given, as a JSON array with one object per line, so a diff of two tables
 // shows one line for each route that changed. Resolve sorts the routes by path, so the table's order does not depend
-// on the methods file's.
+// on the order the methods are written in.
 //
 // Each string is written by quote.JSON, whose result equals what Jackson's writeValueAsString writes for any text
 // with no control character and no U+2028 or U+2029: Go escapes those two always and writes \u00XX in lower case,

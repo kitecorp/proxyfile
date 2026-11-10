@@ -1,4 +1,6 @@
-package rpc
+// The tests sit outside package rpc because they read each proxyfile with read.Proxyfile, and read imports rpc for
+// the methods a proxyfile writes, so a test inside the package that imports read would be an import cycle.
+package rpc_test
 
 import (
 	"path/filepath"
@@ -8,6 +10,7 @@ import (
 
 	"github.com/kitecorp/proxyfile/internal/model"
 	"github.com/kitecorp/proxyfile/internal/read"
+	"github.com/kitecorp/proxyfile/internal/rpc"
 	"github.com/kitecorp/proxyfile/internal/testsupport"
 )
 
@@ -111,13 +114,13 @@ func TestResolve(t *testing.T) {
 			"m.json:4:3: the method example.shop.v1.C/M is listed twice (first on line 3)",
 		}},
 		{name: "no rpc entry", example: "../../examples/minimal/gateway.yaml", methods: `[]`,
-			want: []string{"../../examples/minimal/gateway.yaml:7:1: RPC methods are given, but the routes have no rpc entry"}},
+			want: []string{"../../examples/minimal/gateway.yaml:8:1: RPC methods are given, but the routes have no rpc entry"}},
 		// Without an rpc entry no method has a target, but the rules of the methods themselves still run, so one run
 		// names every problem.
 		{name: "no rpc entry, the methods still checked", example: "../../examples/minimal/gateway.yaml",
 			methods: `[{"service": "a.B", "method": "M", "reports": ["x,y"]}]`,
 			want: []string{
-				"../../examples/minimal/gateway.yaml:7:1: RPC methods are given, but the routes have no rpc entry",
+				"../../examples/minimal/gateway.yaml:8:1: RPC methods are given, but the routes have no rpc entry",
 				`m.json:1:2: the report "x,y" of a.B/M contains a comma, the separator of x-gateway-reports`,
 			}},
 		{name: "methods file keys", example: "../../examples/full/gateway.yaml", methods: `[{"service": "a.B", "methd": "M"}]`,
@@ -134,19 +137,20 @@ func TestResolve(t *testing.T) {
 				proxyfile = filepath.Join(dir, "g.yaml")
 				testsupport.WriteFile(t, proxyfile, c.proxyfile)
 			}
-			g, problems := read.Proxyfile(proxyfile)
+			file, problems := read.Proxyfile(proxyfile)
 			if problems != nil {
 				t.Fatalf("read.Proxyfile problems = %q, want none", testsupport.ProblemStrings(problems))
 			}
+			g := file.Gateway
 			methodsFile := filepath.Join(dir, "m.json")
 			testsupport.WriteFile(t, methodsFile, c.methods)
-			methods, problems := ReadMethods(methodsFile)
+			methods, problems := rpc.ReadMethods(methodsFile)
 			if methods != nil && problems != nil {
 				t.Errorf("ReadMethods returned methods %v next to problems", methods)
 			}
-			var routes []Route
+			var routes []rpc.Route
 			if problems == nil {
-				routes, problems = Resolve(g, methods)
+				routes, problems = rpc.Resolve(g, methods)
 			}
 			var got []string
 			for _, route := range routes {
@@ -163,10 +167,11 @@ func TestResolve(t *testing.T) {
 // The generator reads every field of a route, so each must arrive: the method's action, reports and position, and
 // the service it goes to. A key left out of the methods file is empty.
 func TestResolveKeepsTheMethod(t *testing.T) {
-	g, problems := read.Proxyfile("../../examples/full/gateway.yaml")
+	file, problems := read.Proxyfile("../../examples/full/gateway.yaml")
 	if problems != nil {
 		t.Fatalf("read.Proxyfile problems = %q, want none", testsupport.ProblemStrings(problems))
 	}
+	g := file.Gateway
 	path := filepath.Join(t.TempDir(), "m.json")
 	// Neither entry starts at a column equal to its line, so a position with the two swapped cannot pass.
 	testsupport.WriteFile(t, path, testsupport.Document{
@@ -175,18 +180,18 @@ func TestResolveKeepsTheMethod(t *testing.T) {
 		`    {"service": "example.accounts.v1.ProfileService", "method": "GetProfile"}`,
 		`]`,
 	}.String())
-	methods, problems := ReadMethods(path)
+	methods, problems := rpc.ReadMethods(path)
 	if problems != nil {
 		t.Fatalf("ReadMethods problems = %q, want none", testsupport.ProblemStrings(problems))
 	}
-	routes, problems := Resolve(g, methods)
+	routes, problems := rpc.Resolve(g, methods)
 	if problems != nil {
 		t.Fatalf("Resolve problems = %q, want none", testsupport.ProblemStrings(problems))
 	}
-	want := []Route{
-		{Method: Method{Service: "example.accounts.v1.ProfileService", Method: "GetProfile", Pos: model.Pos{File: path, Line: 3, Column: 5}},
+	want := []rpc.Route{
+		{Method: rpc.Method{Service: "example.accounts.v1.ProfileService", Method: "GetProfile", Pos: model.Pos{File: path, Line: 3, Column: 5}},
 			Target: g.Service("accounts"), Cluster: "accounts_grpc", Name: "accounts-rpc"},
-		{Method: Method{Service: "example.shop.v1.CartService", Method: "AddItem", Action: "buy", Reports: []string{"browse", "view"},
+		{Method: rpc.Method{Service: "example.shop.v1.CartService", Method: "AddItem", Action: "buy", Reports: []string{"browse", "view"},
 			Pos: model.Pos{File: path, Line: 2, Column: 3}},
 			Target: g.Service("shop"), Cluster: "shop_grpc", Name: "shop"},
 	}
@@ -198,13 +203,13 @@ func TestResolveKeepsTheMethod(t *testing.T) {
 func TestTable(t *testing.T) {
 	cases := []struct {
 		name   string
-		routes []Route
+		routes []rpc.Route
 		want   string
 	}{
 		{"no route", nil, "[]\n"},
-		{"one object per line", []Route{
-			{Method: Method{Service: "example.accounts.v1.ProfileService", Method: "GetProfile"}, Cluster: "accounts_grpc"},
-			{Method: Method{Service: "example.shop.v1.CartService", Method: "AddItem", Action: "buy",
+		{"one object per line", []rpc.Route{
+			{Method: rpc.Method{Service: "example.accounts.v1.ProfileService", Method: "GetProfile"}, Cluster: "accounts_grpc"},
+			{Method: rpc.Method{Service: "example.shop.v1.CartService", Method: "AddItem", Action: "buy",
 				Reports: []string{"browse", "view"}}, Cluster: "shop_grpc"},
 		}, testsupport.Document{
 			`[`,
@@ -213,8 +218,8 @@ func TestTable(t *testing.T) {
 			`]`,
 		}.String()},
 		// A quote and a backslash are escaped; <, > and & are written as they are, as a Jackson writer writes them.
-		{"quotes, backslashes and HTML characters", []Route{
-			{Method: Method{Service: "a.B", Method: "M", Action: `<a & "b">\`, Reports: []string{"x<y"}}, Cluster: "a_grpc"},
+		{"quotes, backslashes and HTML characters", []rpc.Route{
+			{Method: rpc.Method{Service: "a.B", Method: "M", Action: `<a & "b">\`, Reports: []string{"x<y"}}, Cluster: "a_grpc"},
 		}, testsupport.Document{
 			`[`,
 			`  {"service": "a.B", "method": "M", "action": "<a & \"b\">\\", "reports": ["x<y"], "cluster": "a_grpc"}`,
@@ -222,7 +227,7 @@ func TestTable(t *testing.T) {
 		}.String()},
 	}
 	for _, c := range cases {
-		if got := string(Table(c.routes)); got != c.want {
+		if got := string(rpc.Table(c.routes)); got != c.want {
 			t.Errorf("%s: Table() = %q, want %q", c.name, got, c.want)
 		}
 	}

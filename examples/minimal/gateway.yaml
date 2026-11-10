@@ -1,8 +1,9 @@
 # yaml-language-server: $schema=../../schema/proxyfile.schema.json
-# The smallest proxyfile: one service, one route, browsers admitted by origins.json.
+# The smallest proxyfile: one service, one route, and the browser origins it admits.
 listen: 8000
 services:
   app: {http: 3000}
-origins: origins.json
+origins:
+  all: {hosts: [localhost], origins: ["http://localhost:3000"]}
 routes:
   - {name: app, prefix: /, to: app}

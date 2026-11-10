@@ -12,8 +12,8 @@ import (
 	"github.com/kitecorp/proxyfile/internal/testsupport"
 )
 
-const usageText = `usage: proxyfile render <file> -o <envoy.yaml> [--rpc-methods <methods.json>] [--rpc-table <table.json>]
-       proxyfile check <file> -o <envoy.yaml> [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+const usageText = `usage: proxyfile render [<file>] -o <envoy.yaml> [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+       proxyfile check [<file>] -o <envoy.yaml> [--rpc-methods <methods.json>] [--rpc-table <table.json>]
        proxyfile schema
        proxyfile version
 `
@@ -22,19 +22,27 @@ const examples = "../../examples"
 
 const overwrite = "proxyfile render: an output path names an input or the other output\n"
 
+// originsFixture is the origins file that says what the minimal example writes inline, which the render tests keep for
+// the file form.
+const originsFixture = "../render/testdata/origins.json"
+
 // TestRun runs the whole program in memory. In args, <ex> stands for the examples directory and <tmp> for the row's
 // own temporary directory, which the outputs name as <tmp> again before they are compared.
 func TestRun(t *testing.T) {
+	// minimalConf is the minimal example written in HOCON, for the rows that find a default file in that form. It is
+	// read here, before any row changes directory, because examples is a path relative to the package directory.
+	minimalConf := string(testsupport.ReadFile(t, examples+"/minimal/gateway.conf"))
 	cases := []struct {
 		name           string
 		setup          func(t *testing.T, tmp string) // runs before Run when set
+		chdir          bool                           // Run runs in <tmp>, so the row names nothing under <ex>
 		args           string                         // split at spaces
 		exit           int
 		stdout, stderr string
 		also           func(t *testing.T, tmp string) // checks the files after Run when set
 	}{
 		{name: "check full",
-			args: "check <ex>/full/gateway.yaml -o <ex>/full/envoy.yaml --rpc-methods <ex>/full/methods.json --rpc-table <ex>/full/rpc-table.json"},
+			args: "check <ex>/full/gateway.yaml -o <ex>/full/envoy.yaml --rpc-table <ex>/full/rpc-table.json"},
 		{name: "file after flags", args: "check -o <ex>/minimal/envoy.yaml <ex>/minimal/gateway.yaml"},
 		{name: "hand edit", setup: func(t *testing.T, tmp string) {
 			copyMinimal(t, tmp)
@@ -65,15 +73,78 @@ func TestRun(t *testing.T) {
 			testsupport.WriteFile(t, path, strings.Replace(text, "listen: 8000\n", "liste: 8000\n", 1))
 		}, args: "render <tmp>/gateway.yaml -o <tmp>/out.yaml", exit: 1,
 			stderr: "<tmp>/gateway.yaml:3:1: \"listen\" is required here\n" +
-				"<tmp>/gateway.yaml:3:1: unknown key \"liste\"; known here: admin, auth, limits, listen, log, namespace, origins, remove_from_clients, routes, services, timeouts\n",
+				"<tmp>/gateway.yaml:3:1: unknown key \"liste\"; known here: admin, auth, cors, limits, listen, log, namespace, origins, remove_from_clients, routes, rpc, services, timeouts\n",
 			also: nothingWritten("minimal")},
 		{name: "no arguments", exit: 2, stderr: usageText},
 		{name: "help", args: "--help", stdout: usageText},
 		{name: "unknown command", args: "rendr", exit: 2, stderr: "proxyfile: unknown command \"rendr\"\n" + usageText},
 		{name: "no -o", args: "render a.yaml", exit: 2, stderr: "proxyfile render: -o is required\n"},
 		{name: "two files", args: "render a.yaml b.yaml -o c.yaml", exit: 2, stderr: "proxyfile render: give exactly one file\n"},
-		{name: "table without methods", args: "render a.yaml -o b.yaml --rpc-table t.json", exit: 2,
-			stderr: "proxyfile render: --rpc-table needs --rpc-methods\n"},
+		// With no file given, the file is the one default name in the working directory.
+		{name: "default Proxyfile", setup: minimalWith(minimalConf, "Proxyfile"), chdir: true,
+			args: "render -o <tmp>/out.yaml",
+			also: func(t *testing.T, tmp string) {
+				if !bytes.Equal(testsupport.ReadFile(t, filepath.Join(tmp, "out.yaml")), testsupport.ReadFile(t, filepath.Join(tmp, "envoy.yaml"))) {
+					t.Errorf("out.yaml differs from envoy.yaml, the copy of %s/minimal/envoy.yaml", examples)
+				}
+			}},
+		{name: "default proxyfile.yaml for check",
+			setup: minimalWith(string(testsupport.ReadFile(t, examples+"/minimal/gateway.yaml")), "proxyfile.yaml"), chdir: true,
+			args: "check -o <tmp>/envoy.yaml"},
+		{name: "no default here", setup: copyMinimal, chdir: true, args: "render -o <tmp>/out.yaml", exit: 2,
+			stderr: "proxyfile render: no file given and no Proxyfile, proxyfile.conf, proxyfile.yaml or proxyfile.yml here\n",
+			also:   nothingWritten("minimal")},
+		{name: "two defaults here", setup: minimalWith(minimalConf, "Proxyfile", "proxyfile.conf"), chdir: true,
+			args: "render -o <tmp>/out.yaml", exit: 2,
+			stderr: "proxyfile render: more than one default file here: Proxyfile, proxyfile.conf; give the file\n",
+			also:   nothingWritten("minimal")},
+		// Only a regular file counts as a default, so a directory of that name is passed over.
+		{name: "default is a directory", chdir: true, args: "render -o <tmp>/out.yaml", exit: 2,
+			setup: func(t *testing.T, tmp string) {
+				copyMinimal(t, tmp)
+				if err := os.Mkdir(filepath.Join(tmp, "Proxyfile"), 0o755); err != nil {
+					t.Fatalf("Mkdir: %v", err)
+				}
+			},
+			stderr: "proxyfile render: no file given and no Proxyfile, proxyfile.conf, proxyfile.yaml or proxyfile.yml here\n",
+			also:   nothingWritten("minimal")},
+		// The default file is an input like a named one, so the output-path rule keeps render from overwriting it.
+		{name: "default named as the output", setup: minimalWith(minimalConf, "Proxyfile"), chdir: true,
+			args: "render -o Proxyfile", exit: 2, stderr: overwrite,
+			also: func(t *testing.T, tmp string) {
+				if got := string(testsupport.ReadFile(t, filepath.Join(tmp, "Proxyfile"))); got != minimalConf {
+					t.Errorf("Proxyfile = %q, want %q", got, minimalConf)
+				}
+			}},
+		// The methods may be written in the proxyfile, so the table's need for them is known only after the read.
+		{name: "table without methods", setup: copyMinimal,
+			args: "render <tmp>/gateway.yaml -o <tmp>/out.yaml --rpc-table <tmp>/t.json", exit: 2,
+			stderr: "proxyfile render: --rpc-table needs rpc.methods or --rpc-methods\n",
+			also: func(t *testing.T, tmp string) {
+				nothingWritten("minimal")(t, tmp)
+				if _, err := os.Stat(filepath.Join(tmp, "t.json")); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("t.json: Stat error = %v, want that it does not exist", err)
+				}
+			}},
+		{name: "table from rpc.methods", setup: func(t *testing.T, tmp string) {
+			testsupport.WriteFile(t, filepath.Join(tmp, "gateway.yaml"),
+				string(testsupport.ReadFile(t, examples+"/partial/gateway.yaml"))+testsupport.PartialMethods)
+		}, args: "render <tmp>/gateway.yaml -o <tmp>/out.yaml --rpc-table <tmp>/t.json",
+			also: func(t *testing.T, tmp string) {
+				if !bytes.Equal(testsupport.ReadFile(t, filepath.Join(tmp, "t.json")), testsupport.ReadFile(t, examples+"/partial/rpc-table.json")) {
+					t.Errorf("t.json differs from %s/partial/rpc-table.json", examples)
+				}
+			}},
+		// An empty list is a list given, as an empty methods file is, so the table is written and holds no route.
+		{name: "table from an empty rpc.methods", setup: func(t *testing.T, tmp string) {
+			testsupport.WriteFile(t, filepath.Join(tmp, "gateway.yaml"),
+				string(testsupport.ReadFile(t, examples+"/partial/gateway.yaml"))+"rpc:\n  methods: []\n")
+		}, args: "render <tmp>/gateway.yaml -o <tmp>/out.yaml --rpc-table <tmp>/t.json",
+			also: func(t *testing.T, tmp string) {
+				if got := string(testsupport.ReadFile(t, filepath.Join(tmp, "t.json"))); got != "[]\n" {
+					t.Errorf("t.json = %q, want %q", got, "[]\n")
+				}
+			}},
 		{name: "output names an input", setup: copyMinimal, args: "render <tmp>/gateway.yaml -o <tmp>/gateway.yaml", exit: 2,
 			stderr: overwrite, also: nothingWritten("minimal", "gateway.yaml")},
 		{name: "output names an input, another spelling", setup: copyMinimal,
@@ -82,9 +153,23 @@ func TestRun(t *testing.T) {
 		{name: "table names the methods file", setup: func(t *testing.T, tmp string) { copyExample(t, tmp, "partial") },
 			args: "render <tmp>/gateway.yaml -o <tmp>/out.yaml --rpc-methods <tmp>/methods.json --rpc-table <tmp>/methods.json",
 			exit: 2, stderr: overwrite, also: nothingWritten("partial", "methods.json")},
-		// The origins file is named inside the proxyfile, not on the command line.
-		{name: "output names the origins file", setup: copyMinimal, args: "render <tmp>/gateway.yaml -o <tmp>/origins.json",
-			exit: 2, stderr: overwrite, also: nothingWritten("minimal", "origins.json")},
+		// The origins file is named inside the proxyfile, not on the command line. The examples write their origins
+		// inline, so the row writes the minimal example in the file form beside the fixture it names.
+		{name: "output names the origins file", setup: func(t *testing.T, tmp string) {
+			text := string(testsupport.ReadFile(t, examples+"/minimal/gateway.yaml"))
+			if !strings.Contains(text, testsupport.MinimalInlineOrigins) {
+				t.Fatalf("the minimal example holds no %q to replace", testsupport.MinimalInlineOrigins)
+			}
+			testsupport.WriteFile(t, filepath.Join(tmp, "gateway.yaml"),
+				strings.Replace(text, testsupport.MinimalInlineOrigins, "origins: origins.json\n", 1))
+			testsupport.WriteFile(t, filepath.Join(tmp, "origins.json"), string(testsupport.ReadFile(t, originsFixture)))
+		}, args: "render <tmp>/gateway.yaml -o <tmp>/origins.json", exit: 2, stderr: overwrite,
+			also: func(t *testing.T, tmp string) {
+				nothingWritten("minimal")(t, tmp)
+				if !bytes.Equal(testsupport.ReadFile(t, filepath.Join(tmp, "origins.json")), testsupport.ReadFile(t, originsFixture)) {
+					t.Errorf("origins.json changed")
+				}
+			}},
 		{name: "version", args: "version", stdout: "proxyfile v9.9.9\n"},
 		{name: "schema", args: "schema", stdout: string(testsupport.ReadFile(t, "../../schema/proxyfile.schema.json"))},
 	}
@@ -93,6 +178,9 @@ func TestRun(t *testing.T) {
 			tmp := t.TempDir()
 			if c.setup != nil {
 				c.setup(t, tmp)
+			}
+			if c.chdir {
+				t.Chdir(tmp)
 			}
 			var args []string
 			if c.args != "" {
@@ -132,6 +220,16 @@ func copyExample(t *testing.T, dir, name string) {
 func copyMinimal(t *testing.T, dir string) {
 	t.Helper()
 	copyExample(t, dir, "minimal")
+}
+
+// minimalWith returns a setup that copies the minimal example and writes text into each named file beside it.
+func minimalWith(text string, names ...string) func(t *testing.T, tmp string) {
+	return func(t *testing.T, tmp string) {
+		copyMinimal(t, tmp)
+		for _, name := range names {
+			testsupport.WriteFile(t, filepath.Join(tmp, name), text)
+		}
+	}
 }
 
 // nothingWritten returns a check that out.yaml was not written and that each named file of the row's directory still
