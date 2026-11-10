@@ -60,13 +60,21 @@ const (
 	// so a client header the file means to remove would reach the service.
 	headerPattern = `^[a-z0-9][a-z0-9-]*\*?$`
 	headerExpect  = "a lower-case header name, or a prefix ending in *"
+	// A header named exactly, for the rules that take no prefix: auth.only_with_header and a tracing tag's header.
+	lowerHeaderPattern = `^[a-z0-9][a-z0-9-]*$`
+	lowerHeaderExpect  = "a lower-case header name"
 	// Envoy 1.40.2 holds these whole numbers in a uint32 and refuses a larger value when it loads the file:
 	// max_headers_count (protocol.proto), which limits.request_headers.count is written to; the circuit breakers'
 	// max_connections, max_pending_requests and max_requests (circuit_breaker.proto), which limits.connections is
-	// written to; and num_retries (route_components.proto), which retries is written to. As a Max, the limit reaches
+	// written to; num_retries (route_components.proto), which retries is written to; and tracing's first, the
+	// fixed_target the X-Ray sampler holds as a uint32 (localized_sampling.cc line 35). As a Max, the limit reaches
 	// the JSON Schema too, so an editor refuses what the check refuses.
 	largestUint32 = math.MaxUint32
 )
+
+// AgentExpect is exported because the reader's message for an agent its pattern admits but ParseAgent refuses must be
+// the check's, and the reader's tooLarge cannot walk the provider's Either to read it from the description.
+const AgentExpect = "an IPv4 address and a port from 1 to 65535, such as 127.0.0.1:2000"
 
 func port(name, doc string, required bool) Field {
 	return Field{Name: name, Doc: doc, Kind: Int, Required: required, Min: 1, Max: 65535}
@@ -94,6 +102,14 @@ func texts(name, doc string, required bool) Field {
 
 func retries(doc string) Field {
 	return Field{Name: "retries", Doc: doc, Kind: Int, Min: 0, Max: largestUint32}
+}
+
+func first(doc string, required bool) Field {
+	return Field{Name: "first", Doc: doc, Kind: Int, Required: required, Min: 0, Max: largestUint32}
+}
+
+func rate(doc string, required bool) Field {
+	return Field{Name: "rate", Doc: doc, Kind: Text, Required: required, Pattern: model.PercentPattern, Expect: "a whole percentage such as 5%"}
 }
 
 // MatchKinds are the keys of which a route writes exactly one, and ServicePorts the port keys of a service, each
@@ -147,7 +163,7 @@ var Proxyfile = Field{
 			// header-matcher names it reads itself, this one among them (the header match input keeps it as a
 			// LowerCaseString, http/matching/inputs.h).
 			{Name: "only_with_header", Doc: "The check runs only on requests that carry this header.",
-				Kind: Text, Pattern: `^[a-z0-9][a-z0-9-]*$`, Expect: "a lower-case header name"},
+				Kind: Text, Pattern: lowerHeaderPattern, Expect: lowerHeaderExpect},
 			headers("send", "The request headers the check is sent; a name ending in * is a prefix."),
 			headers("accept", "The headers of the check's answer that reach the service; a name ending in * is a prefix."),
 		}},
@@ -203,8 +219,57 @@ var Proxyfile = Field{
 			{Name: "sample", Doc: "The share of the other requests that is logged.", Kind: Text, Required: true,
 				Pattern: model.PercentPattern, Expect: "a whole percentage such as 1%"},
 		}},
+		tracingField,
 	},
 }
+
+// tracingField is the tracing key (design section 5, "Tracing"). The reader adds the one rule a pattern cannot hold:
+// an agent that is an IPv4 address and a port.
+var tracingField = Field{Name: "tracing", Doc: "An X-Ray segment for each sampled request, sent to an agent over UDP.", Kind: Map, Fields: []Field{
+	// One Map choice chosen by its key, as the rpc entry of routes is chosen by rpc, so another provider is one more
+	// choice with its own keys, and a mapping without xray gets the Either's message.
+	{Name: "provider", Doc: "The tracing system the segments go to: a mapping with one key that names it.", Kind: Either, Required: true,
+		Expect: "a mapping with the one key xray", Choices: []Field{
+			{Doc: "AWS X-Ray.", Kind: Map, Select: "xray", Fields: []Field{
+				{Name: "xray", Doc: "AWS X-Ray: where the segments go, their name and which requests are traced.", Kind: Map, Required: true, Fields: []Field{
+					{Name: "agent", Doc: "Where the segments go over UDP: an X-Ray daemon, or an agent that takes X-Ray segments; 127.0.0.1:2000 when not written.",
+						Kind: Text, Pattern: model.AgentPattern, Expect: AgentExpect},
+					// X-Ray's characters (its segment documents, "Required Segment Fields"), ASCII only, so the check and an
+					// editor's ECMAScript engine count the same characters.
+					{Name: "segment", Doc: "The name of the gateway's segments, which names its node in X-Ray's service map.", Kind: Text, Required: true,
+						Pattern: `^[A-Za-z0-9 _.:/%&#=+\\@-]{1,200}$`, Expect: `1 to 200 characters: letters, digits, spaces and _ . : / % & # = + \ - @`},
+					{Name: "sample", Doc: "Which requests are traced when the request does not say: the rules, then the default. Without it, Envoy traces the first request each second and 5% of the others.",
+						Kind: Map, Fields: []Field{
+							first("How many requests each second are traced before rate applies; 1 when not written.", false),
+							rate("The share of the other requests that is traced; 5% when not written.", false),
+							{Name: "rules", Doc: "Rules tried in the order written, before the default; the first that matches a request decides.", Kind: List,
+								Item: &Field{Doc: "One rule: what it matches, and its own first and rate.", Kind: Map, Fields: []Field{
+									{Name: "host", Doc: "Matches the Host header, with its port when the request has one; * when not written.", Kind: Text,
+										Pattern: `^[A-Za-z0-9.:\[\]*?-]+$`, Expect: "a pattern of letters, digits, ., -, :, [, ], * and ?"},
+									{Name: "method", Doc: "Matches the request's method; * when not written.", Kind: Text,
+										Pattern: `^[A-Z*?]+$`, Expect: "a method in capitals, or a pattern of capitals, * and ?"},
+									{Name: "path", Doc: "Matches the request's path, with its query; * when not written.", Kind: Text,
+										Pattern: `^[/*][!-~]*$`, Expect: "a pattern of printable characters without spaces, starting with / or *"},
+									first("How many matching requests each second are traced before rate applies.", true),
+									rate("The share of the other matching requests that is traced.", true),
+								}}},
+						}},
+				}},
+			}},
+		}},
+	{Name: "tags", Doc: "Annotations on each segment, by name.", Kind: Dict,
+		Key: &Field{Name: "tag name", Kind: Text, Pattern: `^[A-Za-z0-9_]+$`, Expect: "letters, digits and _"},
+		Item: &Field{Doc: "One tag: the environment variable or the request header it reads, and an optional default.", Kind: Map,
+			OneOf: []string{"env", "header"}, Fields: []Field{
+				{Name: "env", Doc: "An environment variable of the gateway's process, read once when Envoy starts.", Kind: Text,
+					Pattern: `^[A-Za-z_][A-Za-z0-9_]*$`, Expect: "a variable name: letters, digits and _, not starting with a digit"},
+				{Name: "header", Doc: "A request header.", Kind: Text, Pattern: lowerHeaderPattern, Expect: lowerHeaderExpect},
+				{Name: "default", Doc: "The value when the variable is unset or the header is absent; without it the segment gets no tag then.",
+					Kind: Text, Pattern: `[\s\S]`, Expect: "one character or more"},
+			}}},
+	{Name: "path_in_url", Doc: "true keeps the request's path in the segment's URL, its first 256 characters; false, the default, keeps the scheme and the host only.",
+		Kind: Bool},
+}}
 
 // corsField and environmentLists are written once and used by both places the origins may be written: the proxyfile,
 // where each environment is named by its key, and an origins file, where it is named by its name key. So a key means

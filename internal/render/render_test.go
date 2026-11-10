@@ -21,8 +21,9 @@ import (
 
 var update = flag.Bool("update", false, "rewrite the generated files of examples/")
 
-// TestExampleTrees is the generator's proof: the tree it writes for each example equals a tree written by hand,
-// list order included, and a second render gives the same bytes.
+// TestExampleTrees is the generator's proof: the tree it writes for each of the three 1.1 examples equals a tree
+// written by hand, list order included, and a second render gives the same bytes. The rest of the tracing example's
+// tree is the 1.1 generator's, which these three pin; TestTracingExample is the proof of its tracing parts.
 func TestExampleTrees(t *testing.T) {
 	for _, name := range []string{"minimal", "partial", "full"} {
 		t.Run(name, func(t *testing.T) {
@@ -48,7 +49,7 @@ func TestExampleTrees(t *testing.T) {
 
 // TestExamplesAreCurrent keeps the committed outputs of examples/ equal to what render writes; -update rewrites them.
 func TestExamplesAreCurrent(t *testing.T) {
-	for _, name := range []string{"minimal", "partial", "full"} {
+	for _, name := range []string{"minimal", "partial", "full", "tracing"} {
 		t.Run(name, func(t *testing.T) {
 			files, problems := render(requestFor(t, name, filepath.Join("..", "..", "examples", name, "envoy.yaml")))
 			if problems != nil {
@@ -75,7 +76,7 @@ func TestBothFormsGiveTheSameFiles(t *testing.T) {
 	cases := []struct {
 		name  string
 		files int
-	}{{"minimal", 1}, {"partial", 2}, {"full", 2}}
+	}{{"minimal", 1}, {"partial", 2}, {"full", 2}, {"tracing", 1}}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			req := requestFor(t, c.name, "envoy.yaml")
@@ -402,8 +403,10 @@ typed_per_filter_config:
 // auth adds the Lua filter and the bridge but not set_metadata or ext_authz, and its RPC routes carry no metadata and
 // no question; a gateway with auth and no rpc entry has no Lua filter and no bridge; connections without heap watch
 // connections alone; the check's switch header is the one only_with_header names; with auth, the early header removal
-// adds the question headers and the accept names that remove_from_clients does not already cover; and an environment
-// that admits no browser origin writes an empty CORS list.
+// adds the question headers and the accept names that remove_from_clients does not already cover; with tracing, the
+// early header removal is written for the two downstream headers alone and leaves out one an entry covers; without
+// sample no manifest is written; path_in_url: true writes no max_path_tag_length; and an environment that admits no
+// browser origin writes an empty CORS list.
 func TestPartsNoExampleCombines(t *testing.T) {
 	manager := []any{"static_resources", "listeners", 0, "filter_chains", 0, "filters", 0, "typed_config"}
 	const rpcWithoutAuth = `listen: 8000
@@ -415,6 +418,14 @@ routes:
   - {name: q, prefix: /, to: q}
 `
 	const rpcMethod = `[{"service": "q.v1.S", "method": "Do", "action": "use", "reports": ["operate"]}]`
+	// tracingBase is a gateway with neither auth nor remove_from_clients; each tracing row appends its tracing key.
+	const tracingBase = `listen: 8000
+services:
+  q: {http: 3000}
+origins: origins.json
+routes:
+  - {name: q, prefix: /, to: q}
+`
 	cases := []struct {
 		name, proxyfile, methods string // methods is written to methods.json and given to render when not empty
 		origins                  string // written to origins.json; testdata/origins.json when empty
@@ -539,6 +550,49 @@ routes:
 - remove_on_match: {key_matcher: {prefix: x-tier-}}
 - remove: x-envoy-auth-failure-mode-allowed
 `},
+		// With tracing and nothing else to remove, the early header removal is written for the two tracing headers alone.
+		{name: "tracing alone removes the two downstream headers", proxyfile: tracingBase + "tracing: {provider: {xray: {segment: s}}}\n",
+			at: slices.Concat(manager, []any{"early_header_mutation_extensions", 0, "typed_config", "mutations"}),
+			want: `
+- remove: x-envoy-downstream-service-cluster
+- remove: x-envoy-downstream-service-node
+`},
+		// Without sample no manifest is written, so Envoy's own rule applies; without tags there is no custom_tags.
+		{name: "tracing with the fewest keys", proxyfile: tracingBase + "tracing: {provider: {xray: {segment: s}}}\n", at: slices.Concat(manager, []any{"tracing"}),
+			want: `
+max_path_tag_length: 0
+provider:
+  name: envoy.tracers.xray
+  typed_config:
+    "@type": type.googleapis.com/envoy.config.trace.v3.XRayConfig
+    daemon_endpoint: {protocol: UDP, address: 127.0.0.1, port_value: 2000}
+    segment_name: s
+`},
+		// path_in_url leaves Envoy's default length; two rules are written in the order given, the second under the first.
+		{name: "tracing with the path and two rules",
+			proxyfile: tracingBase + `tracing: {provider: {xray: {segment: s, agent: 10.0.0.9:2001, sample: {first: 3, rate: 50%, rules: [{path: /a, first: 1, rate: 100%}, {host: api.example.com, method: GET, first: 0, rate: 10%}]}}}, path_in_url: true}` + "\n",
+			at:        slices.Concat(manager, []any{"tracing"}),
+			want: `
+provider:
+  name: envoy.tracers.xray
+  typed_config:
+    "@type": type.googleapis.com/envoy.config.trace.v3.XRayConfig
+    daemon_endpoint: {protocol: UDP, address: 10.0.0.9, port_value: 2001}
+    segment_name: s
+    sampling_rule_manifest:
+      inline_string: |
+        {"version": 2,
+         "default": {"fixed_target": 3, "rate": 0.5},
+         "rules": [{"host": "*", "http_method": "*", "url_path": "/a", "fixed_target": 1, "rate": 1},
+                   {"host": "api.example.com", "http_method": "GET", "url_path": "*", "fixed_target": 0, "rate": 0.1}]}
+`},
+		// An entry of remove_from_clients that covers both removes them, so neither is written again.
+		{name: "remove_from_clients covers the two downstream headers",
+			proxyfile: tracingBase + "remove_from_clients: [x-envoy-*]\ntracing: {provider: {xray: {segment: s}}}\n",
+			at:        slices.Concat(manager, []any{"early_header_mutation_extensions", 0, "typed_config", "mutations"}),
+			want: `
+- remove_on_match: {key_matcher: {prefix: x-envoy-}}
+`},
 		// RBAC admits only a request without an Origin and an origin on the environment's own host, and the CORS policy
 		// keeps its list, written empty.
 		{name: "an environment with no origins and no patterns",
@@ -589,6 +643,62 @@ envoy.filters.http.cors:
 				got = names(got)
 			}
 			if d := firstDifference(decode(t, []byte(c.want)), got, ""); d != "" {
+				t.Error(d)
+			}
+		})
+	}
+}
+
+// The tracing example's connection manager holds the tree the design lists, the manifest's text byte for byte, and the
+// early header removal in its order: remove_from_clients, the check's headers, Envoy's auth mark, then the two
+// tracing removals.
+func TestTracingExample(t *testing.T) {
+	files, problems := render(requestFor(t, "tracing", "envoy.yaml"))
+	if problems != nil {
+		t.Fatalf("render problems = %q, want none", testsupport.ProblemStrings(problems))
+	}
+	manager := valueAt(decode(t, files[0].Bytes), "static_resources", "listeners", 0, "filter_chains", 0, "filters", 0, "typed_config")
+	cases := []struct {
+		at   []any
+		want string
+	}{
+		{[]any{"request_id_extension"}, `
+typed_config:
+  "@type": type.googleapis.com/envoy.extensions.request_id.uuid.v3.UuidRequestIdConfig
+  pack_trace_reason: false
+`},
+		{[]any{"tracing"}, `
+max_path_tag_length: 0
+custom_tags:
+- tag: environment
+  environment: {name: APP_ENVIRONMENT, default_value: local}
+- tag: request_id
+  request_header: {name: x-request-id}
+provider:
+  name: envoy.tracers.xray
+  typed_config:
+    "@type": type.googleapis.com/envoy.config.trace.v3.XRayConfig
+    daemon_endpoint: {protocol: UDP, address: 127.0.0.1, port_value: 2000}
+    segment_name: example-gateway
+    sampling_rule_manifest:
+      inline_string: |
+        {"version": 2,
+         "default": {"fixed_target": 1, "rate": 0.05},
+         "rules": [{"host": "*", "http_method": "*", "url_path": "/live*", "fixed_target": 0, "rate": 0}]}
+`},
+		{[]any{"early_header_mutation_extensions", 0, "typed_config", "mutations"}, `
+- remove_on_match: {key_matcher: {prefix: x-debug-}}
+- remove: x-gateway-action
+- remove: x-gateway-reports
+- remove: x-user-id
+- remove: x-envoy-auth-failure-mode-allowed
+- remove: x-envoy-downstream-service-cluster
+- remove: x-envoy-downstream-service-node
+`},
+	}
+	for _, c := range cases {
+		t.Run(fmt.Sprint(c.at[0]), func(t *testing.T) {
+			if d := firstDifference(decode(t, []byte(c.want)), valueAt(manager, c.at...), ""); d != "" {
 				t.Error(d)
 			}
 		})

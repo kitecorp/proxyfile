@@ -3,31 +3,37 @@ package model
 import (
 	"fmt"
 	"math"
+	"net/netip"
 	"regexp"
 	"strconv"
 	"strings"
 )
 
-// ParseSize, ParseTime and ParsePercent compile SizePattern, TimeOrNonePattern
-// and PercentPattern, the same text the schema's "pattern" carries, so the
-// schema and the parser accept the same forms. They differ in two places. No
-// parser compiles TimePattern, and ParseTime accepts "none", so a field whose
-// schema uses TimePattern relies on the schema check alone to refuse "none".
-// And a value can match its pattern yet overflow an int64, which only the
-// parser refuses. The two time patterns share timeFragment so their digits and
-// units cannot drift apart.
+// ParseSize, ParseTime, ParsePercent and ParseAgent compile SizePattern,
+// TimeOrNonePattern, PercentPattern and AgentPattern, the same text the
+// schema's "pattern" carries, so the schema and the parser accept the same
+// forms. They differ in three places. No parser compiles TimePattern, and
+// ParseTime accepts "none", so a field whose schema uses TimePattern relies on
+// the schema check alone to refuse "none". A value can match its pattern yet
+// overflow an int64, which only the parser refuses. And an agent can match its
+// pattern, which takes digits and dots, and still hold an octet above 255, an
+// octet with a leading zero or a port above 65535, which only ParseAgent
+// refuses. The two time patterns share timeFragment so their digits and units
+// cannot drift apart.
 const (
 	SizePattern       = `^[1-9][0-9]*(KiB|MiB|GiB)$`
 	timeFragment      = `[1-9][0-9]*(ms|s|m|h)`
 	TimePattern       = `^` + timeFragment + `$`
 	TimeOrNonePattern = `^(none|` + timeFragment + `)$`
 	PercentPattern    = `^(100|[1-9]?[0-9])%$`
+	AgentPattern      = `^[0-9]{1,3}(\.[0-9]{1,3}){3}:[1-9][0-9]{0,4}$`
 )
 
 var (
 	sizeExpression       = regexp.MustCompile(SizePattern)
 	timeOrNoneExpression = regexp.MustCompile(TimeOrNonePattern)
 	percentExpression    = regexp.MustCompile(PercentPattern)
+	agentExpression      = regexp.MustCompile(AgentPattern)
 )
 
 var sizeFactors = map[string]int64{"KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30}
@@ -69,6 +75,20 @@ func ParsePercent(text string) (percent int, ok bool) {
 		return 0, false
 	}
 	return percent, true
+}
+
+// ParseAgent returns the IPv4 address and the UDP port of an agent written as address:port. The pattern refuses
+// a port of 0 or one with a leading zero, which netip.ParseAddrPort would take; netip refuses what the pattern
+// cannot, an octet above 255 or with a leading zero and a port above 65535.
+func ParseAgent(text string) (address string, port int64, ok bool) {
+	if !agentExpression.MatchString(text) {
+		return "", 0, false
+	}
+	addrPort, err := netip.ParseAddrPort(text)
+	if err != nil || !addrPort.Addr().Is4() {
+		return "", 0, false
+	}
+	return addrPort.Addr().String(), int64(addrPort.Port()), true
 }
 
 // ParseSize and ParseTime share scale so that one place refuses an int64

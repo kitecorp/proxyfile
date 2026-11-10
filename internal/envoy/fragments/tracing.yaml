@@ -1,0 +1,42 @@
+# The connection manager's tracing: an X-Ray segment for each sampled request (Envoy 1.40.2,
+# http_connection_manager.proto lines 174 to 213).
+#
+# Envoy's three sampling shares (client_sampling, random_sampling, overall_sampling) stay at their default of 100%,
+# because the X-Ray tracer ignores Envoy's own decision (xray_tracer_impl.cc line 79) and follows a request's Sampled
+# flag, otherwise the manifest (lines 83 to 104).
+#
+# max_path_tag_length: 0 keeps the URL's scheme and host and cuts the path with its query (utility.cc lines 1079 to
+# 1084); without it Envoy keeps 256 characters of the path (http_connection_manager.proto lines 203 to 206).
+#
+# The agent is always written, because the tracer refuses an endpoint that is not UDP, which an unset one is, its
+# protocol being TCP, 0 (xray/config.cc lines 35 to 37; api/envoy/config/core/v3/address.proto lines 57 to 58).
+#
+# An environment tag is read once, when Envoy starts (custom_tag_impl.cc lines 61 to 62), and a tag with an empty
+# value is not set (lines 40 to 45).
+#
+# Without sample there is no manifest, and Envoy's own rule applies: the first request each second and then 5%
+# (localized_sampling.cc lines 13 to 16 and 90 to 94).
+{{- if not .PathInURL}}
+max_path_tag_length: 0
+{{- end}}
+{{- with .Tags}}
+custom_tags:
+{{- range .}}
+- tag: {{q .Name}}
+{{- if .Env}}
+  environment: {name: {{q .Env}}{{with .Default}}, default_value: {{q .}}{{end}}}
+{{- else}}
+  request_header: {name: {{q .Header}}{{with .Default}}, default_value: {{q .}}{{end}}}
+{{- end}}
+{{- end}}
+{{- end}}
+provider:
+  name: envoy.tracers.xray
+  typed_config:
+    "@type": type.googleapis.com/envoy.config.trace.v3.XRayConfig
+    daemon_endpoint: {protocol: UDP, address: {{q .Address}}, port_value: {{.Port}}}
+    segment_name: {{q .Segment}}
+{{- if .Sample}}
+    sampling_rule_manifest:
+      inline_string: $manifest
+{{- end}}

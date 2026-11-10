@@ -17,6 +17,7 @@ type Gateway struct {
 	Routes            []Route // written order
 	RoutesPos         Pos     // the `routes` key
 	Log               *Log
+	Tracing           *Tracing // nil when not written
 }
 
 type Port struct {
@@ -151,6 +152,40 @@ type Log struct {
 	StatusFrom    int64
 	SamplePercent int
 	Pos           Pos // the `log` key
+}
+
+// Tracing is the tracing key: an X-Ray segment for each sampled request.
+type Tracing struct {
+	XRay      XRay
+	Tags      []Tag // written order
+	PathInURL bool
+}
+
+// XRay is tracing.provider.xray, the one provider of 1.2.
+type XRay struct {
+	Address string // the agent's IPv4 address; 127.0.0.1 when not written
+	Port    int64  // the agent's UDP port; 2000 when not written
+	Segment string
+	Sample  *Sample // nil when not written: no manifest, and Envoy's own rule applies
+}
+
+// Sample is what the sampling manifest holds. The default rule matches every request, so its Host, Method and Path
+// are empty.
+type Sample struct {
+	Default SampleRule
+	Rules   []SampleRule // written order
+}
+
+type SampleRule struct {
+	Host, Method, Path string // "*" when not written
+	First              int64
+	RatePercent        int
+}
+
+// Tag is one custom tag: exactly one of Env and Header is set.
+type Tag struct {
+	Name, Env, Header string
+	Default           string // "" when not written; the check refuses an empty one
 }
 
 // Service returns the service declared with name, or nil.

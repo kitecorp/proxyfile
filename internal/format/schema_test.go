@@ -52,6 +52,12 @@ func TestSchemaAcceptsTheExamples(t *testing.T) {
 		{name: "minimal", file: "minimal"},
 		{name: "partial", file: "partial"},
 		{name: "full", file: "full"},
+		{name: "tracing", file: "tracing"},
+		// The checker refuses it too (TestCheck, "tag with env and header"); oneOf admits a tag with exactly one of the
+		// two.
+		{name: "tag with env and header", file: "tracing", from: "request_id: {header: x-request-id}",
+			to:   "request_id: {header: x-request-id, env: A}",
+			want: []string{`at '/tracing/tags/request_id': 'oneOf' failed, subschemas 0, 1 matched`}},
 		{name: "unknown key", file: "full", extra: "listne: 1\n",
 			want: []string{`at '': additional properties 'listne' not allowed`}},
 		{name: "size in MB", file: "full", from: "heap: 256MiB", to: "heap: 256MB",

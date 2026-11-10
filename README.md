@@ -16,8 +16,8 @@ The release has `proxyfile-linux-amd64`, `proxyfile-linux-arm64`, `proxyfile-dar
 `proxyfile-darwin-arm64`, with `checksums.txt` and `proxyfile.schema.json` beside them.
 
 ```sh
-curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v1.1.0/proxyfile-linux-amd64
-curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v1.1.0/checksums.txt
+curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v1.2.0/proxyfile-linux-amd64
+curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v1.2.0/checksums.txt
 shasum -a 256 -c --ignore-missing checksums.txt
 install -m 0755 proxyfile-linux-amd64 /usr/local/bin/proxyfile
 ```
@@ -25,13 +25,13 @@ install -m 0755 proxyfile-linux-amd64 /usr/local/bin/proxyfile
 In a Dockerfile, copy the program out of the image. The image holds `/proxyfile` and nothing else.
 
 ```dockerfile
-COPY --from=ghcr.io/kitecorp/proxyfile:1.1.0 /proxyfile /usr/local/bin/proxyfile
+COPY --from=ghcr.io/kitecorp/proxyfile:1.2.0 /proxyfile /usr/local/bin/proxyfile
 ```
 
 With Go installed (the Go version `go.mod` names or newer):
 
 ```sh
-go install github.com/kitecorp/proxyfile/cmd/proxyfile@v1.1.0
+go install github.com/kitecorp/proxyfile/cmd/proxyfile@v1.2.0
 ```
 
 ## Commands
@@ -86,20 +86,20 @@ the origins file, when `origins` names one, and of the methods are reported toge
 
 ```
 gateway.yaml:3:1: "listen" is required here
-gateway.yaml:3:1: unknown key "liste"; known here: admin, auth, cors, limits, listen, log, namespace, origins, remove_from_clients, routes, rpc, services, timeouts
+gateway.yaml:3:1: unknown key "liste"; known here: admin, auth, cors, limits, listen, log, namespace, origins, remove_from_clients, routes, rpc, services, timeouts, tracing
 ```
 
 ## The format
 
-`examples/full/gateway.yaml` holds every key a proxyfile can have except `services.<name>.address`, with invented
-values: `cors`, the `origins` by environment and `rpc.methods` are among them. `examples/partial/gateway.yaml` writes
-`address` and gives its methods the 1.0 way, with `--rpc-methods examples/partial/methods.json`, and its HOCON twin
-through `include required("rpc-methods.conf")`. Only `listen`, `services`, `origins` and `routes` are required. The rest
-is left out when you do not need it.
+`examples/full/gateway.yaml` holds every key a proxyfile can have except `services.<name>.address` and `tracing`, with
+invented values: `cors`, the `origins` by environment and `rpc.methods` are among them. `examples/partial/gateway.yaml`
+writes `address` and gives its methods the 1.0 way, with `--rpc-methods examples/partial/methods.json`, and its HOCON
+twin through `include required("rpc-methods.conf")`. `examples/tracing/gateway.yaml` writes `tracing`. Only `listen`,
+`services`, `origins` and `routes` are required. The rest is left out when you do not need it.
 
 ```yaml
 # yaml-language-server: $schema=../../schema/proxyfile.schema.json
-# Every key a proxyfile can hold, with invented values.
+# Every key a proxyfile can hold, with invented values, except tracing, which has its own example.
 namespace: example.gateway
 listen: 10000
 admin: 9901
@@ -208,6 +208,7 @@ Envoy sets on a duration. `auth.timeout` has a lower limit, which its row gives.
 | `log` | Which requests the request log writes. Without `log`, every request is logged. | A mapping with `status_from` and `sample`, both required. |
 | `log.status_from` | The lowest status that is always logged. | A whole number from 100 to 599. |
 | `log.sample` | The share of the other requests that is logged. | A whole percentage such as `1%`. |
+| `tracing` | Trace segments for sampled requests, sent to AWS X-Ray. See "Tracing" below. | A mapping; `provider` is required in it. |
 
 A proxyfile also has these rules, each reported with the file and where the problem is, a line in YAML and a key path in
 HOCON:
@@ -287,6 +288,121 @@ service needs no Envoy-specific type.
 - A check sent on a connection the auth service is closing fails. Set `timeouts.upstream_idle` under the auth service's
   own idle timeout, so the gateway closes an idle connection first.
 
+### Tracing
+
+With `tracing`, the gateway takes part in an AWS X-Ray trace. It continues the trace that a request's `x-amzn-trace-id`
+names, or starts one. It sends a segment for each sampled request to an agent over UDP. It passes the trace on to the
+service in `x-amzn-trace-id`, with its own segment as the parent, and the auth check's request carries a subsegment of
+it.
+
+```yaml
+tracing:
+  provider:
+    xray:
+      agent: 127.0.0.1:2000
+      segment: example-gateway
+      sample:
+        first: 1
+        rate: 5%
+        rules:
+          # A WebSocket's segment would last as long as the socket, so the gateway samples no handshake by its own
+          # rule.
+          - {host: "*", method: "*", path: "/live*", first: 0, rate: 0%}
+  tags:
+    environment: {env: APP_ENVIRONMENT, default: local}
+    request_id: {header: x-request-id}
+  path_in_url: false
+```
+
+The same in HOCON:
+
+```hocon
+tracing {
+  provider {
+    xray {
+      agent = "127.0.0.1:2000"
+      segment = example-gateway
+      sample {
+        first = 1
+        rate = 5%
+        // A WebSocket's segment would last as long as the socket, so the gateway samples no handshake by its own rule.
+        rules = [
+          { host = "*", method = "*", path = "/live*", first = 0, rate = 0% }
+        ]
+      }
+    }
+  }
+  tags {
+    environment { env = APP_ENVIRONMENT, default = local }
+    request_id { header = x-request-id }
+  }
+  path_in_url = false
+}
+```
+
+[`examples/tracing/`](examples/tracing/) holds this gateway with `auth` and `remove_from_clients` added, in
+[YAML](examples/tracing/gateway.yaml) and [HOCON](examples/tracing/gateway.conf), and the
+[`envoy.yaml`](examples/tracing/envoy.yaml) it generates.
+
+In the table, `xray` stands for `tracing.provider.xray`.
+
+| Key | Meaning | Rule |
+|---|---|---|
+| `tracing` | Trace segments for sampled requests. | Optional. A mapping; `provider` is required in it. |
+| `tracing.provider` | The tracing system the segments go to: a mapping with one key that names it. 1.2 has one, `xray`. | Required. A mapping whose one key is `xray`. |
+| `xray.agent` | Where the segments go over UDP: an X-Ray daemon, or an agent that takes X-Ray segments. | An IPv4 address and a port from 1 to 65535, such as `127.0.0.1:2000`. `127.0.0.1:2000` when not written. |
+| `xray.segment` | The name of the gateway's segments, which names its node in X-Ray's service map. | Required. 1 to 200 characters: letters, digits, spaces and `_ . : / % & # = + \ - @`. |
+| `xray.sample` | Which requests are traced when the request does not say: the rules, then the default. | A mapping of the keys below. Without it no manifest is written and Envoy's own rule applies, which is `first: 1, rate: 5%`. |
+| `xray.sample.first` | How many requests each second are traced before `rate` applies. | A whole number from 0 to 4294967295. `1` when not written. |
+| `xray.sample.rate` | The share of the other requests that is traced. | A whole percentage from `0%` to `100%`, the form of `log.sample`. `5%` when not written. |
+| `xray.sample.rules` | Rules tried in the order written, before the default. The first that matches a request decides, with its own `first` and `rate`. | A list of the mappings below; it may be empty. |
+| `xray.sample.rules[].host` | Matches the request's Host header, with its port when the request has one. | A pattern of letters, digits, `.`, `-`, `:`, `[`, `]`, `*` and `?`. `*` when not written. |
+| `xray.sample.rules[].method` | Matches the request's method. | A method in capitals, or a pattern of capitals, `*` and `?`. `*` when not written. |
+| `xray.sample.rules[].path` | Matches the request's path, with its query. | A pattern of printable characters without spaces, starting with `/` or `*`. `*` when not written. |
+| `xray.sample.rules[].first`, `.rate` | As `sample.first` and `sample.rate`, for the requests the rule matches. | Both required, in the same forms. |
+| `tracing.tags` | Annotations on each segment, by name. | A mapping from a tag name (letters, digits and `_`) to a mapping with exactly one of `env` and `header`, and an optional `default`. Written order is kept, in both forms. |
+| `tracing.tags.<name>.env` | An environment variable of the gateway's process. | A variable name: letters, digits and `_`, not starting with a digit. |
+| `tracing.tags.<name>.header` | A request header. | A lower-case header name, the rule of `auth.only_with_header`. |
+| `tracing.tags.<name>.default` | The value when the variable is unset or the header is absent. Without it the segment gets no tag then. | Text, not empty. |
+| `tracing.path_in_url` | Whether the segment's URL keeps the request's path. | `true` or `false`. `false` when not written. |
+
+Envoy traces a request when a whole number it draws from 0 to 99 is below 100 times the rate, computed in floating
+point. 100 times 0.07, 0.14, 0.28, 0.55 and 0.56 comes out a little above the whole number. So `rate: 7%`, `14%`, `28%`,
+`55%` and `56%` trace 8%, 15%, 29%, 56% and 57% of the requests they apply to. Every other whole percentage is exact.
+
+In `host`, `method` and `path`, `*` matches any run of characters and `?` one character. Case does not matter, and the
+pattern must match the whole value. Each is `*` when not written. A request whose `x-amzn-trace-id` says `Sampled=1` is
+traced and one that says `Sampled=0` is not, whatever the rules say. Only the other requests are asked of the rules. So
+a client can have every request it sends traced, and X-Ray bills for each trace recorded.
+
+`path_in_url` is false by default, for the reason the request log holds no path: paths can carry links and tokens. A
+segment still holds the URL's scheme and host, the method and the user agent. As `client_ip` it holds the whole
+`X-Forwarded-For` header as it came, or the connection's address when there is none. It holds the status and the
+response size. For a request whose content type is `application/grpc` or `application/grpc+<x>`, it holds the whole path
+in the `grpc.path` annotation, and no setting removes that. With `path_in_url: true` the URL keeps the first 256
+characters of the path, query included. An environment tag is read by Envoy once, when it starts, never by proxyfile, so
+the same proxyfile gives the same bytes on every machine. A tag name is letters, digits and `_`, because X-Ray filter
+expressions take only those annotation keys. A tag with the name of a tag Envoy sets on every segment itself is dropped:
+Envoy sets its own tags before the custom tags, and the X-Ray tracer keeps the first value of a name. A tag named `error`
+whose value is `true` marks the segment as a fault. proxyfile keeps no list of Envoy's tag names.
+
+What is written with the key:
+
+- The provider's fixed parts: `envoy.tracers.xray` and UDP.
+- The request id extension with `pack_trace_reason: false`, so `x-request-id` stays as the client sent it or Envoy
+  generated it.
+- `x-envoy-downstream-service-cluster` and `x-envoy-downstream-service-node`, removed from clients after every other
+  early removal, each unless an entry before it covers it: a `remove_from_clients` entry or an `auth.accept` name, the
+  rule the question headers follow. Envoy strips them only from an edge request, and with `use_remote_address: false`
+  (see "Defaults") no request is one.
+- None of Envoy's own sampling shares, so the rules decide.
+
+With no agent listening, a segment is dropped and the request is served as before. Without the key, none of this is
+written, and a 1.1 proxyfile gives 1.1's file byte for byte.
+
+In HOCON, the agent is quoted, `agent = "127.0.0.1:2000"`, because of its colon (see "Quote what HOCON would read
+differently"). `rate = 5%` needs no quotes and is text, while `rate = 5` is a number and is refused.
+
 ## The HOCON form
 
 The same gateway can be written in [HOCON](https://github.com/lightbend/config/blob/main/HOCON.md) (Human-Optimized
@@ -310,8 +426,10 @@ routes = [
 ]
 ```
 
-[`examples/full/gateway.conf`](examples/full/gateway.conf) writes every key but `services.<name>.address` and sits
-beside [`examples/full/gateway.yaml`](examples/full/gateway.yaml), which gives the same file.
+[`examples/full/gateway.conf`](examples/full/gateway.conf) writes every key but `services.<name>.address` and `tracing`
+and sits beside [`examples/full/gateway.yaml`](examples/full/gateway.yaml), which gives the same file.
+[`examples/tracing/gateway.conf`](examples/tracing/gateway.conf) writes `tracing` and sits beside its YAML twin,
+[`examples/tracing/gateway.yaml`](examples/tracing/gateway.yaml).
 [`examples/partial/gateway.conf`](examples/partial/gateway.conf) pulls its methods in with
 `include required("rpc-methods.conf")`: a plain `include` is skipped when the file is missing, and `required` refuses it
 by name.
@@ -523,7 +641,8 @@ Everything the format has no key for is the same in every gateway proxyfile writ
   `x-envoy-auth-failure-mode-allowed`, is removed before routing and before any filter. With `auth`, the gateway also
   removes from clients the two question headers and every header the check may set (each name of `auth.accept`),
   whether or not `remove_from_clients` lists them, because a client must not be able to forge what the gateway asks the
-  check or what the check says.
+  check or what the check says. With `tracing`, `x-envoy-downstream-service-cluster` and
+  `x-envoy-downstream-service-node` are removed last, each unless an entry before it covers it.
 - **Retries** happen only on `connect-failure` and `reset-before-request`.
 - **The overload manager** checks every 0.25 seconds. It exists when `limits.heap` or `limits.connections` is written.
 - **The Connect bridge.** Each route of the rpc entry turns a Connect call into gRPC for the service's gRPC port,
@@ -578,7 +697,7 @@ HOCON proxyfile, see the editor note under "The HOCON form". Put this line first
 use the YAML language server, such as VS Code with the YAML extension:
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/kitecorp/proxyfile/v1.1.0/schema/proxyfile.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kitecorp/proxyfile/v1.2.0/schema/proxyfile.schema.json
 ```
 
 In a JetBrains IDE, open Settings, Languages & Frameworks, Schemas and DTDs, JSON Schema Mappings. Add a mapping with the

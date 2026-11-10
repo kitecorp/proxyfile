@@ -1,0 +1,34 @@
+# yaml-language-server: $schema=../../schema/proxyfile.schema.json
+# A gateway that sends an X-Ray segment for each sampled request. It has auth and remove_from_clients, so its file
+# shows the order of the early header removal with all three: the two tracing removals come last.
+listen: 8000
+services:
+  app: {http: 3000}
+  identity: {http: 4000}
+auth:
+  ask: identity /check
+  timeout: 1s
+  enabled: true
+  when_unavailable: deny
+  accept: [x-user-id]
+remove_from_clients: [x-debug-*]
+origins:
+  all: {hosts: [localhost], origins: ["http://localhost:3000"]}
+routes:
+  - {name: app, prefix: /, to: app}
+tracing:
+  provider:
+    xray:
+      agent: 127.0.0.1:2000
+      segment: example-gateway
+      sample:
+        first: 1
+        rate: 5%
+        rules:
+          # A WebSocket's segment would last as long as the socket, so the gateway samples no handshake by its own
+          # rule.
+          - {host: "*", method: "*", path: "/live*", first: 0, rate: 0%}
+  tags:
+    environment: {env: APP_ENVIRONMENT, default: local}
+    request_id: {header: x-request-id}
+  path_in_url: false

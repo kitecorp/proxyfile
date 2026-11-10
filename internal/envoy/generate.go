@@ -110,15 +110,24 @@ func Generate(in Input) ([]byte, error) {
 	if g.Auth != nil {
 		logs = append(logs, b.fill("log-auth-unavailable.yaml", data{"Namespace": g.Namespace}))
 	}
+	removed := removedFromClients(g)
+	listenerSplices := []splice{
+		{"access_log", sequence(logs...)},
+		{"http_filters", sequence(filters...)},
+		{"virtual_hosts", sequence(virtualHosts...)},
+	}
+	// A splice no $name takes is an error (fill), and the listener holds $tracing only with tracing.
+	if g.Tracing != nil {
+		listenerSplices = append(listenerSplices, splice{"tracing", b.tracing(g.Tracing)})
+	}
 	listener := b.fill("listener.yaml", data{
 		"Port":           g.Listen.Number,
 		"RequestHeaders": requestHeaders(g.Limits.RequestHeaders),
-		"Removed":        removedFromClients(g),
+		"Removed":        removed,
 		"Auth":           g.Auth != nil,
-	},
-		splice{"access_log", sequence(logs...)},
-		splice{"http_filters", sequence(filters...)},
-		splice{"virtual_hosts", sequence(virtualHosts...)})
+		"Tracing":        g.Tracing != nil,
+		"Downstream":     downstreamRemoved(g, removed),
+	}, listenerSplices...)
 	root := b.fill("bootstrap.yaml", data{"Admin": g.Admin, "Heap": g.Limits.Heap, "Connections": g.Limits.Connections},
 		splice{"listener", sequence(listener)}, splice{"clusters", sequence(clusters...)})
 	if b.err != nil {
@@ -364,10 +373,13 @@ func fill(fragment string, values data, splices []splice) (*yaml.Node, error) {
 // comments near the data they describe"), so after splicing its place would depend on the splice.
 //
 // It marks the Lua script as a literal block, so the generated file shows it line by line, where q's quotes would put
-// it on one line. Only the script: it is the one text with line breaks proxyfile writes by itself, and every other
-// value stays in q's quotes, which read back as the same text whatever it holds. A literal block does not: go-yaml
-// v3.0.6 writes one whose first line starts with a tab, and its reader refuses that tab as indentation (scannerc.go,
-// yaml_parser_scan_block_scalar_breaks).
+// it on one line. Only the script: it is the one text with line breaks a fragment holds, and every other value stays
+// in q's quotes, which read back as the same text whatever it holds. A literal block does not: go-yaml v3.0.6 writes
+// one whose first line starts with a tab, and its reader refuses that tab as indentation (scannerc.go,
+// yaml_parser_scan_block_scalar_breaks). The X-Ray sampling manifest, the other text with line breaks, is spliced in
+// after tidy runs, already a literal block (tracing). It can be one: its first line starts with {, and every text in
+// it is a JSON string of printable ASCII (the read rules' patterns for a rule's host, method and path), so it holds
+// no tab.
 func tidy(n *yaml.Node) {
 	n.HeadComment, n.LineComment, n.FootComment = "", "", ""
 	if n.Kind == yaml.ScalarNode && n.Value == connectStatus {
@@ -421,4 +433,73 @@ func encode(root *yaml.Node) ([]byte, error) {
 		return nil, err
 	}
 	return out.Bytes(), nil
+}
+
+// downstreamHeaders are the headers Envoy strips from a client's request only on an edge request, which needs
+// use_remote_address (conn_manager_utility.cc lines 275 and 354 to 359), so with the listener's
+// use_remote_address: false a client's copy reaches the service, and the first reaches each segment as its
+// downstream_cluster (http_tracer_impl.cc lines 169 to 170).
+var downstreamHeaders = []model.Header{{Name: "x-envoy-downstream-service-cluster"}, {Name: "x-envoy-downstream-service-node"}}
+
+// downstreamRemoved is the end of the early header removal: with tracing, each of downstreamHeaders that no entry
+// before it covers, the rule removedFromClients follows. Without tracing it is empty, so a proxyfile without the key
+// gives 1.1's bytes.
+func downstreamRemoved(g *model.Gateway, removed []model.Header) []string {
+	if g.Tracing == nil {
+		return nil
+	}
+	var names []string
+	for _, header := range downstreamHeaders {
+		if !slices.ContainsFunc(removed, func(entry model.Header) bool { return covers(entry, header) }) {
+			names = append(names, header.Name)
+		}
+	}
+	return names
+}
+
+// tracing is the connection manager's tracing, with the manifest spliced in as a literal block when there is a sample.
+func (b *builder) tracing(t *model.Tracing) *yaml.Node {
+	var splices []splice
+	if t.XRay.Sample != nil {
+		splices = append(splices, splice{"manifest", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: manifest(t.XRay.Sample), Style: yaml.LiteralStyle}})
+	}
+	return b.fill("tracing.yaml", data{"PathInURL": t.PathInURL, "Tags": t.Tags, "Address": t.XRay.Address,
+		"Port": t.XRay.Port, "Segment": t.XRay.Segment, "Sample": t.XRay.Sample != nil}, splices...)
+}
+
+// manifest is the X-Ray sampling manifest: the default rule on the second line, then the rules in the written order,
+// each after the first on its own line under the first's {, and one newline at the end. The manifest is text in the
+// tree, so proxyfile writes it in one layout, and the same proxyfile gives the same bytes.
+func manifest(s *model.Sample) string {
+	var out strings.Builder
+	fmt.Fprintf(&out, "{\"version\": 2,\n \"default\": {\"fixed_target\": %d, \"rate\": %s}", s.Default.First,
+		fraction(s.Default.RatePercent))
+	for i, rule := range s.Rules {
+		if i == 0 {
+			out.WriteString(",\n \"rules\": [")
+		} else {
+			// Under the first rule's {: the 11 characters of ` "rules": [`.
+			out.WriteString(",\n           ")
+		}
+		fmt.Fprintf(&out, "{\"host\": %s, \"http_method\": %s, \"url_path\": %s, \"fixed_target\": %d, \"rate\": %s}",
+			quote.JSON(rule.Host), quote.JSON(rule.Method), quote.JSON(rule.Path), rule.First, fraction(rule.RatePercent))
+	}
+	if len(s.Rules) > 0 {
+		out.WriteString("]")
+	}
+	out.WriteString("}\n")
+	return out.String()
+}
+
+// fraction writes a whole percentage as the shortest decimal of it over 100, in integer arithmetic, so no float
+// rounding reaches the text: 0 is 0, 5 is 0.05, 50 is 0.5, 100 is 1. A rate is never 0.0 or 1.0, because a reader
+// that keeps a number's type tells 0 from 0.0.
+func fraction(percent int) string {
+	switch percent {
+	case 0:
+		return "0"
+	case 100:
+		return "1"
+	}
+	return "0." + strings.TrimRight(fmt.Sprintf("%02d", percent), "0")
 }

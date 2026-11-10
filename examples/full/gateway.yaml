@@ -1,5 +1,5 @@
 # yaml-language-server: $schema=../../schema/proxyfile.schema.json
-# Every key a proxyfile can hold, with invented values.
+# Every key a proxyfile can hold, with invented values, except tracing, which has its own example.
 namespace: example.gateway
 listen: 10000
 admin: 9901
