@@ -89,3 +89,35 @@ func TestScalarReadsBack(t *testing.T) {
 		})
 	}
 }
+
+// The manifest is text in the tree, so its layout is fixed: the default rule on the second line, each rule after the
+// first on its own line under the first's {, and a rate as the shortest decimal of the percentage over 100.
+func TestManifest(t *testing.T) {
+	cases := []struct {
+		name   string
+		sample model.Sample
+		want   string
+	}{
+		{name: "no rule", sample: model.Sample{Default: model.SampleRule{First: 1, RatePercent: 5}},
+			want: "{\"version\": 2,\n \"default\": {\"fixed_target\": 1, \"rate\": 0.05}}\n"},
+		{name: "the bounds", sample: model.Sample{Default: model.SampleRule{First: 4294967295, RatePercent: 100},
+			Rules: []model.SampleRule{{Host: "*", Method: "*", Path: "/live*", First: 0, RatePercent: 0}}},
+			want: "{\"version\": 2,\n \"default\": {\"fixed_target\": 4294967295, \"rate\": 1},\n" +
+				" \"rules\": [{\"host\": \"*\", \"http_method\": \"*\", \"url_path\": \"/live*\", \"fixed_target\": 0, \"rate\": 0}]}\n"},
+		{name: "two rules, and a path with a quote", sample: model.Sample{Default: model.SampleRule{First: 3, RatePercent: 50},
+			Rules: []model.SampleRule{
+				{Host: "api.example.com", Method: "GET", Path: `/a"b`, First: 1, RatePercent: 10},
+				{Host: "*", Method: "P?T", Path: "*", First: 2, RatePercent: 1},
+			}},
+			want: "{\"version\": 2,\n \"default\": {\"fixed_target\": 3, \"rate\": 0.5},\n" +
+				" \"rules\": [{\"host\": \"api.example.com\", \"http_method\": \"GET\", \"url_path\": \"/a\\\"b\", \"fixed_target\": 1, \"rate\": 0.1},\n" +
+				"           {\"host\": \"*\", \"http_method\": \"P?T\", \"url_path\": \"*\", \"fixed_target\": 2, \"rate\": 0.01}]}\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := manifest(&c.sample); got != c.want {
+				t.Errorf("manifest =\n%s\nwant\n%s", got, c.want)
+			}
+		})
+	}
+}

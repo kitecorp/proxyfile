@@ -73,7 +73,7 @@ func TestRun(t *testing.T) {
 			testsupport.WriteFile(t, path, strings.Replace(text, "listen: 8000\n", "liste: 8000\n", 1))
 		}, args: "render <tmp>/gateway.yaml -o <tmp>/out.yaml", exit: 1,
 			stderr: "<tmp>/gateway.yaml:3:1: \"listen\" is required here\n" +
-				"<tmp>/gateway.yaml:3:1: unknown key \"liste\"; known here: admin, auth, cors, limits, listen, log, namespace, origins, remove_from_clients, routes, rpc, services, timeouts\n",
+				"<tmp>/gateway.yaml:3:1: unknown key \"liste\"; known here: admin, auth, cors, limits, listen, log, namespace, origins, remove_from_clients, routes, rpc, services, timeouts, tracing\n",
 			also: nothingWritten("minimal")},
 		{name: "no arguments", exit: 2, stderr: usageText},
 		{name: "help", args: "--help", stdout: usageText},

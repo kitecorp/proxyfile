@@ -75,6 +75,32 @@ func TestParsePercent(t *testing.T) {
 	}
 }
 
+func TestParseAgent(t *testing.T) {
+	cases := []struct {
+		text, address string
+		port          int64
+		ok            bool
+	}{
+		{"127.0.0.1:2000", "127.0.0.1", 2000, true},
+		{"10.0.0.9:1", "10.0.0.9", 1, true},
+		{"255.255.255.255:65535", "255.255.255.255", 65535, true},
+		{"300.1.2.3:2000", "", 0, false},
+		{"127.0.0.01:2000", "", 0, false},
+		{"127.0.0.1:65536", "", 0, false},
+		{"127.0.0.1:0", "", 0, false},
+		{"127.0.0.1:02000", "", 0, false},
+		{"127.0.0.1", "", 0, false},
+		{"[::1]:2000", "", 0, false},
+		{"localhost:2000", "", 0, false},
+	}
+	for _, c := range cases {
+		address, port, ok := ParseAgent(c.text)
+		if address != c.address || port != c.port || ok != c.ok {
+			t.Errorf("ParseAgent(%q) = %q, %d, %t, want %q, %d, %t", c.text, address, port, ok, c.address, c.port, c.ok)
+		}
+	}
+}
+
 func TestFormatSeconds(t *testing.T) {
 	cases := []struct {
 		millis int64

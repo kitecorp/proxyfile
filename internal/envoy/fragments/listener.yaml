@@ -19,6 +19,21 @@ filter_chains:
       # one), so a caller can quote the id of a failed call. Envoy replaces a client's x-request-id only on an edge
       # request, which needs use_remote_address (conn_manager_utility.cc, request_id/uuid/config.cc).
       always_set_request_id_in_response: true
+{{- if .Tracing}}
+      # With tracing, Envoy's default request id extension writes its trace decision into the 13th hex digit of
+      # x-request-id, a client's own id included (uuid.proto lines 26 to 29). The X-Ray tracer ignores that decision
+      # (xray_tracer_impl.cc line 79), so pack_trace_reason: false costs the trace nothing and keeps the id as the
+      # client sent it or Envoy generated it. The request log's sample reads the id's first eight hex digits, which the
+      # setting does not touch: the access log's runtime filter reads the id as a number through the stream id provider
+      # (access_log_impl.cc lines 141 to 151), and that number never reads the setting (request_id/uuid/config.cc lines
+      # 61 to 77; the setting stops the writes, lines 41 and 103 to 107, and the trace reason read from the id, lines 83
+      # to 85, neither of which the number uses), though uuid.proto lines 38 to 42 say stable access log sampling stops.
+      request_id_extension:
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.request_id.uuid.v3.UuidRequestIdConfig
+          pack_trace_reason: false
+      tracing: $tracing
+{{- end}}
       # The service's own Server header passes through, and Envoy adds none of its own.
       server_header_transformation: PASS_THROUGH
 {{- with .RequestHeaders}}
@@ -57,12 +72,14 @@ filter_chains:
                   header: {name: origin, present_match: true}
           body: {inline_string: "Invalid CORS request"}
       access_log: $access_log
-{{- if or .Removed .Auth}}
+{{- if or .Removed .Auth .Downstream}}
       # These headers are removed before routing and before every filter, so no route, filter or service sees a
       # client's copy, in this order: the names in remove_from_clients; with auth, the question headers
       # x-gateway-action and x-gateway-reports and each accept name, each unless an entry before it already covers it
-      # (an exact entry equal to it, or a prefix entry it starts with); and with auth, Envoy's mark
-      # x-envoy-auth-failure-mode-allowed. The question headers and the accept headers are removed whether or not
+      # (an exact entry equal to it, or a prefix entry it starts with); with auth, Envoy's mark
+      # x-envoy-auth-failure-mode-allowed; and with tracing, x-envoy-downstream-service-cluster and
+      # x-envoy-downstream-service-node, each unless an entry before it covers it (downstreamRemoved in generate.go).
+      # The question headers and the accept headers are removed whether or not
       # remove_from_clients lists them, because a client must not be able to forge what the gateway asks the check or
       # what the check says (removedFromClients in generate.go builds the list). Envoy 1.40.2,
       # http_connection_manager.proto: early_header_mutation_extensions "will be called before any routing, tracing, or
@@ -83,6 +100,9 @@ filter_chains:
 {{- end}}
 {{- if .Auth}}
           - remove: x-envoy-auth-failure-mode-allowed
+{{- end}}
+{{- range .Downstream}}
+          - remove: {{.}}
 {{- end}}
 {{- end}}
       http_filters: $http_filters

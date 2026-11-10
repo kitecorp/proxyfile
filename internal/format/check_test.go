@@ -3,10 +3,17 @@ package format
 import (
 	"os"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/kitecorp/proxyfile/internal/testsupport"
 	"github.com/kitecorp/proxyfile/internal/tree"
+)
+
+// segmentRule and agentRule are the messages of the rows that break those rules, each at the same column of line 7.
+const (
+	segmentRule = `g.yaml:7:38: "segment" must be 1 to 200 characters: letters, digits, spaces and _ . : / % & # = + \ - @`
+	agentRule   = `g.yaml:7:48: "agent" must be an IPv4 address and a port from 1 to 65535, such as 127.0.0.1:2000`
 )
 
 // m is the valid proxyfile the problem rows change, one change each.
@@ -57,7 +64,7 @@ func TestCheck(t *testing.T) {
 		{name: "full example", spec: Proxyfile, file: "../../examples/full/gateway.yaml"},
 		{name: "unknown key", spec: Proxyfile, document: m.Replaced(1, 1, "liste: 8000"), want: []string{
 			`g.yaml:1:1: "listen" is required here`,
-			`g.yaml:1:1: unknown key "liste"; known here: admin, auth, cors, limits, listen, log, namespace, origins, remove_from_clients, routes, rpc, services, timeouts`,
+			`g.yaml:1:1: unknown key "liste"; known here: admin, auth, cors, limits, listen, log, namespace, origins, remove_from_clients, routes, rpc, services, timeouts, tracing`,
 		}},
 		{name: "wrong kind", spec: Proxyfile, document: m.Replaced(2, 3, "services: 5"),
 			want: []string{`g.yaml:2:11: "services" must be a mapping`}},
@@ -144,6 +151,68 @@ func TestCheck(t *testing.T) {
 			document: m.Inserted(7, "rpc: {methods: [{service: shop.v1.CartService, method: AddItem}]}")},
 		{name: "rpc without methods", spec: Proxyfile, document: m.Inserted(7, "rpc: {}"),
 			want: []string{`g.yaml:7:6: "methods" is required here`}},
+		{name: "tracing example", spec: Proxyfile, file: "../../examples/tracing/gateway.yaml"},
+		{name: "tracing, the fewest keys", spec: Proxyfile, document: m.Inserted(7, "tracing: {provider: {xray: {segment: example-gateway}}}")},
+		{name: "tracing without provider", spec: Proxyfile, document: m.Inserted(7, "tracing: {path_in_url: true}"),
+			want: []string{`g.yaml:7:10: "provider" is required here`}},
+		// provider is chosen by its one key, as the rpc entry of routes is chosen by rpc.
+		{name: "provider without xray", spec: Proxyfile, document: m.Inserted(7, "tracing: {provider: {zipkin: {}}}"),
+			want: []string{`g.yaml:7:21: "provider" must be a mapping with the one key xray`}},
+		{name: "provider with a key beside xray", spec: Proxyfile, document: m.Inserted(7, "tracing: {provider: {xray: {segment: a}, zipkin: {}}}"),
+			want: []string{`g.yaml:7:42: unknown key "zipkin"; known here: xray`}},
+		{name: "segment missing", spec: Proxyfile, document: m.Inserted(7, "tracing: {provider: {xray: {}}}"),
+			want: []string{`g.yaml:7:28: "segment" is required here`}},
+		// X-Ray takes a segment name of 1 to 200 characters.
+		{name: "segment of 200 characters", spec: Proxyfile,
+			document: m.Inserted(7, "tracing: {provider: {xray: {segment: "+strings.Repeat("a", 200)+"}}}")},
+		{name: "segment of 201 characters", spec: Proxyfile,
+			document: m.Inserted(7, "tracing: {provider: {xray: {segment: "+strings.Repeat("a", 201)+"}}}"), want: []string{segmentRule}},
+		{name: "segment, every character X-Ray takes", spec: Proxyfile,
+			document: m.Inserted(7, `tracing: {provider: {xray: {segment: 'a b_c.d:e/f%g&h#i=j+k\l-m@n'}}}`)},
+		{name: "segment with a character X-Ray refuses", spec: Proxyfile,
+			document: m.Inserted(7, "tracing: {provider: {xray: {segment: gateway!}}}"), want: []string{segmentRule}},
+		{name: "segment with a letter outside ASCII", spec: Proxyfile,
+			document: m.Inserted(7, "tracing: {provider: {xray: {segment: passerelle-é}}}"), want: []string{segmentRule}},
+		{name: "agent IPv6", spec: Proxyfile,
+			document: m.Inserted(7, `tracing: {provider: {xray: {segment: s, agent: "[::1]:2000"}}}`), want: []string{agentRule}},
+		{name: "agent host name", spec: Proxyfile,
+			document: m.Inserted(7, "tracing: {provider: {xray: {segment: s, agent: localhost:2000}}}"), want: []string{agentRule}},
+		{name: "rate above 100%", spec: Proxyfile, document: m.Inserted(7, "tracing: {provider: {xray: {segment: s, sample: {rate: 101%}}}}"),
+			want: []string{`g.yaml:7:56: "rate" must be a whole percentage such as 5%`}},
+		{name: "rate not whole", spec: Proxyfile, document: m.Inserted(7, "tracing: {provider: {xray: {segment: s, sample: {rate: 2.5%}}}}"),
+			want: []string{`g.yaml:7:56: "rate" must be a whole percentage such as 5%`}},
+		// The X-Ray sampler holds first, its fixed_target, in a uint32.
+		{name: "sample at its bounds", spec: Proxyfile,
+			document: m.Inserted(7, "tracing: {provider: {xray: {segment: s, sample: {first: 4294967295, rate: 100%, rules: [{first: 0, rate: 0%}]}}}}")},
+		{name: "first above Envoy's largest", spec: Proxyfile,
+			document: m.Inserted(7, "tracing: {provider: {xray: {segment: s, sample: {first: 4294967296}}}}"),
+			want:     []string{`g.yaml:7:57: "first" must be a whole number from 0 to 4294967295`}},
+		{name: "rule without first and rate", spec: Proxyfile,
+			document: m.Inserted(7, "tracing: {provider: {xray: {segment: s, sample: {rules: [{path: /a}]}}}}"),
+			want:     []string{`g.yaml:7:58: "first" is required here`, `g.yaml:7:58: "rate" is required here`}},
+		{name: "rule patterns", spec: Proxyfile,
+			document: m.Inserted(7, `tracing: {provider: {xray: {segment: s, sample: {rules: [{host: "a b", method: get, path: a, first: 0, rate: 0%}]}}}}`),
+			want: []string{
+				`g.yaml:7:65: "host" must be a pattern of letters, digits, ., -, :, [, ], * and ?`,
+				`g.yaml:7:80: "method" must be a method in capitals, or a pattern of capitals, * and ?`,
+				`g.yaml:7:91: "path" must be a pattern of printable characters without spaces, starting with / or *`,
+			}},
+		{name: "tag with env and header", spec: Proxyfile,
+			document: m.Inserted(7, "tracing: {provider: {xray: {segment: s}}, tags: {a: {env: A, header: b}}}"),
+			want:     []string{`g.yaml:7:53: exactly one of env, header is needed here`}},
+		{name: "tag with neither", spec: Proxyfile,
+			document: m.Inserted(7, "tracing: {provider: {xray: {segment: s}}, tags: {a: {default: x}}}"),
+			want:     []string{`g.yaml:7:53: exactly one of env, header is needed here`}},
+		{name: "tag name with a dash", spec: Proxyfile,
+			document: m.Inserted(7, "tracing: {provider: {xray: {segment: s}}, tags: {request-id: {header: x-request-id}}}"),
+			want:     []string{`g.yaml:7:50: the tag name "request-id" must be letters, digits and _`}},
+		{name: "tag values", spec: Proxyfile,
+			document: m.Inserted(7, `tracing: {provider: {xray: {segment: s}}, tags: {a: {header: X-Id}, b: {env: 1ENV}, c: {env: A, default: ""}}}`),
+			want: []string{
+				`g.yaml:7:62: "header" must be a lower-case header name`,
+				`g.yaml:7:78: "env" must be a variable name: letters, digits and _, not starting with a digit`,
+				`g.yaml:7:106: "default" must be one character or more`,
+			}},
 	})
 }
 

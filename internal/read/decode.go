@@ -13,11 +13,12 @@ import (
 )
 
 // decoder fills the model from a tree format.Check accepted, so every key it finds has the kind and the form the
-// description asks for, and a key it does not find was not written. Three things the check cannot see are left to
+// description asks for, and a key it does not find was not written. Four things the check cannot see are left to
 // it: an address that is not an IP literal, a size or a time that matches its pattern but does not fit in an int64
-// (ParseSize and ParseTime both refuse one; 9999999999999h is a time of that kind), and a size or a time above the
-// largest value Envoy accepts in the field it is written to, which Envoy refuses when it loads the file. A pattern
-// cannot say how large a number with a unit may be; the whole numbers' limits are each field's Max in the
+// (ParseSize and ParseTime both refuse one; 9999999999999h is a time of that kind), a size or a time above the
+// largest value Envoy accepts in the field it is written to, which Envoy refuses when it loads the file, and a tracing
+// agent that matches its pattern but is not an IPv4 address and a port from 1 to 65535 (300.1.2.3:2000 is one). A
+// pattern cannot say how large a number with a unit may be; the whole numbers' limits are each field's Max in the
 // description, which the check applies.
 type decoder struct {
 	model.Problems
@@ -58,6 +59,7 @@ func decode(root *tree.Node) (*model.Gateway, []model.Problem) {
 		Routes:            d.routes(root.Get("routes")),
 		RoutesPos:         root.Entry("routes").KeyPos,
 		Log:               logSettings(root.Entry("log")),
+		Tracing:           d.tracing(root.Get("tracing")),
 	}
 	if problems := d.Sorted(); problems != nil {
 		return nil, problems
@@ -185,10 +187,72 @@ func logSettings(entry *tree.Entry) *model.Log {
 	if entry == nil {
 		return nil
 	}
-	// ParsePercent compiles the pattern the check matched, and every whole percentage fits in an int, so it cannot
-	// refuse the text here.
-	percent, _ := model.ParsePercent(entry.Value.Get("sample").Text)
-	return &model.Log{StatusFrom: number(entry.Value.Get("status_from")), SamplePercent: percent, Pos: entry.KeyPos}
+	return &model.Log{StatusFrom: number(entry.Value.Get("status_from")), SamplePercent: percent(entry.Value.Get("sample")), Pos: entry.KeyPos}
+}
+
+// percent reads a percentage the check accepted. ParsePercent compiles the pattern the check matched, and every whole
+// percentage fits in an int, so it cannot refuse the text here.
+func percent(n *tree.Node) int {
+	value, _ := model.ParsePercent(n.Text)
+	return value
+}
+
+// tracing fills the defaults the description's Docs name. The check let through only the xray provider, so it is
+// read without asking which provider was written.
+func (d *decoder) tracing(n *tree.Node) *model.Tracing {
+	if n == nil {
+		return nil
+	}
+	xray := n.Get("provider").Get("xray")
+	tracing := &model.Tracing{
+		XRay:      model.XRay{Address: "127.0.0.1", Port: 2000, Segment: xray.GetText("segment"), Sample: sample(xray.Get("sample"))},
+		PathInURL: n.GetText("path_in_url") == "true",
+	}
+	if agent := xray.Get("agent"); agent != nil {
+		address, port, ok := model.ParseAgent(agent.Text)
+		if !ok {
+			d.Add(agent.Pos, "%q must be %s", "agent", format.AgentExpect)
+		}
+		tracing.XRay.Address, tracing.XRay.Port = address, port
+	}
+	// Ranged rather than looked up, because the segment's tags follow the order they were written in.
+	if tags := n.Get("tags"); tags != nil {
+		for _, entry := range tags.Entries {
+			tracing.Tags = append(tracing.Tags, model.Tag{
+				Name:    entry.Key,
+				Env:     entry.Value.GetText("env"),
+				Header:  entry.Value.GetText("header"),
+				Default: entry.Value.GetText("default"),
+			})
+		}
+	}
+	return tracing
+}
+
+// sample is nil when sample is not written, so the generator writes no manifest and Envoy's own rule applies.
+func sample(n *tree.Node) *model.Sample {
+	if n == nil {
+		return nil
+	}
+	s := &model.Sample{Default: model.SampleRule{First: 1, RatePercent: 5}}
+	if first := n.Get("first"); first != nil {
+		s.Default.First = number(first)
+	}
+	if rate := n.Get("rate"); rate != nil {
+		s.Default.RatePercent = percent(rate)
+	}
+	if rules := n.Get("rules"); rules != nil {
+		for _, item := range rules.Items {
+			s.Rules = append(s.Rules, model.SampleRule{
+				Host:        cmp.Or(item.GetText("host"), "*"),
+				Method:      cmp.Or(item.GetText("method"), "*"),
+				Path:        cmp.Or(item.GetText("path"), "*"),
+				First:       number(item.Get("first")),
+				RatePercent: percent(item.Get("rate")),
+			})
+		}
+	}
+	return s
 }
 
 // size and time take one path to the value and, through tooLarge, to its description, so a problem quotes the rule

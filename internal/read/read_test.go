@@ -176,7 +176,7 @@ func TestReadProblems(t *testing.T) {
 		{name: "HOCON: format check", file: "g.conf", document: strings.Replace(bHOCON, "listen = 8000", "liste = 8000", 1),
 			want: []string{
 				`g.conf: "listen" is required here`,
-				`g.conf: liste: unknown key "liste"; known here: admin, auth, cors, limits, listen, log, namespace, origins, remove_from_clients, routes, rpc, services, timeouts`,
+				`g.conf: liste: unknown key "liste"; known here: admin, auth, cors, limits, listen, log, namespace, origins, remove_from_clients, routes, rpc, services, timeouts, tracing`,
 			}},
 		{name: "HOCON: YAML text", file: "g.conf", document: b.String(),
 			want: []string{`g.conf:3:6: unexpected token 11`}},
@@ -199,6 +199,20 @@ func TestReadProblems(t *testing.T) {
 			want: []string{`g.conf: cors.max_age: "max_age" must be text; quote it`}},
 		{name: "HOCON: file missing", file: "missing.conf", absent: true,
 			want: []string{`missing.conf: the file cannot be read: no such file or directory`}},
+		// The check's pattern for agent takes digits and dots and a port of up to five digits; the reader refuses an
+		// octet above 255 and a port above 65535.
+		{name: "agent above 255", document: b.Inserted(8, "tracing: {provider: {xray: {segment: s, agent: 300.1.2.3:2000}}}"),
+			want: []string{`g.yaml:8:48: "agent" must be an IPv4 address and a port from 1 to 65535, such as 127.0.0.1:2000`}},
+		{name: "agent port above 65535", document: b.Inserted(8, "tracing: {provider: {xray: {segment: s, agent: 127.0.0.1:65536}}}"),
+			want: []string{`g.yaml:8:48: "agent" must be an IPv4 address and a port from 1 to 65535, such as 127.0.0.1:2000`}},
+		// HOCON reads an unquoted colon as a separator, so the agent is written in quotes there.
+		{name: "HOCON: agent unquoted", file: "g.conf",
+			document: bHOCON + "tracing { provider { xray { segment = s, agent = 127.0.0.1:2000 } } }\n",
+			want:     []string{`g.conf:10:59: unexpected token 11`}},
+		// rate = 5% is a HOCON string, which the percentage rule reads; rate = 5 is a number, which it refuses.
+		{name: "HOCON: rate as a number", file: "g.conf",
+			document: bHOCON + "tracing { provider { xray { segment = s, sample { rate = 5 } } } }\n",
+			want:     []string{`g.conf: tracing.provider.xray.sample.rate: "rate" must be a whole percentage such as 5%`}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -411,4 +425,58 @@ func TestReadOtherExamples(t *testing.T) {
 			{"log", fmt.Sprint(g.Log.StatusFrom, g.Log.SamplePercent), "500 0"},
 		})
 	})
+}
+
+// The reader fills the defaults the design names and keeps the written order of the tags, which here is not their
+// sorted order, in both forms; both forms of the tracing example give one model.
+func TestReadTracing(t *testing.T) {
+	every := &model.Tracing{
+		XRay: model.XRay{Address: "127.0.0.1", Port: 2000, Segment: "example-gateway", Sample: &model.Sample{
+			Default: model.SampleRule{First: 1, RatePercent: 5},
+			Rules:   []model.SampleRule{{Host: "*", Method: "*", Path: "/live*", First: 0, RatePercent: 0}},
+		}},
+		Tags: []model.Tag{
+			{Name: "environment", Env: "APP_ENVIRONMENT", Default: "local"},
+			{Name: "request_id", Header: "x-request-id"},
+		},
+	}
+	cases := []struct {
+		// file names the document's file in a directory of its own, g.yaml when empty; a path with a / is an example
+		// that is read as it is.
+		name, file, document string
+		want                 *model.Tracing
+	}{
+		{name: "no tracing", document: b.String()},
+		{name: "the fewest keys", document: b.Inserted(8, "tracing: {provider: {xray: {segment: s}}}"),
+			want: &model.Tracing{XRay: model.XRay{Address: "127.0.0.1", Port: 2000, Segment: "s"}}},
+		{name: "the sample's defaults, a rule's patterns and the tags' order",
+			document: b.Inserted(8, "tracing: {provider: {xray: {segment: s, agent: 10.0.0.9:2001, sample: {rules: [{first: 3, rate: 50%}]}}}, "+
+				"tags: {zone: {env: ZONE}, area: {header: x-area, default: none}}, path_in_url: true}"),
+			want: &model.Tracing{XRay: model.XRay{Address: "10.0.0.9", Port: 2001, Segment: "s", Sample: &model.Sample{
+				Default: model.SampleRule{First: 1, RatePercent: 5},
+				Rules:   []model.SampleRule{{Host: "*", Method: "*", Path: "*", First: 3, RatePercent: 50}},
+			}}, Tags: []model.Tag{{Name: "zone", Env: "ZONE"}, {Name: "area", Header: "x-area", Default: "none"}}, PathInURL: true}},
+		{name: "the tags' order, HOCON", file: "g.conf",
+			document: bHOCON + "tracing { provider { xray { segment = s } }, tags { zone { env = ZONE }, area { header = x-area } } }\n",
+			want: &model.Tracing{XRay: model.XRay{Address: "127.0.0.1", Port: 2000, Segment: "s"},
+				Tags: []model.Tag{{Name: "zone", Env: "ZONE"}, {Name: "area", Header: "x-area"}}}},
+		{name: "every key, YAML", file: "../../examples/tracing/gateway.yaml", want: every},
+		{name: "every key, HOCON", file: "../../examples/tracing/gateway.conf", want: every},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := c.file
+			if !strings.Contains(c.file, "/") {
+				path = filepath.Join(t.TempDir(), cmp.Or(c.file, "g.yaml"))
+				testsupport.WriteFile(t, path, c.document)
+			}
+			file, problems := Proxyfile(path)
+			if problems != nil {
+				t.Fatalf("problems = %q, want none", testsupport.ProblemStrings(problems))
+			}
+			if !reflect.DeepEqual(file.Gateway.Tracing, c.want) {
+				t.Errorf("Tracing = %#v, want %#v", file.Gateway.Tracing, c.want)
+			}
+		})
+	}
 }
