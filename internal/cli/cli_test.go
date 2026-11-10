@@ -1,0 +1,150 @@
+package cli
+
+import (
+	"bytes"
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/kitecorp/proxyfile/internal/testsupport"
+)
+
+const usageText = `usage: proxyfile render <file> -o <envoy.yaml> [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+       proxyfile check <file> -o <envoy.yaml> [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+       proxyfile schema
+       proxyfile version
+`
+
+const examples = "../../examples"
+
+const overwrite = "proxyfile render: an output path names an input or the other output\n"
+
+// TestRun runs the whole program in memory. In args, <ex> stands for the examples directory and <tmp> for the row's
+// own temporary directory, which the outputs name as <tmp> again before they are compared.
+func TestRun(t *testing.T) {
+	cases := []struct {
+		name           string
+		setup          func(t *testing.T, tmp string) // runs before Run when set
+		args           string                         // split at spaces
+		exit           int
+		stdout, stderr string
+		also           func(t *testing.T, tmp string) // checks the files after Run when set
+	}{
+		{name: "check full",
+			args: "check <ex>/full/gateway.yaml -o <ex>/full/envoy.yaml --rpc-methods <ex>/full/methods.json --rpc-table <ex>/full/rpc-table.json"},
+		{name: "file after flags", args: "check -o <ex>/minimal/envoy.yaml <ex>/minimal/gateway.yaml"},
+		{name: "hand edit", setup: func(t *testing.T, tmp string) {
+			copyMinimal(t, tmp)
+			path := filepath.Join(tmp, "envoy.yaml")
+			testsupport.WriteFile(t, path, string(testsupport.ReadFile(t, path))+"# edited\n")
+		}, args: "check <tmp>/gateway.yaml -o <tmp>/envoy.yaml", exit: 1,
+			stderr: "<tmp>/envoy.yaml differs from what proxyfile render writes\n"},
+		{name: "missing output", setup: func(t *testing.T, tmp string) {
+			copyMinimal(t, tmp)
+			if err := os.Remove(filepath.Join(tmp, "envoy.yaml")); err != nil {
+				t.Fatalf("Remove: %v", err)
+			}
+		}, args: "check <tmp>/gateway.yaml -o <tmp>/envoy.yaml", exit: 1,
+			stderr: "<tmp>/envoy.yaml differs from what proxyfile render writes\n"},
+		{name: "render", setup: copyMinimal, args: "render <tmp>/gateway.yaml -o <tmp>/out.yaml",
+			also: func(t *testing.T, tmp string) {
+				if !bytes.Equal(testsupport.ReadFile(t, filepath.Join(tmp, "out.yaml")), testsupport.ReadFile(t, examples+"/minimal/envoy.yaml")) {
+					t.Errorf("out.yaml differs from %s/minimal/envoy.yaml", examples)
+				}
+			}},
+		{name: "problem writes nothing", setup: func(t *testing.T, tmp string) {
+			copyMinimal(t, tmp)
+			path := filepath.Join(tmp, "gateway.yaml")
+			text := string(testsupport.ReadFile(t, path))
+			if !strings.Contains(text, "listen: 8000\n") {
+				t.Fatalf("the minimal example holds no line listen: 8000")
+			}
+			testsupport.WriteFile(t, path, strings.Replace(text, "listen: 8000\n", "liste: 8000\n", 1))
+		}, args: "render <tmp>/gateway.yaml -o <tmp>/out.yaml", exit: 1,
+			stderr: "<tmp>/gateway.yaml:3:1: \"listen\" is required here\n" +
+				"<tmp>/gateway.yaml:3:1: unknown key \"liste\"; known here: admin, auth, limits, listen, log, namespace, origins, remove_from_clients, routes, services, timeouts\n",
+			also: nothingWritten("minimal")},
+		{name: "no arguments", exit: 2, stderr: usageText},
+		{name: "help", args: "--help", stdout: usageText},
+		{name: "unknown command", args: "rendr", exit: 2, stderr: "proxyfile: unknown command \"rendr\"\n" + usageText},
+		{name: "no -o", args: "render a.yaml", exit: 2, stderr: "proxyfile render: -o is required\n"},
+		{name: "two files", args: "render a.yaml b.yaml -o c.yaml", exit: 2, stderr: "proxyfile render: give exactly one file\n"},
+		{name: "table without methods", args: "render a.yaml -o b.yaml --rpc-table t.json", exit: 2,
+			stderr: "proxyfile render: --rpc-table needs --rpc-methods\n"},
+		{name: "output names an input", setup: copyMinimal, args: "render <tmp>/gateway.yaml -o <tmp>/gateway.yaml", exit: 2,
+			stderr: overwrite, also: nothingWritten("minimal", "gateway.yaml")},
+		{name: "output names an input, another spelling", setup: copyMinimal,
+			args: "render <tmp>/gateway.yaml -o <tmp>/./gateway.yaml", exit: 2,
+			stderr: overwrite, also: nothingWritten("minimal", "gateway.yaml")},
+		{name: "table names the methods file", setup: func(t *testing.T, tmp string) { copyExample(t, tmp, "partial") },
+			args: "render <tmp>/gateway.yaml -o <tmp>/out.yaml --rpc-methods <tmp>/methods.json --rpc-table <tmp>/methods.json",
+			exit: 2, stderr: overwrite, also: nothingWritten("partial", "methods.json")},
+		// The origins file is named inside the proxyfile, not on the command line.
+		{name: "output names the origins file", setup: copyMinimal, args: "render <tmp>/gateway.yaml -o <tmp>/origins.json",
+			exit: 2, stderr: overwrite, also: nothingWritten("minimal", "origins.json")},
+		{name: "version", args: "version", stdout: "proxyfile v9.9.9\n"},
+		{name: "schema", args: "schema", stdout: string(testsupport.ReadFile(t, "../../schema/proxyfile.schema.json"))},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			if c.setup != nil {
+				c.setup(t, tmp)
+			}
+			var args []string
+			if c.args != "" {
+				args = strings.Split(strings.NewReplacer("<ex>", examples, "<tmp>", tmp).Replace(c.args), " ")
+			}
+			var stdout, stderr bytes.Buffer
+			exit := Run(args, &stdout, &stderr, "v9.9.9")
+			if exit != c.exit {
+				t.Errorf("exit = %d, want %d", exit, c.exit)
+			}
+			if got := strings.ReplaceAll(stdout.String(), tmp, "<tmp>"); got != c.stdout {
+				t.Errorf("stdout = %q, want %q", got, c.stdout)
+			}
+			if got := strings.ReplaceAll(stderr.String(), tmp, "<tmp>"); got != c.stderr {
+				t.Errorf("stderr = %q, want %q", got, c.stderr)
+			}
+			if c.also != nil {
+				c.also(t, tmp)
+			}
+		})
+	}
+}
+
+// copyExample copies every file of examples/<name> into dir.
+func copyExample(t *testing.T, dir, name string) {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(examples, name))
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, entry := range entries {
+		data := testsupport.ReadFile(t, filepath.Join(examples, name, entry.Name()))
+		testsupport.WriteFile(t, filepath.Join(dir, entry.Name()), string(data))
+	}
+}
+
+func copyMinimal(t *testing.T, dir string) {
+	t.Helper()
+	copyExample(t, dir, "minimal")
+}
+
+// nothingWritten returns a check that out.yaml was not written and that each named file of the row's directory still
+// holds the bytes of the same file in examples/<example>.
+func nothingWritten(example string, names ...string) func(t *testing.T, tmp string) {
+	return func(t *testing.T, tmp string) {
+		if _, err := os.Stat(filepath.Join(tmp, "out.yaml")); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("out.yaml: Stat error = %v, want that it does not exist", err)
+		}
+		for _, name := range names {
+			if !bytes.Equal(testsupport.ReadFile(t, filepath.Join(tmp, name)), testsupport.ReadFile(t, filepath.Join(examples, example, name))) {
+				t.Errorf("%s changed", name)
+			}
+		}
+	}
+}

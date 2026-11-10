@@ -1,0 +1,21 @@
+# The CORS answer depends on the Origin, so every response says so, the CORS filter's own preflight answer included.
+# A filter, not response_headers_to_add: Envoy 1.40.2 adds a route's response headers only to an upstream's answer
+# or a direct response (router.cc) and to a sendLocalReply (filter_manager.cc, finalizeHeaders), and the CORS filter
+# answers a preflight with its decoder callbacks' encodeHeaders (cors_filter.cc), which the filter manager starts at
+# the first encoder filter (filter_manager.cc, commonEncodePrefix with no filter): every encoder filter sees it, the
+# route's headers never do. APPEND_IF_EXISTS_OR_ADD adds to a Vary the service sent, never replacing it.
+#
+# Each RPC route's own entry of this filter adds its question for the check (x-gateway-action, x-gateway-reports). It
+# runs before ext_authz, because in HTTP mode ext_authz builds the check from the request's headers as they are when
+# it runs (ext_authz.cc, decodeHeaders), so it copies only a header already there; header_mutation.cc decodeHeaders
+# applies this filter's own mutations first, then the route's.
+#
+# Status alpha, security posture unknown in Envoy 1.40.2's extensions_metadata.yaml; it reads no client input.
+name: envoy.filters.http.header_mutation
+typed_config:
+  "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutation
+  mutations:
+    response_mutations:
+    - append:
+        header: {key: vary, value: Origin}
+        append_action: APPEND_IF_EXISTS_OR_ADD

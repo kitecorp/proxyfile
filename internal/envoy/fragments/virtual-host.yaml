@@ -1,0 +1,53 @@
+# One virtual host per environment of the origins file. Each key of typed_per_filter_config names an http filter by
+# its name in the listener's list (Envoy 1.40.2, http_filters.rst, "Route specific config"). No route sets its own
+# for these two filters, so these settings hold for every route of the virtual host.
+name: {{q .Name}}
+domains: [{{range $i, $host := .Hosts}}{{if $i}}, {{end}}{{q $host}}{{end}}]
+typed_per_filter_config:
+  envoy.filters.http.rbac:
+    "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBACPerRoute
+    rbac:
+      rules:
+        action: ALLOW
+        policies:
+          # Envoy matches the principals with OR semantics (config/rbac/v3/rbac.proto), so a request passes when it
+          # carries no Origin, when its Origin is one of the virtual host's own domains on either scheme and any port,
+          # or when the origins file admits it; a single permission with any covers every request.
+          browser-origins:
+            permissions: [{any: true}]
+            principals:
+            - {not_id: {header: {name: origin, present_match: true}}}
+{{- range .SameOrigin}}
+            - {header: {name: origin, string_match: {safe_regex: {regex: {{q .}}}}}}
+{{- end}}
+{{- range .Origins}}
+            - {header: {name: origin, string_match: {exact: {{q .}}, ignore_case: true}}}
+{{- end}}
+{{- range .Patterns}}
+            - {header: {name: origin, string_match: {safe_regex: {regex: {{q .}}}}}}
+{{- end}}
+  envoy.filters.http.cors:
+    "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.CorsPolicy
+    allow_origin_string_match:{{if not (or .Origins .Patterns)}} []{{end}}
+{{- range .Origins}}
+    - {exact: {{q .}}, ignore_case: true}
+{{- end}}
+{{- range .Patterns}}
+    - {safe_regex: {regex: {{q .}}}}
+{{- end}}
+{{- with .AllowMethods}}
+    allow_methods: {{q .}}
+{{- end}}
+{{- with .AllowHeaders}}
+    allow_headers: {{q .}}
+{{- end}}
+{{- with .ExposeHeaders}}
+    expose_headers: {{q .}}
+{{- end}}
+{{- with .MaxAge}}
+    max_age: {{q .}}
+{{- end}}
+    # Its default, true, would send a preflight from an origin the policy does not admit on to the service
+    # (cors.proto); false makes the CORS filter answer it.
+    forward_not_matching_preflights: false
+routes: $routes

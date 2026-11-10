@@ -1,0 +1,11 @@
+# First: it sets the flag the auth-unavailable log line requires. Only a request that reaches the filters gets it, and
+# every such request has passed the early header removal (ConnectionManagerUtility::mutateRequestHeaders in
+# conn_manager_utility.cc, which conn_manager_impl.cc calls before createDownstreamFilterChain). Envoy 1.40.2,
+# set_metadata.proto: Config.metadata is a repeated Metadata {metadata_namespace, value}, written to the stream's
+# dynamic metadata on the request headers, a store apart from the routes' metadata.
+name: envoy.filters.http.set_metadata
+typed_config:
+  "@type": type.googleapis.com/envoy.extensions.filters.http.set_metadata.v3.Config
+  metadata:
+  - metadata_namespace: {{q .Namespace}}
+    value: {filtered: true}

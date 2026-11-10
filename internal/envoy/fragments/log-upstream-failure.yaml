@@ -1,0 +1,13 @@
+# One line per request an upstream failed. A client that went away (DC) is not an upstream failure.
+name: envoy.access_loggers.stdout
+filter:
+  response_flag_filter: {flags: [UH, UF, UO, UC, UT, URX, UPE]}
+typed_config:
+  "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+  log_format:
+    json_format:
+      event: gateway_upstream_failure
+      route: "%ROUTE_NAME%"
+      status: "%RESPONSE_CODE%"
+      flags: "%RESPONSE_FLAGS%"
+      upstream: "%UPSTREAM_CLUSTER%"

@@ -1,0 +1,29 @@
+# One line per request the auth check could not answer, which ext_authz let through with the mark
+# x-envoy-auth-failure-mode-allowed; with when_unavailable: deny it lets none through, so the line is never written.
+# A client's copy of the mark never writes one: the early header removal strips it, and the line also needs the flag
+# the first http filter sets, which a request Envoy answers before its filters (OPTIONS *, no Host, an Upgrade to a
+# route that does not proxy it) never gets (conn_manager_impl.cc, ActiveStream::decodeHeaders; an Upgrade no route
+# takes goes through the filters like any request). Envoy 1.40.2: accesslog.proto's MetadataFilter {matcher,
+# match_if_key_not_found} reads the stream's dynamic metadata, with type/matcher/v3/metadata.proto's MetadataMatcher
+# {filter, path [{key}], value} and value.proto's ValueMatcher bool_match.
+name: envoy.access_loggers.stdout
+filter:
+  and_filter:
+    filters:
+    - header_filter:
+        header: {name: x-envoy-auth-failure-mode-allowed, present_match: true}
+    - metadata_filter:
+        matcher: {filter: {{q .Namespace}}, path: [{key: filtered}], value: {bool_match: true}}
+        match_if_key_not_found: false
+typed_config:
+  "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+  log_format:
+    json_format:
+      event: gateway_auth_unavailable
+      route: "%ROUTE_NAME%"
+      # The route's metadata, not the x-gateway-action header the check reads: the router removes that header before
+      # the upstream, and the log reads the request's headers after it.
+      action: {{printf "%%METADATA(ROUTE:%s:action)%%" .Namespace | q}}
+      status: "%RESPONSE_CODE%"
+      failure_mode_allowed: "%REQ(x-envoy-auth-failure-mode-allowed)%"
+      request_id: "%REQ(X-REQUEST-ID)%"

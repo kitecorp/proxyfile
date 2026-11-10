@@ -1,0 +1,12 @@
+# Turns each Connect call on an RPC route into gRPC for the service's gRPC port, and the answer back into Connect.
+# After ext_authz, so a call is checked before it is bridged; before the router, which sends the gRPC request upstream.
+# Disabled here and turned on by each RPC route alone, so no other request is ever bridged. On a route where it is on,
+# it acts on a request that is Connect by its headers or its query (Envoy 1.40.2, filter.cc decodeHeaders: a content
+# type application/connect+<codec>, a connect-protocol-version header with an application/ content type, or a query
+# with connect=v1, which it turns into a POST, whatever the method, and drops); every other request passes through
+# unchanged. Envoy 1.40.2 marks the extension alpha, its security posture unknown (extensions_metadata.yaml). It has
+# no settings.
+name: envoy.filters.http.connect_grpc_bridge
+disabled: true
+typed_config:
+  "@type": type.googleapis.com/envoy.extensions.filters.http.connect_grpc_bridge.v3.FilterConfig

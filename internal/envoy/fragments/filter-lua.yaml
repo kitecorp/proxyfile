@@ -1,0 +1,20 @@
+# The HTTP status of Connect's error-code table as it is today (https://connectrpc.com/docs/protocol#error-codes) on
+# the bridge's error answers. For four codes Envoy 1.40.2's bridge writes the status the table gave before
+# connectrpc/connectrpc.com#130 (end_stream_response.cc, statusCodeToConnectUnaryStatus): canceled 408 where the table
+# now says 499, deadline_exceeded 408 (504), failed_precondition 412 (400), unimplemented 404 (501); every other code
+# already matches. Listed right before the bridge, so on the response path it runs right after it, and, like the
+# bridge, disabled here and turned on by each RPC route alone, so no other answer is touched. It changes only a 404,
+# 408 or 412 whose content type is application/json, which on an RPC route is the bridge's error (filter.cc,
+# convertGrpcResponseToConnectUnaryResponse), and only its status. Envoy 1.40.2's Lua filter holds the response
+# headers until the script returns, so they can still change after body() has buffered the body (lua_filter.cc,
+# headers_continued_), through a header object asked for again, because none survives the wait for the body
+# (lua_filter.h, onMarkDead); replace() sets :status as it sets any header (wrappers.cc, luaReplace calls setCopy).
+# Stable and robust to an untrusted downstream in Envoy 1.40.2's extensions_metadata.yaml. It can go once Envoy's
+# bridge writes Connect's current table.
+name: envoy.filters.http.lua
+disabled: true
+typed_config:
+  "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+  default_source_code:
+    # connect-status.lua, which the generated file shows as a literal block.
+    inline_string: {{q .Script}}

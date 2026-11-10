@@ -1,0 +1,42 @@
+# The request log: one JSON line per request on stdout. No path, query, address, user agent or referrer in any log
+# line: paths can carry links and tokens.
+name: envoy.access_loggers.stdout
+{{- with .Log}}
+# Every response at or above log.status_from, every response with a flag, and log.sample of the rest, chosen by the
+# first eight hex digits of x-request-id (Envoy 1.40.2, access_log_impl.cc, RuntimeFilter::evaluate, with the request
+# id extension's getInteger in request_id/uuid/config.cc). Without log, every request is logged.
+filter:
+  or_filter:
+    filters:
+    - status_code_filter:
+        comparison: {op: GE, value: {default_value: {{.StatusFrom}}, runtime_key: gateway.request_log.min_status}}
+    - response_flag_filter: {}
+    - runtime_filter:
+        runtime_key: gateway.request_log.sample
+        percent_sampled: {numerator: {{.SamplePercent}}, denominator: HUNDRED}
+{{- end}}
+typed_config:
+  "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+  log_format:
+    json_format:
+      time: "%START_TIME%"
+      route: "%ROUTE_NAME%"
+      host: "%REQ(:AUTHORITY)%"
+      method: "%REQ(:METHOD)%"
+      protocol: "%PROTOCOL%"
+      status: "%RESPONSE_CODE%"
+      flags: "%RESPONSE_FLAGS%"
+      details: "%RESPONSE_CODE_DETAILS%"
+      duration_ms: "%DURATION%"
+      upstream_ms: "%RESPONSE_DURATION%"
+      bytes_in: "%BYTES_RECEIVED%"
+      bytes_out: "%BYTES_SENT%"
+      upstream: "%UPSTREAM_CLUSTER%"
+      request_id: "%REQ(X-REQUEST-ID)%"
+{{- if .Auth}}
+      # How long the auth check took; null when none ran (no header named by only_with_header, the check switched
+      # off, a route with auth off). ext_authz records the time only when it calls the check (ext_authz.proto,
+      # emit_filter_state_stats), and the JSON format writes null for a value it does not find
+      # (substitution_formatter.cc, JsonFormatterImpl::formatTo).
+      authz_us: "%FILTER_STATE(envoy.filters.http.ext_authz:FIELD:latency_us)%"
+{{- end}}

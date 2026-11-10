@@ -1,0 +1,34 @@
+# One route per method of the methods file, matched on the exact path a call carries (/<package>.<Service>/<Method>),
+# asking the auth check the method's action and reports through the x-gateway- headers its own header_mutation entry
+# adds; its metadata keeps the action for the auth-unavailable log line alone. Each turns on the bridge, which turns
+# the call into gRPC before the router, and the Lua filter that sets Connect's current status on the bridge's errors:
+# a FilterConfig entry turns on, for its route, a filter the listener's list writes as disabled (Envoy 1.40.2,
+# http_filters.rst, "Disabled flag based route filter chain").
+#
+# Written in flow style, so the generated file holds each RPC route on one line.
+{
+  name: {{q .Name}},
+  match: {path: {{q .Path}}},
+{{- if .Auth}}
+  metadata: {filter_metadata: { {{- q .Namespace}}: {action: {{q .Action}}}}},
+{{- end}}
+  typed_per_filter_config: {
+{{- if and .Auth (or .Action .Reports)}}
+    envoy.filters.http.header_mutation: {
+      "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutationPerRoute,
+      mutations: {request_mutations: [
+{{- with .Action}}
+        {append: {header: {key: x-gateway-action, value: {{q .}}}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}
+{{- end}}
+{{- if and .Action .Reports}},{{end}}
+{{- with .Reports}}
+        {append: {header: {key: x-gateway-reports, value: {{q .}}}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}
+{{- end}}
+      ]}
+    },
+{{- end}}
+    envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}},
+    envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}
+  },
+  route: $action
+}

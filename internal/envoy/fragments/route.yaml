@@ -1,0 +1,24 @@
+# One plain route. Envoy tries a virtual host's routes in the order written and uses the first that matches (Envoy
+# 1.40.2, route_components.proto, VirtualHost.routes).
+#
+# With auth on, a plain route asks the check for authentication alone: it adds no x-gateway- header, and its empty
+# action is for the auth-unavailable log line. auth: off turns ext_authz off for this route alone
+# (ext_authz.proto, ExtAuthzPerRoute.disabled), and such a route carries no metadata.
+name: {{q .Name}}
+match: {
+{{- if eq .Match "prefix"}}prefix: {{q .Value}}
+{{- else if eq .Match "path"}}path: {{q .Value}}
+{{- else if eq .Match "pattern"}}safe_regex: {regex: {{q .Value}}}
+{{- end}}
+{{- with .Method}}, headers: [{name: ":method", string_match: {exact: {{q .}}}}]{{end -}}
+}
+{{- if .Metadata}}
+metadata: {filter_metadata: { {{- q .Namespace}}: {action: ""}}}
+{{- end}}
+route: $action
+{{- if .AuthOff}}
+typed_per_filter_config:
+  envoy.filters.http.ext_authz:
+    "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+    disabled: true
+{{- end}}

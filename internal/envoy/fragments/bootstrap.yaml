@@ -1,0 +1,40 @@
+# The root of the generated file. A plain $name value marks where the generator splices in the node it built for
+# that name: here the one listener, as the list Envoy takes, and the clusters.
+{{- with .Admin}}
+admin:
+  address: {socket_address: {address: 127.0.0.1, port_value: {{.Number}}}}
+  # Only these paths: Envoy answers 403 to any other admin path (Envoy 1.40.2, admin.cc, the allowlisted paths
+  # check), so nothing else that reaches the admin port can drain or stop the gateway.
+  #
+  # The admin listener runs outside the overload manager (admin.h, shouldBypassOverloadManager; admin.cc gives its
+  # connection manager the null overload manager), so a health probe on /ready still answers while the public listener
+  # refuses new connections.
+  allow_paths: [{exact: /ready}, {exact: /stats}, {exact: /server_info}]
+{{- end}}
+{{- if or .Heap .Connections}}
+overload_manager:
+  refresh_interval: 0.25s
+  resource_monitors:
+{{- with .Heap}}
+  - name: envoy.resource_monitors.fixed_heap
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.resource_monitors.fixed_heap.v3.FixedHeapConfig
+      max_heap_size_bytes: {{.Bytes}}
+{{- end}}
+{{- with .Connections}}
+  - name: envoy.resource_monitors.global_downstream_max_connections
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.resource_monitors.downstream_connections.v3.DownstreamConnectionsConfig
+      max_active_downstream_connections: {{.Number}}
+{{- end}}
+{{- if .Heap}}
+  actions:
+  - name: envoy.overload_actions.shrink_heap
+    triggers: [{name: envoy.resource_monitors.fixed_heap, threshold: {value: 0.90}}]
+  - name: envoy.overload_actions.stop_accepting_requests
+    triggers: [{name: envoy.resource_monitors.fixed_heap, threshold: {value: 0.98}}]
+{{- end}}
+{{- end}}
+static_resources:
+  listeners: $listener
+  clusters: $clusters

@@ -1,0 +1,82 @@
+# The auth check, asked in HTTP mode, so the auth service needs no Envoy type. With only_with_header, a request
+# without that header, or with it empty, makes no call (SkipFilter). The service answers 200 to let a request through
+# with the answer headers; a 5xx counts as a failed call, which when_unavailable decides; any other status reaches the
+# client as a denial (Envoy 1.40.2, ext_authz_http_impl.cc, RawHttpClientImpl::toResponse).
+#
+# Without only_with_header the filter's typed_config is the ExtAuthz itself, not the matcher's wrapper around it. The
+# check's settings are written once, at the indentation they need inside the wrapper: a block mapping may sit at any
+# indentation deeper than its key's (YAML 1.2.2, section 8.2.2), so the same lines also read as the filter's own
+# typed_config.
+name: envoy.filters.http.ext_authz
+typed_config:
+{{- with .Check.OnlyWithHeader}}
+  "@type": type.googleapis.com/envoy.extensions.common.matching.v3.ExtensionWithMatcher
+  extension_config:
+    name: envoy.filters.http.ext_authz
+    typed_config:
+{{- end}}
+      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+      http_service:
+        # ext_authz reads only the cluster and the timeout here (ext_authz/config.cc, ext_authz_http_impl.cc); the
+        # uri is a required field it never sends. HTTP mode always forwards the client's Host and no option changes
+        # it (header_parser.cc refuses a Host in headers_to_add), so the auth service must answer whatever Host it
+        # receives.
+        server_uri: {uri: {{q .Check.URI}}, cluster: {{q .Check.Cluster}}, timeout: {{.Check.Timeout}}}
+        # path_override replaces the whole path, query included, so the check never sees the client's (paths can
+        # carry links and tokens).
+        path_override: {{q .Check.Path}}
+        authorization_request:
+          # The deadline above, in milliseconds, so the auth service can keep its own calls inside it. Both are
+          # written from auth.timeout, so they cannot differ.
+          headers_to_add: [{key: x-gateway-timeout-ms, value: "{{.Check.TimeoutMillis}}"}]
+{{- with .Check.Accept}}
+        # The answer headers named by accept, set on the request to the service, replacing any value there
+        # (ext_authz.proto, allowed_upstream_headers: "Existing headers will be overridden"); the early header removal
+        # already took a client's copies (listener.yaml). Without accept no answer header reaches the service
+        # (ext_authz_http_impl.cc, toUpstreamMatchers), and the list is left out, because Envoy refuses an empty one
+        # (string.proto, ListStringMatcher.patterns, min_items 1).
+        authorization_response:
+          allowed_upstream_headers:
+            patterns:
+{{- range .}}
+            - {{if .Prefix}}prefix{{else}}exact{{end}}: {{q .Name}}
+{{- end}}
+{{- end}}
+      failure_mode_allow: {{.Check.Allow}}
+{{- if .Check.Allow}}
+      failure_mode_allow_header_add: true
+{{- end}}
+      # The client's headers named by send, and the route's question; no other client header reaches the check but
+      # those HTTP mode always sends: Authorization, Host, the method and the path above, with Content-Length 0
+      # (check_request_utils.cc, toRequestMatchers; ext_authz_http_impl.cc).
+      allowed_headers:
+        patterns:
+{{- range .Check.Send}}
+        - {{if .Prefix}}prefix{{else}}exact{{end}}: {{q .Name}}
+{{- end}}
+        - exact: x-gateway-action
+        - exact: x-gateway-reports
+      emit_filter_state_stats: true
+      # A tool may switch the check by editing the default_value line as text, so it stays one line in flow style.
+      filter_enabled:
+        default_value: {numerator: {{if .Check.Enabled}}100{{else}}0{{end}}, denominator: HUNDRED}
+        runtime_key: gateway.ext_authz.enabled
+{{- with .Check.OnlyWithHeader}}
+  xds_matcher:
+    matcher_list:
+      matchers:
+      - predicate:
+          not_matcher:
+            single_predicate:
+              input:
+                name: {{q .}}
+                typed_config:
+                  "@type": type.googleapis.com/envoy.type.matcher.v3.HttpRequestHeaderMatchInput
+                  header_name: {{q .}}
+              value_match: {safe_regex: {google_re2: {}, regex: ".+"}}
+        on_match:
+          action:
+            name: skip
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.common.matcher.action.v3.SkipFilter
+{{- end}}

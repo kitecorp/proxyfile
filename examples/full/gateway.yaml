@@ -1,0 +1,36 @@
+# yaml-language-server: $schema=../../schema/proxyfile.schema.json
+# Every key a proxyfile can hold, with invented values.
+namespace: example.gateway
+listen: 10000
+admin: 9901
+limits:
+  heap: 256MiB
+  connections: 4096
+  request_headers: {size: 96KiB, count: 150}
+timeouts:
+  request: none
+  idle: 90s
+  upstream_idle: 45s
+services:
+  shop: {http: 8080, grpc: 8081}
+  accounts: {grpc: 7070, http: 7070, host_header: "127.0.0.1:7070"}
+auth:
+  ask: accounts /auth/check
+  timeout: 1500ms
+  enabled: true
+  when_unavailable: allow
+  only_with_header: authorization
+  send: [authorization, x-country]
+  accept: [x-user-*, x-tier-*]
+remove_from_clients: [x-user-*, x-client-*, x-tier-*, x-gateway-*]
+origins: origins.json
+routes:
+  - {name: accounts-events, pattern: "^/events/[a-z0-9-]+$", to: accounts, auth: off}
+  - rpc:
+      retries: 1
+      to:
+        example.shop.*: {service: shop, name: shop}
+        "*": accounts
+  - {name: accounts-webhooks, path: /api/webhooks, method: POST, to: accounts, rewrite: /hooks/payments, auth: off}
+  - {name: shop, prefix: /, to: shop, retries: 1}
+log: {status_from: 400, sample: 1%}
