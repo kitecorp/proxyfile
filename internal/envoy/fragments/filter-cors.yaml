@@ -1,0 +1,11 @@
+# It answers itself every preflight to a route that reaches it, which is every preflight RBAC admits: RBAC, the filter
+# before it, refuses one from a foreign origin, and each virtual host sets forward_not_matching_preflights to false, so
+# a preflight from an origin on one of the environment's own hosts, which RBAC admits and the CORS list does not hold,
+# is answered too. So none reaches a service or ext_authz. On every other answer to an origin its list holds it sets
+# Access-Control-Allow-Origin and, when the origins file sets expose_headers, Access-Control-Expose-Headers, replacing
+# any the service sent (Envoy 1.40.2, cors_filter.cc). The policy is per virtual host. Its max_age lets a browser
+# cache an admitted preflight, so an origin removed from the origins file may keep working that long in a browser
+# that cached its preflight.
+name: envoy.filters.http.cors
+typed_config:
+  "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.Cors

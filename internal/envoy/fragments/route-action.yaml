@@ -1,0 +1,13 @@
+# Where a route sends a request, plain and RPC routes alike. A route keeps the client's Host unless its service has
+# host_header. Without timeouts.request a route has Envoy's default total timeout of 15 s, counted from the end of the
+# request, and with timeouts.request: none it has none (route_components.proto, RouteAction.timeout); a WebSocket's
+# request never ends, so only the idle timeout reaches it. retries: retried only on connect-failure and
+# reset-before-request, so a request is sent again only when it never reached the service (router_filter.rst,
+# x-envoy-retry-on).
+{cluster: {{q .Cluster}}
+{{- with .HostRewrite}}, host_rewrite_literal: {{q .}}{{end}}
+{{- with .PrefixRewrite}}, prefix_rewrite: {{q .}}{{end}}
+{{- with .Timeout}}, timeout: {{.}}{{end}}
+{{- with .IdleTimeout}}, idle_timeout: {{.}}{{end}}
+{{- with .Retries}}, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: {{.}}}{{end -}}
+}

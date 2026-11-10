@@ -1,0 +1,27 @@
+# One cluster per port of a service. A STATIC cluster names each endpoint by its resolved address, so Envoy looks up
+# no name (Envoy 1.40.2, service_discovery.rst, "Static"); that is why a service's address must be an IP address.
+name: {{q .Name}}
+type: STATIC
+load_assignment:
+  cluster_name: {{q .Name}}
+  endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: {{q .Address}}, port_value: {{.Port}}}}}}]}]
+{{- with .Connections}}
+# The circuit breakers take limits.connections, where Envoy's defaults of 1,024 would refuse load a service takes
+# (circuit_breaker.proto, Thresholds).
+circuit_breakers: {thresholds: [{max_connections: {{.Number}}, max_pending_requests: {{.Number}}, max_requests: {{.Number}}}]}
+{{- end}}
+typed_extension_protocol_options:
+  envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+    "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+{{- with .UpstreamIdle}}
+    # Envoy 1.40.2: HttpProtocolOptions.common_http_protocol_options is config.core.v3.HttpProtocolOptions, whose
+    # idle_timeout closes a connection with no active request after that long (default 1 hour). timeouts.upstream_idle
+    # should sit under the service's own idle timeout, so the gateway closes an idle connection before the service
+    # does and never sends a request on one the service is closing. For the auth service's cluster this matters most:
+    # a check sent on a connection the service is closing fails, and with when_unavailable: allow its request goes
+    # through marked.
+    common_http_protocol_options: {idle_timeout: {{.}}}
+{{- end}}
+    # A grpc port is spoken as HTTP/2 without TLS (h2c), an http port as HTTP/1.1. The cluster has no transport
+    # socket, so its connections are plaintext (cluster.proto, Cluster.transport_socket).
+    explicit_http_config: {{if .HTTP2}}{http2_protocol_options: {}}{{else}}{http_protocol_options: {}}{{end}}

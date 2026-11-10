@@ -1,0 +1,30 @@
+# The check the master ruleset requires. Its job name is the check's name, so the job must stay a top-level job
+# called Required.
+name: Pre-merge
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+permissions:
+  contents: read
+jobs:
+  required:
+    name: Required
+    runs-on: ubuntu-24.04
+    steps:
+      # The token stays out of the git config, so no test or script the job runs can read it from there.
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then printf '%s\n' "$unformatted"; exit 1; fi
+      - run: go vet ./...
+      - run: go test -count=1 ./...
+      - name: Envoy 1.40.2 loads every generated example
+        run: scripts/validate-envoy.sh examples/*/envoy.yaml

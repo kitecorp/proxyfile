@@ -1,0 +1,429 @@
+# The tree proxyfile must generate for examples/full: every key a proxyfile can hold. Every virtual host holds the
+# same routes, written once under the anchor and named by the aliases.
+admin:
+  address: {socket_address: {address: 127.0.0.1, port_value: 9901}}
+  allow_paths: [{exact: /ready}, {exact: /stats}, {exact: /server_info}]
+overload_manager:
+  refresh_interval: 0.25s
+  resource_monitors:
+  - name: envoy.resource_monitors.fixed_heap
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.resource_monitors.fixed_heap.v3.FixedHeapConfig
+      max_heap_size_bytes: 268435456
+  - name: envoy.resource_monitors.global_downstream_max_connections
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.resource_monitors.downstream_connections.v3.DownstreamConnectionsConfig
+      max_active_downstream_connections: 4096
+  actions:
+  - name: envoy.overload_actions.shrink_heap
+    triggers: [{name: envoy.resource_monitors.fixed_heap, threshold: {value: 0.90}}]
+  - name: envoy.overload_actions.stop_accepting_requests
+    triggers: [{name: envoy.resource_monitors.fixed_heap, threshold: {value: 0.98}}]
+static_resources:
+  listeners:
+  - name: public
+    address: {socket_address: {address: 0.0.0.0, port_value: 10000}}
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: public
+          use_remote_address: false
+          always_set_request_id_in_response: true
+          server_header_transformation: PASS_THROUGH
+          max_request_headers_kb: 96
+          common_http_protocol_options: {max_headers_count: 150}
+          normalize_path: false
+          merge_slashes: false
+          upgrade_configs: [{upgrade_type: websocket}]
+          local_reply_config:
+            mappers:
+            - filter: {response_flag_filter: {flags: [UF, UH, UC, URX]}}
+              status_code: 502
+              body: {inline_string: ""}
+            - filter:
+                and_filter:
+                  filters:
+                  - status_code_filter:
+                      comparison: {op: EQ, value: {default_value: 403, runtime_key: gateway.local_reply.origin_refused_status}}
+                  - header_filter:
+                      header: {name: origin, present_match: true}
+              body: {inline_string: "Invalid CORS request"}
+          access_log:
+          - name: envoy.access_loggers.stdout
+            filter:
+              or_filter:
+                filters:
+                - status_code_filter:
+                    comparison: {op: GE, value: {default_value: 400, runtime_key: gateway.request_log.min_status}}
+                - response_flag_filter: {}
+                - runtime_filter:
+                    runtime_key: gateway.request_log.sample
+                    percent_sampled: {numerator: 1, denominator: HUNDRED}
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+              log_format:
+                json_format:
+                  time: "%START_TIME%"
+                  route: "%ROUTE_NAME%"
+                  host: "%REQ(:AUTHORITY)%"
+                  method: "%REQ(:METHOD)%"
+                  protocol: "%PROTOCOL%"
+                  status: "%RESPONSE_CODE%"
+                  flags: "%RESPONSE_FLAGS%"
+                  details: "%RESPONSE_CODE_DETAILS%"
+                  duration_ms: "%DURATION%"
+                  upstream_ms: "%RESPONSE_DURATION%"
+                  bytes_in: "%BYTES_RECEIVED%"
+                  bytes_out: "%BYTES_SENT%"
+                  upstream: "%UPSTREAM_CLUSTER%"
+                  request_id: "%REQ(X-REQUEST-ID)%"
+                  authz_us: "%FILTER_STATE(envoy.filters.http.ext_authz:FIELD:latency_us)%"
+          - name: envoy.access_loggers.stdout
+            filter:
+              response_flag_filter: {flags: [UH, UF, UO, UC, UT, URX, UPE]}
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+              log_format:
+                json_format:
+                  event: gateway_upstream_failure
+                  route: "%ROUTE_NAME%"
+                  status: "%RESPONSE_CODE%"
+                  flags: "%RESPONSE_FLAGS%"
+                  upstream: "%UPSTREAM_CLUSTER%"
+          - name: envoy.access_loggers.stdout
+            filter:
+              and_filter:
+                filters:
+                - header_filter:
+                    header: {name: x-envoy-auth-failure-mode-allowed, present_match: true}
+                - metadata_filter:
+                    matcher: {filter: example.gateway, path: [{key: filtered}], value: {bool_match: true}}
+                    match_if_key_not_found: false
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+              log_format:
+                json_format:
+                  event: gateway_auth_unavailable
+                  route: "%ROUTE_NAME%"
+                  action: "%METADATA(ROUTE:example.gateway:action)%"
+                  status: "%RESPONSE_CODE%"
+                  failure_mode_allowed: "%REQ(x-envoy-auth-failure-mode-allowed)%"
+                  request_id: "%REQ(X-REQUEST-ID)%"
+          early_header_mutation_extensions:
+          - name: envoy.http.early_header_mutation.header_mutation
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.http.early_header_mutation.header_mutation.v3.HeaderMutation
+              mutations:
+              - remove_on_match: {key_matcher: {prefix: x-user-}}
+              - remove_on_match: {key_matcher: {prefix: x-client-}}
+              - remove_on_match: {key_matcher: {prefix: x-tier-}}
+              - remove_on_match: {key_matcher: {prefix: x-gateway-}}
+              - remove: x-envoy-auth-failure-mode-allowed
+          http_filters:
+          - name: envoy.filters.http.set_metadata
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.set_metadata.v3.Config
+              metadata:
+              - metadata_namespace: example.gateway
+                value: {filtered: true}
+          - name: envoy.filters.http.header_mutation
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutation
+              mutations:
+                response_mutations:
+                - append:
+                    header: {key: vary, value: Origin}
+                    append_action: APPEND_IF_EXISTS_OR_ADD
+          - name: envoy.filters.http.rbac
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBAC
+          - name: envoy.filters.http.cors
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.Cors
+          - name: envoy.filters.http.ext_authz
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.common.matching.v3.ExtensionWithMatcher
+              extension_config:
+                name: envoy.filters.http.ext_authz
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+                  http_service:
+                    server_uri: {uri: "http://127.0.0.1:7070/auth/check", cluster: accounts_http, timeout: 1.5s}
+                    path_override: /auth/check
+                    authorization_request:
+                      headers_to_add: [{key: x-gateway-timeout-ms, value: "1500"}]
+                    authorization_response:
+                      allowed_upstream_headers: {patterns: [{prefix: x-user-}, {prefix: x-tier-}]}
+                  failure_mode_allow: true
+                  failure_mode_allow_header_add: true
+                  allowed_headers:
+                    patterns: [{exact: authorization}, {exact: x-country}, {exact: x-gateway-action}, {exact: x-gateway-reports}]
+                  emit_filter_state_stats: true
+                  filter_enabled:
+                    default_value: {numerator: 100, denominator: HUNDRED}
+                    runtime_key: gateway.ext_authz.enabled
+              xds_matcher:
+                matcher_list:
+                  matchers:
+                  - predicate:
+                      not_matcher:
+                        single_predicate:
+                          input:
+                            name: authorization
+                            typed_config:
+                              "@type": type.googleapis.com/envoy.type.matcher.v3.HttpRequestHeaderMatchInput
+                              header_name: authorization
+                          value_match: {safe_regex: {google_re2: {}, regex: ".+"}}
+                    on_match:
+                      action:
+                        name: skip
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.common.matcher.action.v3.SkipFilter
+          - name: envoy.filters.http.lua
+            disabled: true
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+              default_source_code:
+                inline_string: |
+                  -- Connect's status today for each code whose status the bridge writes from the old table.
+                  local CONNECT_STATUS = {
+                    canceled = "499",
+                    deadline_exceeded = "504",
+                    failed_precondition = "400",
+                    unimplemented = "501",
+                  }
+                  local OLD_STATUS = {["404"] = true, ["408"] = true, ["412"] = true}
+
+                  function envoy_on_response(response_handle)
+                    local headers = response_handle:headers()
+                    if not OLD_STATUS[headers:get(":status")] or headers:get("content-type") ~= "application/json" then
+                      return
+                    end
+                    local body = response_handle:body()
+                    if body == nil then
+                      return
+                    end
+                    -- The bridge writes the error with protobuf's JSON printer: its keys come in no fixed order
+                    -- (message before code, as measured), and a quote inside a string is always escaped, so the
+                    -- only "code":"..." pair in the body is the error's own.
+                    local code = body:getBytes(0, body:length()):match('"code"%s*:%s*"([%l_]+)"')
+                    local status = CONNECT_STATUS[code]
+                    if status ~= nil then
+                      -- Asked for again: the header object from before body() died while the body was awaited.
+                      response_handle:headers():replace(":status", status)
+                    end
+                  end
+          - name: envoy.filters.http.connect_grpc_bridge
+            disabled: true
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.connect_grpc_bridge.v3.FilterConfig
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+              suppress_envoy_headers: true
+          route_config:
+            name: public
+            request_headers_to_remove: [x-gateway-action, x-gateway-reports]
+            ignore_port_in_host_matching: true
+            virtual_hosts:
+            - name: live
+              domains: [api.example.com, api.example.org]
+              typed_per_filter_config:
+                envoy.filters.http.rbac:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBACPerRoute
+                  rbac:
+                    rules:
+                      action: ALLOW
+                      policies:
+                        browser-origins:
+                          permissions: [{any: true}]
+                          principals:
+                          - {not_id: {header: {name: origin, present_match: true}}}
+                          - {header: {name: origin, string_match: {safe_regex: {regex: '^https?://api\.example\.com(:[0-9]+)?$'}}}}
+                          - {header: {name: origin, string_match: {safe_regex: {regex: '^https?://api\.example\.org(:[0-9]+)?$'}}}}
+                          - {header: {name: origin, string_match: {exact: "https://example.com", ignore_case: true}}}
+                          - {header: {name: origin, string_match: {exact: "https://www.example.com", ignore_case: true}}}
+                          - {header: {name: origin, string_match: {safe_regex: {regex: '^https://.*\.example\.com$'}}}}
+                envoy.filters.http.cors:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.CorsPolicy
+                  allow_origin_string_match:
+                  - {exact: "https://example.com", ignore_case: true}
+                  - {exact: "https://www.example.com", ignore_case: true}
+                  - {safe_regex: {regex: '^https://.*\.example\.com$'}}
+                  allow_methods: "*"
+                  allow_headers: "*"
+                  expose_headers: "Content-Disposition,X-Request-Id"
+                  max_age: "600"
+                  forward_not_matching_preflights: false
+              routes: &routes
+              - name: accounts-events
+                match: {safe_regex: {regex: "^/events/[a-z0-9-]+$"}}
+                route: {cluster: accounts_http, host_rewrite_literal: "127.0.0.1:7070", timeout: 0s, idle_timeout: 90s}
+                typed_per_filter_config:
+                  envoy.filters.http.ext_authz:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                    disabled: true
+              - name: accounts-rpc
+                match: {path: /example.accounts.v1.ProfileService/GetProfile}
+                metadata: {filter_metadata: {example.gateway: {action: ""}}}
+                typed_per_filter_config:
+                  envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}
+                  envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}
+                route:
+                  cluster: accounts_grpc
+                  timeout: 0s
+                  idle_timeout: 90s
+                  retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}
+                  host_rewrite_literal: "127.0.0.1:7070"
+              - name: shop
+                match: {path: /example.shop.v1.CartService/AddItem}
+                metadata: {filter_metadata: {example.gateway: {action: buy}}}
+                typed_per_filter_config:
+                  envoy.filters.http.header_mutation:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutationPerRoute
+                    mutations:
+                      request_mutations:
+                      - append: {header: {key: x-gateway-action, value: buy}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}
+                      - append: {header: {key: x-gateway-reports, value: browse}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}
+                  envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}
+                  envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}
+                route:
+                  cluster: shop_grpc
+                  timeout: 0s
+                  idle_timeout: 90s
+                  retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}
+              - name: shop
+                match: {path: /example.shop.v1.CartService/GetCart}
+                metadata: {filter_metadata: {example.gateway: {action: browse}}}
+                typed_per_filter_config:
+                  envoy.filters.http.header_mutation:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutationPerRoute
+                    mutations:
+                      request_mutations:
+                      - append: {header: {key: x-gateway-action, value: browse}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}
+                  envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}
+                  envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}
+                route:
+                  cluster: shop_grpc
+                  timeout: 0s
+                  idle_timeout: 90s
+                  retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}
+              - name: accounts-webhooks
+                match: {path: /api/webhooks, headers: [{name: ":method", string_match: {exact: POST}}]}
+                route: {cluster: accounts_http, host_rewrite_literal: "127.0.0.1:7070", prefix_rewrite: /hooks/payments, timeout: 0s, idle_timeout: 90s}
+                typed_per_filter_config:
+                  envoy.filters.http.ext_authz:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                    disabled: true
+              - name: shop
+                match: {prefix: /}
+                metadata: {filter_metadata: {example.gateway: {action: ""}}}
+                route:
+                  cluster: shop_http
+                  timeout: 0s
+                  idle_timeout: 90s
+                  retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}
+            - name: test
+              domains: [api.test.example.com]
+              typed_per_filter_config:
+                envoy.filters.http.rbac:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBACPerRoute
+                  rbac:
+                    rules:
+                      action: ALLOW
+                      policies:
+                        browser-origins:
+                          permissions: [{any: true}]
+                          principals:
+                          - {not_id: {header: {name: origin, present_match: true}}}
+                          - {header: {name: origin, string_match: {safe_regex: {regex: '^https?://api\.test\.example\.com(:[0-9]+)?$'}}}}
+                          - {header: {name: origin, string_match: {exact: "http://localhost:3000", ignore_case: true}}}
+                          - {header: {name: origin, string_match: {exact: "https://test.example.com", ignore_case: true}}}
+                          - {header: {name: origin, string_match: {safe_regex: {regex: '^https://.*\.test\.example\.com$'}}}}
+                envoy.filters.http.cors:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.CorsPolicy
+                  allow_origin_string_match:
+                  - {exact: "http://localhost:3000", ignore_case: true}
+                  - {exact: "https://test.example.com", ignore_case: true}
+                  - {safe_regex: {regex: '^https://.*\.test\.example\.com$'}}
+                  allow_methods: "*"
+                  allow_headers: "*"
+                  expose_headers: "Content-Disposition,X-Request-Id"
+                  max_age: "600"
+                  forward_not_matching_preflights: false
+              routes: *routes
+            - name: local
+              domains: [127.0.0.1, localhost]
+              typed_per_filter_config:
+                envoy.filters.http.rbac:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBACPerRoute
+                  rbac:
+                    rules:
+                      action: ALLOW
+                      policies:
+                        browser-origins:
+                          permissions: [{any: true}]
+                          principals:
+                          - {not_id: {header: {name: origin, present_match: true}}}
+                          - {header: {name: origin, string_match: {safe_regex: {regex: '^https?://127\.0\.0\.1(:[0-9]+)?$'}}}}
+                          - {header: {name: origin, string_match: {safe_regex: {regex: '^https?://localhost(:[0-9]+)?$'}}}}
+                          - {header: {name: origin, string_match: {safe_regex: {regex: '^http://.*\.example\.com:.*$'}}}}
+                          - {header: {name: origin, string_match: {safe_regex: {regex: '^http://localhost:.*$'}}}}
+                envoy.filters.http.cors:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.CorsPolicy
+                  allow_origin_string_match:
+                  - {safe_regex: {regex: '^http://.*\.example\.com:.*$'}}
+                  - {safe_regex: {regex: '^http://localhost:.*$'}}
+                  allow_methods: "*"
+                  allow_headers: "*"
+                  expose_headers: "Content-Disposition,X-Request-Id"
+                  max_age: "600"
+                  forward_not_matching_preflights: false
+              routes: *routes
+  clusters:
+  - name: shop_http
+    type: STATIC
+    load_assignment:
+      cluster_name: shop_http
+      endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: 127.0.0.1, port_value: 8080}}}}]}]
+    circuit_breakers: {thresholds: [{max_connections: 4096, max_pending_requests: 4096, max_requests: 4096}]}
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        common_http_protocol_options: {idle_timeout: 45s}
+        explicit_http_config: {http_protocol_options: {}}
+  - name: shop_grpc
+    type: STATIC
+    load_assignment:
+      cluster_name: shop_grpc
+      endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: 127.0.0.1, port_value: 8081}}}}]}]
+    circuit_breakers: {thresholds: [{max_connections: 4096, max_pending_requests: 4096, max_requests: 4096}]}
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        common_http_protocol_options: {idle_timeout: 45s}
+        explicit_http_config: {http2_protocol_options: {}}
+  - name: accounts_grpc
+    type: STATIC
+    load_assignment:
+      cluster_name: accounts_grpc
+      endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: 127.0.0.1, port_value: 7070}}}}]}]
+    circuit_breakers: {thresholds: [{max_connections: 4096, max_pending_requests: 4096, max_requests: 4096}]}
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        common_http_protocol_options: {idle_timeout: 45s}
+        explicit_http_config: {http2_protocol_options: {}}
+  - name: accounts_http
+    type: STATIC
+    load_assignment:
+      cluster_name: accounts_http
+      endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: 127.0.0.1, port_value: 7070}}}}]}]
+    circuit_breakers: {thresholds: [{max_connections: 4096, max_pending_requests: 4096, max_requests: 4096}]}
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        common_http_protocol_options: {idle_timeout: 45s}
+        explicit_http_config: {http_protocol_options: {}}

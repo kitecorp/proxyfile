@@ -1,0 +1,365 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A proxyfile: one gateway, the services behind it and the routes to them, from which proxyfile writes an Envoy configuration.",
+  "properties": {
+    "admin": {
+      "description": "The port of the admin listener, on 127.0.0.1; no admin listener when not written.",
+      "maximum": 65535,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "auth": {
+      "additionalProperties": false,
+      "description": "The external check every request goes through before it reaches a service.",
+      "properties": {
+        "accept": {
+          "description": "The headers of the check's answer that reach the service; a name ending in * is a prefix.",
+          "items": {
+            "pattern": "^[a-z0-9][a-z0-9-]*\\*?$",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ask": {
+          "description": "The service and the path the gateway asks.",
+          "pattern": "^[a-z][a-z0-9-]* /[^\\t\\n\\f\\r ]*$",
+          "type": "string"
+        },
+        "enabled": {
+          "description": "true runs the check on every request it applies to, false on none.",
+          "type": "boolean"
+        },
+        "only_with_header": {
+          "description": "The check runs only on requests that carry this header.",
+          "pattern": "^[a-z0-9][a-z0-9-]*$",
+          "type": "string"
+        },
+        "send": {
+          "description": "The request headers the check is sent; a name ending in * is a prefix.",
+          "items": {
+            "pattern": "^[a-z0-9][a-z0-9-]*\\*?$",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "timeout": {
+          "description": "How long the gateway waits for the answer.",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h)$",
+          "type": "string"
+        },
+        "when_unavailable": {
+          "description": "What happens to a request when the check cannot be asked: allow lets it through, deny refuses it.",
+          "enum": [
+            "allow",
+            "deny"
+          ]
+        }
+      },
+      "required": [
+        "ask",
+        "timeout",
+        "enabled",
+        "when_unavailable"
+      ],
+      "type": "object"
+    },
+    "limits": {
+      "additionalProperties": false,
+      "description": "Limits on memory, connections and request headers.",
+      "properties": {
+        "connections": {
+          "description": "The most connections at once, from clients and to each service.",
+          "maximum": 4294967295,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "heap": {
+          "description": "The heap budget: the gateway shrinks its heap at 90% of it and refuses new requests at 98%.",
+          "pattern": "^[1-9][0-9]*(KiB|MiB|GiB)$",
+          "type": "string"
+        },
+        "request_headers": {
+          "additionalProperties": false,
+          "description": "The largest header block and the most header fields a request may carry.",
+          "properties": {
+            "count": {
+              "description": "The most header fields in a request.",
+              "maximum": 4294967295,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "size": {
+              "description": "The largest header block of a request.",
+              "pattern": "^[1-9][0-9]*(KiB|MiB|GiB)$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "size",
+            "count"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "listen": {
+      "description": "The port of the public listener, on 0.0.0.0.",
+      "maximum": 65535,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "log": {
+      "additionalProperties": false,
+      "description": "Which requests the request log writes.",
+      "properties": {
+        "sample": {
+          "description": "The share of the other requests that is logged.",
+          "pattern": "^(100|[1-9]?[0-9])%$",
+          "type": "string"
+        },
+        "status_from": {
+          "description": "The lowest status that is always logged.",
+          "maximum": 599,
+          "minimum": 100,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "status_from",
+        "sample"
+      ],
+      "type": "object"
+    },
+    "namespace": {
+      "description": "The namespace of the gateway's own metadata, which the routes and the request log use; proxyfile when not written.",
+      "pattern": "^[a-z][a-z0-9._-]*$",
+      "type": "string"
+    },
+    "origins": {
+      "description": "The origins file, relative to this file: the CORS settings and, for each environment, its hosts and the browser origins it admits.",
+      "pattern": "^[^\\t\\n\\f\\r ]+$",
+      "type": "string"
+    },
+    "remove_from_clients": {
+      "description": "Headers removed from every client request before routing and before any filter; a name ending in * is a prefix.",
+      "items": {
+        "pattern": "^[a-z0-9][a-z0-9-]*\\*?$",
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "routes": {
+      "description": "The routes, tried in the order written; the rpc entry marks where the RPC routes go.",
+      "items": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The place in the order where the RPC routes go.",
+            "properties": {
+              "rpc": {
+                "additionalProperties": false,
+                "description": "The RPC routes: one exact-path route for each RPC method.",
+                "properties": {
+                  "retries": {
+                    "description": "How many times an RPC call that never reached its service is tried again.",
+                    "maximum": 4294967295,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "to": {
+                    "additionalProperties": {
+                      "oneOf": [
+                        {
+                          "description": "The service the methods go to.",
+                          "pattern": "^[a-z][a-z0-9-]*$",
+                          "type": "string"
+                        },
+                        {
+                          "additionalProperties": false,
+                          "description": "The service the methods go to, and the name of their routes.",
+                          "properties": {
+                            "name": {
+                              "description": "The name of the routes; the service's name followed by -rpc when not written.",
+                              "pattern": "^[A-Za-z0-9._-]+$",
+                              "type": "string"
+                            },
+                            "service": {
+                              "description": "The service the methods go to.",
+                              "pattern": "^[a-z][a-z0-9-]*$",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "service"
+                          ],
+                          "type": "object"
+                        }
+                      ]
+                    },
+                    "description": "The service the RPC methods of each package go to.",
+                    "propertyNames": {
+                      "pattern": "^(\\*|[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*(\\.\\*)?)$"
+                    },
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "to"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "rpc"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A route: a name, what it matches and the service it goes to.",
+            "oneOf": [
+              {
+                "required": [
+                  "prefix"
+                ]
+              },
+              {
+                "required": [
+                  "path"
+                ]
+              },
+              {
+                "required": [
+                  "pattern"
+                ]
+              }
+            ],
+            "properties": {
+              "auth": {
+                "description": "off sends the route's requests to the service without the check.",
+                "enum": [
+                  "off"
+                ]
+              },
+              "method": {
+                "description": "Matches only requests with this HTTP method.",
+                "pattern": "^[A-Z]+$",
+                "type": "string"
+              },
+              "name": {
+                "description": "The route's name.",
+                "pattern": "^[A-Za-z0-9._-]+$",
+                "type": "string"
+              },
+              "path": {
+                "description": "Matches this path exactly.",
+                "pattern": "^/",
+                "type": "string"
+              },
+              "pattern": {
+                "description": "Matches paths by this regular expression, in RE2 syntax.",
+                "pattern": "[\\s\\S]",
+                "type": "string"
+              },
+              "prefix": {
+                "description": "Matches paths that start with this text.",
+                "pattern": "^/",
+                "type": "string"
+              },
+              "retries": {
+                "description": "How many times a request that never reached the service is tried again.",
+                "maximum": 4294967295,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "rewrite": {
+                "description": "Replaces the matched prefix or path before the request goes to the service.",
+                "pattern": "^/",
+                "type": "string"
+              },
+              "to": {
+                "description": "The service the route goes to.",
+                "pattern": "^[a-z][a-z0-9-]*$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "to"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "type": "array"
+    },
+    "services": {
+      "additionalProperties": {
+        "additionalProperties": false,
+        "description": "One service: a port per protocol, an optional Host header and an optional address.",
+        "properties": {
+          "address": {
+            "description": "The service's IP address; 127.0.0.1 when not written.",
+            "pattern": "^[^\\t\\n\\f\\r ]+$",
+            "type": "string"
+          },
+          "grpc": {
+            "description": "The service's gRPC port.",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "host_header": {
+            "description": "The Host header a request carries when a route sends it to this service.",
+            "pattern": "^[A-Za-z0-9.:\\[\\]-]+$",
+            "type": "string"
+          },
+          "http": {
+            "description": "The service's HTTP port.",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "description": "The services behind the gateway, on the same host, by name.",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9-]*$"
+      },
+      "type": "object"
+    },
+    "timeouts": {
+      "additionalProperties": false,
+      "description": "How long a request, an idle request and an idle connection to a service may last.",
+      "properties": {
+        "idle": {
+          "description": "The longest a request may go without sending or receiving data.",
+          "pattern": "^(none|[1-9][0-9]*(ms|s|m|h))$",
+          "type": "string"
+        },
+        "request": {
+          "description": "The longest a whole request may take.",
+          "pattern": "^(none|[1-9][0-9]*(ms|s|m|h))$",
+          "type": "string"
+        },
+        "upstream_idle": {
+          "description": "The longest a connection to a service is kept open with no request on it.",
+          "pattern": "^(none|[1-9][0-9]*(ms|s|m|h))$",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "listen",
+    "services",
+    "origins",
+    "routes"
+  ],
+  "title": "proxyfile",
+  "type": "object"
+}

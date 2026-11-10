@@ -1,0 +1,3 @@
+[
+  {"service": "example.backend.v1.ReportService", "method": "ListReports", "action": "read", "reports": ["export", "share"], "cluster": "backend_grpc"}
+]

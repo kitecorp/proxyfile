@@ -1,0 +1,99 @@
+# The one listener every request enters by, and its HTTP connection manager. Envoy 1.40.2 references below are to
+# its source tree and API files.
+name: public
+# 0.0.0.0, so a container runtime can publish the port; who may reach it is the network's rule, not the gateway's.
+address: {socket_address: {address: 0.0.0.0, port_value: {{.Port}}}}
+filter_chains:
+- filters:
+  - name: envoy.filters.network.http_connection_manager
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+      stat_prefix: public
+      # A proxy stands in front: X-Forwarded-For passes as it came and X-Forwarded-Proto is kept when present. With
+      # xff_num_trusted_hops at 0, Envoy takes the last X-Forwarded-For entry, the address the proxy in front
+      # appended, as the client's address. Without use_remote_address, conn_manager_utility.cc takes the address from
+      # the X-Forwarded-For detection, which appends nothing (skip_xff_append defaults to true, xff.cc), and sets
+      # X-Forwarded-Proto only when the request has none.
+      use_remote_address: false
+      # Every response carries the x-request-id the request log writes as request_id (the client's own when it sent
+      # one), so a caller can quote the id of a failed call. Envoy replaces a client's x-request-id only on an edge
+      # request, which needs use_remote_address (conn_manager_utility.cc, request_id/uuid/config.cc).
+      always_set_request_id_in_response: true
+      # The service's own Server header passes through, and Envoy adds none of its own.
+      server_header_transformation: PASS_THROUGH
+{{- with .RequestHeaders}}
+      # Set above the service's own limits, so the service answers its own 400 to a header block it refuses; Envoy's
+      # defaults are 60 KiB and 100 fields (http_connection_manager.proto, max_request_headers_kb; protocol.proto,
+      # max_headers_count), and Envoy itself refuses a request over them, with 431 or a stream reset.
+      max_request_headers_kb: {{.KiB}}
+      common_http_protocol_options: {max_headers_count: {{.Count}}}
+{{- end}}
+      # Envoy neither normalizes a path nor merges its slashes, so the service's own path rules decide what a path
+      # means. normalize_path is written out because, when it is absent, a runtime value may change its default
+      # (http_connection_manager.proto).
+      normalize_path: false
+      merge_slashes: false
+      # WebSocket is the one upgrade passed on. Envoy answers any other Upgrade to a route with 403 and an empty body
+      # before any http filter sees the request; one no route takes goes through the filters like any request
+      # (conn_manager_impl.cc, which refuses the upgrade only when a route matched).
+      upgrade_configs: [{upgrade_type: websocket}]
+      local_reply_config:
+        mappers:
+        # A service that cannot be reached answers 502 with an empty body, where Envoy's own answer is a 503 (or a
+        # 502) with a body that describes the failure (router.cc).
+        - filter: {response_flag_filter: {flags: [UF, UH, UC, URX]}}
+          status_code: 502
+          body: {inline_string: ""}
+        # The RBAC filter's refusal of a browser origin, with the body a Spring service gives for it (403 "Invalid
+        # CORS request"). The refusal sets no response flag (rbac_filter.cc), so the match is a 403 to a request that
+        # carries an Origin: the RBAC rules let every request without one through, and a 403 Envoy answers for
+        # anything else without an Origin (an Upgrade to a route that does not proxy it) keeps its empty body.
+        - filter:
+            and_filter:
+              filters:
+              - status_code_filter:
+                  comparison: {op: EQ, value: {default_value: 403, runtime_key: gateway.local_reply.origin_refused_status}}
+              - header_filter:
+                  header: {name: origin, present_match: true}
+          body: {inline_string: "Invalid CORS request"}
+      access_log: $access_log
+{{- if or .Removed .Auth}}
+      # These headers are removed before routing and before every filter, so no route, filter or service sees a
+      # client's copy, in this order: the names in remove_from_clients; with auth, the question headers
+      # x-gateway-action and x-gateway-reports and each accept name, each unless an entry before it already covers it
+      # (an exact entry equal to it, or a prefix entry it starts with); and with auth, Envoy's mark
+      # x-envoy-auth-failure-mode-allowed. The question headers and the accept headers are removed whether or not
+      # remove_from_clients lists them, because a client must not be able to forge what the gateway asks the check or
+      # what the check says (removedFromClients in generate.go builds the list). Envoy 1.40.2,
+      # http_connection_manager.proto: early_header_mutation_extensions "will be called before any routing, tracing, or
+      # any filter processing"; the extension's mutations are config.common.mutation_rules.v3.HeaderMutation (remove,
+      # remove_on_match). The extension is left out when there is nothing to remove, because it needs at least one
+      # mutation (header_mutation.proto, min_items 1).
+      early_header_mutation_extensions:
+      - name: envoy.http.early_header_mutation.header_mutation
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.http.early_header_mutation.header_mutation.v3.HeaderMutation
+          mutations:
+{{- range .Removed}}
+{{- if .Prefix}}
+          - remove_on_match: {key_matcher: {prefix: {{q .Name}}}}
+{{- else}}
+          - remove: {{q .Name}}
+{{- end}}
+{{- end}}
+{{- if .Auth}}
+          - remove: x-envoy-auth-failure-mode-allowed
+{{- end}}
+{{- end}}
+      http_filters: $http_filters
+      route_config:
+        name: public
+{{- if .Auth}}
+        # The route's question is for the auth check alone: the router removes it, after every filter, so no service
+        # sees it (router.cc, finalizeRequestHeaders).
+        request_headers_to_remove: [x-gateway-action, x-gateway-reports]
+{{- end}}
+        # One virtual host per environment of the origins file, so each admits its own browser origins. The port in
+        # Host plays no part, so a local setup may reach the gateway on any port.
+        ignore_port_in_host_matching: true
+        virtual_hosts: $virtual_hosts

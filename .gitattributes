@@ -1,0 +1,6 @@
+# LF everywhere, because the generated files are compared byte for byte.
+* text=auto eol=lf
+# GitHub folds generated files in a diff.
+examples/*/envoy.yaml linguist-generated=true
+examples/*/rpc-table.json linguist-generated=true
+schema/proxyfile.schema.json linguist-generated=true
