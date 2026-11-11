@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package example.gateway.v1;
+
+import "google/protobuf/descriptor.proto";
+
+// What the gateway asks the auth check before a browser reaches a method.
+message Route {
+  // The action the caller must hold; empty means any caller may reach the method.
+  string action = 1;
+  // The actions the answer reports on.
+  repeated string reports = 2;
+}
+
+extend google.protobuf.MethodOptions {
+  // Marks a method the gateway routes. A method without it is not routed.
+  Route route = 50000;
+}

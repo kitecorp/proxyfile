@@ -4,3 +4,6 @@
 examples/*/envoy.yaml linguist-generated=true
 examples/*/rpc-table.json linguist-generated=true
 schema/proxyfile.schema.json linguist-generated=true
+# GitHub colours a Proxyfile and the HOCON examples as HOCON, which Linguist maps only to .hocon and two scalafmt names.
+Proxyfile linguist-language=HOCON
+*.conf linguist-language=HOCON

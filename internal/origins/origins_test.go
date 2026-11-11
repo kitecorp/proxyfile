@@ -101,6 +101,13 @@ func TestReadProblems(t *testing.T) {
 		{name: "pattern with a * in the wrong form",
 			file: `{"environments": [{"name": "a", "hosts": ["x.example"], "patterns": ["https://*.Example.com"]}]}`,
 			want: []string{`o.json:1:70: environment "a": the pattern "https://*.Example.com" is not scheme://host[:port] with a *`}},
+		// An escaped slash is read as a slash, and the value after it on the line keeps its column.
+		{name: "escaped slashes before a problem on the line",
+			file: `{"environments": [{"name": "a", "hosts": ["x.example"], "origins": ["https:\/\/a.example\/", "https://b.example/"]}]}`,
+			want: []string{
+				`o.json:1:69: environment "a": the origin "https://a.example/" is not scheme://host[:port] in lower case`,
+				`o.json:1:94: environment "a": the origin "https://b.example/" is not scheme://host[:port] in lower case`,
+			}},
 		{name: "file missing", absent: true,
 			want: []string{`o.json: the file cannot be read: no such file or directory`}},
 	}
@@ -151,6 +158,13 @@ func TestRead(t *testing.T) {
 		{name: "no cors", file: `{"environments": [{"name": "only", "hosts": ["example.com"]}]}`, want: File{
 			Environments: []Environment{{Name: "only", Hosts: []string{"example.com"}, Pos: model.Pos{Line: 1, Column: 19}}},
 		}},
+		// JSON writes a slash as / or \/ (RFC 8259, section 7), and a writer such as PHP's json_encode chooses \/. An
+		// escaped backslash before a slash stays a backslash.
+		{name: "escaped slashes", file: `{"environments": [{"name": "a\/b\\/c", "hosts": ["example.com"]}, {"name": "live", "hosts": ["example.org"]}]}`,
+			want: File{Environments: []Environment{
+				{Name: `a/b\/c`, Hosts: []string{"example.com"}, Pos: model.Pos{Line: 1, Column: 19}},
+				{Name: "live", Hosts: []string{"example.org"}, Pos: model.Pos{Line: 1, Column: 67}},
+			}}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -56,7 +56,7 @@ func TestFromHOCONAccepts(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			writeHOCONFiles(t, c.input, c.others, false)
-			root, problems := FromHOCON("g.conf")
+			root, _, problems := FromHOCON("g.conf")
 			if problems != nil {
 				t.Fatalf("problems = %q, want none", testsupport.ProblemStrings(problems))
 			}
@@ -100,13 +100,20 @@ func TestFromHOCONRefuses(t *testing.T) {
 			want:   []string{`g.conf: parse error at line 2, col 1: unexpected EOF, expected '}'`}},
 		{name: "url include", input: "include url(\"http://example.com/x.conf\")\n",
 			want: []string{`g.conf:1:1: include url(...) is not supported in v1.0`}},
+		// The library reads a name inside file(...) from the working directory, so the same proxyfile could read
+		// another file elsewhere; proxyfile refuses it before the library opens anything.
+		{name: "include file", input: "include file(\"port.conf\")\nlisten = 8000\n", others: map[string]string{"port.conf": "admin = 9901\n"},
+			want: []string{`g.conf:1:1: include file(...) is read from the working directory, not beside this file; write include "port.conf"`}},
+		{name: "include file in an included file", input: "include \"a.conf\"\n",
+			others: map[string]string{"a.conf": "include required(file(\"p.conf\"))\n"},
+			want:   []string{`a.conf:1:1: include file(...) is read from the working directory, not beside this file; write include required("p.conf")`}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			// Set for every row, so a front that read the environment would accept the environment variable row.
 			t.Setenv("HOME", "/somewhere")
 			writeHOCONFiles(t, c.input, c.others, c.absent)
-			root, problems := FromHOCON("g.conf")
+			root, _, problems := FromHOCON("g.conf")
 			if got := testsupport.ProblemStrings(problems); !slices.Equal(got, c.want) {
 				t.Errorf("problems = %q, want %q", got, c.want)
 			}

@@ -2,7 +2,6 @@ package tree
 
 import (
 	"bytes"
-	"errors"
 	"slices"
 	"testing"
 
@@ -66,6 +65,9 @@ func TestFromYAMLScalarText(t *testing.T) {
 		{"v: 1.5\n", "1.5", false, true},
 		{"v: true\n", "true", false, true},
 		{"v: \"404\"\n", "404", true, false},
+		// An anchor without a tag is read, and a quoted value may start with the tag character.
+		{"v: &a x\n", "x", false, false},
+		{"v: \"! x\"\n", "! x", true, false},
 		// go-yaml resolves YAML 1.1's timestamps, which YAML 1.2's core schema reads as text.
 		{"v: 2026-11-10\n", "2026-11-10", false, false},
 	}
@@ -129,6 +131,15 @@ func TestFromYAMLProblems(t *testing.T) {
 		{"binary tag", "v: !!binary aGVsbG8=\n", []string{"g.yaml:1:4: tags are not read; write the value without the tag"}},
 		{"null tag", "v: !!null foo\n", []string{"g.yaml:1:4: tags are not read; write the value without the tag"}},
 		{"tag on a key", "!!str a: 1\n", []string{"g.yaml:1:1: tags are not read; write the value without the tag"}},
+		// The bare tag ! leaves no mark on the node go-yaml returns (decode.go, parser.node), so it is found in the text.
+		{"bare tag", "v: ! 8000\n", []string{"g.yaml:1:4: tags are not read; write the value without the tag"}},
+		{"bare tag after an anchor", "v: &a ! x\n", []string{"g.yaml:1:4: tags are not read; write the value without the tag"}},
+		{"bare tag on a key", "! k: 1\n", []string{"g.yaml:1:1: tags are not read; write the value without the tag"}},
+		{"bare tag on a mapping", "v: !\n  a: 1\n", []string{"g.yaml:1:4: tags are not read; write the value without the tag"}},
+		// go-yaml counts no column for a byte order mark (yaml_parser_determine_encoding in readerc.go).
+		{"bare tag after a byte order mark", "\ufeffv: ! 8000\n", []string{"g.yaml:1:4: tags are not read; write the value without the tag"}},
+		// go-yaml counts a column in characters, so a character of two bytes before the tag counts once.
+		{"bare tag after a character of two bytes", "é: ! 8000\n", []string{"g.yaml:1:4: tags are not read; write the value without the tag"}},
 		{"tag on a mapping, with a problem inside", "a: &x 1\nv: !!map {b: *x}\n", []string{
 			"g.yaml:2:4: tags are not read; write the value without the tag",
 			"g.yaml:2:14: aliases are not read; write the value out",
@@ -154,31 +165,29 @@ func TestFromYAMLProblems(t *testing.T) {
 	}
 }
 
-// The library's wording is its own: these rows pin only that one problem names the file. The second row is a
-// syntax error after the first document, which only the second Decode meets.
+// A syntax error names the line it is on, counted from 1. go-yaml counts a parser error's line from 0 and writes no
+// line when both of an error's marks are on the first (decode.go, parser.fail). The texts are the library's own.
+// The rows after the first document are met only by the second Decode.
 func TestFromYAMLSyntaxError(t *testing.T) {
-	for _, input := range []string{"a: [1, 2\n", "a: 1\n---\nb: [1, 2\n"} {
-		_, problems := FromYAML("g.yaml", []byte(input))
-		if len(problems) != 1 || problems[0].Pos.File != "g.yaml" {
-			t.Errorf("FromYAML(%q) problems = %q, want one problem in g.yaml", input, testsupport.ProblemStrings(problems))
-		}
-	}
-}
-
-func TestYAMLErrorProblems(t *testing.T) {
-	cases := []struct {
-		err  error
-		want []model.Problem
-	}{
-		{errors.New("yaml: line 7: mapping values are not allowed in this context"),
-			[]model.Problem{{Pos: model.Pos{File: "g.yaml", Line: 7}, Message: "mapping values are not allowed in this context"}}},
-		{errors.New("yaml: control characters are not allowed"),
-			[]model.Problem{{Pos: model.Pos{File: "g.yaml"}, Message: "control characters are not allowed"}}},
+	cases := []struct{ name, input, want string }{
+		{"parser error on line 1", "a: [b}\n", "g.yaml:1: did not find expected ',' or ']'"},
+		{"parser error on line 2", "- a\nb: c\n", "g.yaml:2: did not find expected '-' indicator"},
+		{"parser error after the first document", "a: 1\n---\nb: [1, 2\n", "g.yaml:3: did not find expected ',' or ']'"},
+		{"scanner error on line 1", "a: b: c\n", "g.yaml:1: mapping values are not allowed in this context"},
+		{"scanner error on line 2", "a: 1\nb: c: d\n", "g.yaml:2: mapping values are not allowed in this context"},
+		{"unknown anchor on line 1", "a: *x\n", "g.yaml:1: unknown anchor 'x' referenced"},
+		// go-yaml places these nowhere, and the first line alone does not give them, so they name the file alone.
+		{"unknown anchor on line 2", "a: 1\nb: *x\n", "g.yaml: unknown anchor 'x' referenced"},
+		{"control character on line 2", "a: 1\nb: \"\x01\"\n", "g.yaml: control characters are not allowed"},
+		{"unknown anchor after a first line that fails alone", "a: [\n*x]\n", "g.yaml: unknown anchor 'x' referenced"},
 	}
 	for _, c := range cases {
-		if got := yamlErrorProblems("g.yaml", c.err); !slices.Equal(got, c.want) {
-			t.Errorf("yamlErrorProblems(%q) = %#v, want %#v", c.err, got, c.want)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			_, problems := FromYAML("g.yaml", []byte(c.input))
+			if got := testsupport.ProblemStrings(problems); !slices.Equal(got, []string{c.want}) {
+				t.Errorf("problems = %q, want %q", got, []string{c.want})
+			}
+		})
 	}
 }
 

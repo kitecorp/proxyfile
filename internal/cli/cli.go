@@ -8,13 +8,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 
 	"github.com/kitecorp/proxyfile/internal/format"
 	"github.com/kitecorp/proxyfile/internal/model"
 	"github.com/kitecorp/proxyfile/internal/render"
+	"github.com/kitecorp/proxyfile/internal/tree"
 )
 
 const usage = `usage: proxyfile render [<file>] -o <envoy.yaml> [--rpc-methods <methods.json>] [--rpc-table <table.json>]
@@ -157,7 +157,7 @@ func outputs(req render.Request) ([]render.File, []model.Problem, error) {
 		return nil, problems, nil
 	}
 	if req.RPCTable != "" && !run.HasMethods() {
-		return nil, nil, errors.New("--rpc-table needs rpc.methods or --rpc-methods")
+		return nil, nil, errors.New("--rpc-table needs rpc.methods, rpc.proto or --rpc-methods")
 	}
 	if overwritesAnInput(req, run.Inputs()) {
 		return nil, nil, errors.New("an output path names an input or the other output")
@@ -167,7 +167,7 @@ func outputs(req render.Request) ([]render.File, []model.Problem, error) {
 }
 
 // overwritesAnInput reports whether an output path names one of the inputs or the other output, which render would
-// overwrite. Paths are compared after filepath.Abs, so ./a.yaml and a.yaml are one path. Two inputs on one path
+// overwrite. Paths are compared by tree.Absolute, so ./a.yaml and a.yaml are one path. Two inputs on one path
 // overwrite nothing.
 func overwritesAnInput(req render.Request, inputs []string) bool {
 	outputPaths := []string{req.Out}
@@ -176,21 +176,12 @@ func overwritesAnInput(req render.Request, inputs []string) bool {
 	}
 	for i, output := range outputPaths {
 		for _, other := range slices.Concat(outputPaths[i+1:], inputs) {
-			if absolute(output) == absolute(other) {
+			if tree.Absolute(output) == tree.Absolute(other) {
 				return true
 			}
 		}
 	}
 	return false
-}
-
-// absolute falls back to the cleaned path when the working directory cannot be read, so two relative paths still
-// compare by their text.
-func absolute(path string) string {
-	if abs, err := filepath.Abs(path); err == nil {
-		return abs
-	}
-	return filepath.Clean(path)
 }
 
 // write writes the files that outputs returned, which it returns only when every input was read without a problem and

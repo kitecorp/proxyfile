@@ -16,8 +16,8 @@ The release has `proxyfile-linux-amd64`, `proxyfile-linux-arm64`, `proxyfile-dar
 `proxyfile-darwin-arm64`, with `checksums.txt` and `proxyfile.schema.json` beside them.
 
 ```sh
-curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v1.2.0/proxyfile-linux-amd64
-curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v1.2.0/checksums.txt
+curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v1.3.0/proxyfile-linux-amd64
+curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v1.3.0/checksums.txt
 shasum -a 256 -c --ignore-missing checksums.txt
 install -m 0755 proxyfile-linux-amd64 /usr/local/bin/proxyfile
 ```
@@ -25,13 +25,13 @@ install -m 0755 proxyfile-linux-amd64 /usr/local/bin/proxyfile
 In a Dockerfile, copy the program out of the image. The image holds `/proxyfile` and nothing else.
 
 ```dockerfile
-COPY --from=ghcr.io/kitecorp/proxyfile:1.2.0 /proxyfile /usr/local/bin/proxyfile
+COPY --from=ghcr.io/kitecorp/proxyfile:1.3.0 /proxyfile /usr/local/bin/proxyfile
 ```
 
 With Go installed (the Go version `go.mod` names or newer):
 
 ```sh
-go install github.com/kitecorp/proxyfile/cmd/proxyfile@v1.2.0
+go install github.com/kitecorp/proxyfile/cmd/proxyfile@v1.3.0
 ```
 
 ## Commands
@@ -48,7 +48,7 @@ directory, and exactly one of them must exist.
 
 | Command | What it does |
 |---|---|
-| `render` | Reads the proxyfile, the origins file when it names one and the RPC methods, which come from its `rpc.methods` or, with `--rpc-methods`, from the methods file, never both. Writes the Envoy configuration to the `-o` path, and with `--rpc-table` the RPC table too, which needs one of the two. It writes every output only when the whole input is free of problems. |
+| `render` | Reads the proxyfile, the files it includes, the origins file when it names one and the RPC methods, which come from one place: its `rpc.methods`, the `.proto` files its `rpc.proto` names, or, with `--rpc-methods`, the methods file. Writes the Envoy configuration to the `-o` path, and with `--rpc-table` the RPC table too, which needs one of the three. It writes every output only when the whole input is free of problems. |
 | `check` | Renders in memory and compares the bytes with the files on disk. It writes nothing. A missing output file differs. |
 | `schema` | Prints the JSON Schema of the proxyfile format on standard output. |
 | `version` | Prints `proxyfile <version>`. |
@@ -56,9 +56,9 @@ directory, and exactly one of them must exist.
 `--help`, `-h` and `help` print the usage text on standard output and exit with 0.
 
 The flags may stand before or after the file. A proxyfile with an rpc entry (`- rpc:` in YAML, `{ rpc { ... } }` in
-HOCON) takes its methods from `rpc.methods` or from `--rpc-methods`, never from both, and methods given with no rpc
-entry are refused. `--rpc-table` needs one of the two. An output path may not name the proxyfile, its origins file or
-its methods file, nor the other output.
+HOCON) takes its methods from exactly one of `rpc.methods`, `rpc.proto` and `--rpc-methods`, and methods given with
+no rpc entry are refused. `--rpc-table` needs one of the three. An output path may not name the proxyfile,
+a file it includes, its origins file, its methods file or a `.proto` file it reads, nor the other output.
 
 The generated file starts with this line, and the same input always gives the same bytes:
 
@@ -75,8 +75,9 @@ Exit codes:
 | 2 | A usage error. The message is printed with the usage text. |
 
 Each problem in the input is printed on standard error as `<file>:<line>:<column>: <message>`, as
-`<file>:<line>: <message>` when it has no column (a YAML syntax error names only its line), or as `<file>: <message>`
-when it is about the file as a whole, such as a file that cannot be read. A HOCON file gives a line and column only for
+`<file>:<line>: <message>` when it has no column (a YAML syntax error names only its line, and one the YAML library
+places nowhere, such as an unknown anchor after the first line, names the file alone), or as `<file>: <message>` when
+it is about the file as a whole, such as a file that cannot be read. A HOCON file gives a line and column only for
 a syntax error, and names every other problem by its key path instead, as `<file>: <key path>: <message>` (see "The
 HOCON form", which also says how a problem in an included file reads). The proxyfile is read first, and a run that
 finds problems in it reports all the problems of the first stage that finds any: reading and syntax, then the format of
@@ -92,10 +93,11 @@ gateway.yaml:3:1: unknown key "liste"; known here: admin, auth, cors, limits, li
 ## The format
 
 `examples/full/gateway.yaml` holds every key a proxyfile can have except `services.<name>.address` and `tracing`, with
-invented values: `cors`, the `origins` by environment and `rpc.methods` are among them. `examples/partial/gateway.yaml`
-writes `address` and gives its methods the 1.0 way, with `--rpc-methods examples/partial/methods.json`, and its HOCON
-twin through `include required("rpc-methods.conf")`. `examples/tracing/gateway.yaml` writes `tracing`. Only `listen`,
-`services`, `origins` and `routes` are required. The rest is left out when you do not need it.
+invented values: `cors`, the `origins` by environment and `rpc.methods` are among them. `examples/partial` writes
+`address` and gives its methods three ways: `gateway.yaml` with `--rpc-methods examples/partial/methods.json`,
+`gateway.conf` through `include required("rpc-methods.conf")`, and `Proxyfile` through `rpc.proto` and the `.proto`
+files under `proto/`. `examples/tracing/gateway.yaml` writes `tracing`. Only `listen`, `services`, `origins` and
+`routes` are required. The rest is left out when you do not need it.
 
 ```yaml
 # yaml-language-server: $schema=../../schema/proxyfile.schema.json
@@ -203,8 +205,11 @@ Envoy sets on a duration. `auth.timeout` has a lower limit, which its row gives.
 | `cors` | The CORS settings every environment shares: `allow_methods`, `allow_headers`, `expose_headers` and `max_age`, each optional, with the rules of the origins section below. | A mapping. Not written when `origins` names a file, which holds its own `cors`. |
 | `origins` | The browser origins each environment admits, by environment name: each environment is a key holding its `hosts`, `origins` and `patterns`. As in 1.0, it may instead name an origins file, relative to this file. | Required. A mapping with at least one environment, or a file name. See the origins section below. |
 | `routes` | The routes, tried in the order written. The rpc entry (`- rpc:` in YAML, `{ rpc { ... } }` in HOCON) marks where the RPC routes go. | Required. A list, not empty. See "Route rules". |
-| `rpc` | The RPC methods the gateway routes, written here instead of in a methods file. | A mapping with the one key `methods`. Not given together with `--rpc-methods`. |
-| `rpc.methods` | One entry for each RPC method, with the keys of the methods section below. Which service a method goes to is decided by the rpc entry of `routes`. | Required in `rpc`. A list, which may be empty. |
+| `rpc` | The RPC methods the gateway routes, written here or read from `.proto` files, instead of in a methods file. | A mapping with exactly one of `methods` and `proto`. Not given together with `--rpc-methods`. |
+| `rpc.methods` | One entry for each RPC method, with the keys of the methods section below. Which service a method goes to is decided by the rpc entry of `routes`. | A list, which may be empty. |
+| `rpc.proto` | The RPC methods, read from the `.proto` files under `roots` and compiled each time proxyfile runs. See "RPC methods from the protobuf sources" below. | Optional. A mapping with `roots` and `option`, both required. `rpc` holds exactly one of `methods` and `proto`, and `proto` is not given with `--rpc-methods`. |
+| `rpc.proto.roots` | The directories that hold the `.proto` files. Each is an import root, as protoc's `--proto_path` is: a file's import path is its path under its root, written with `/`. | Required. A list of directories, not empty, none written twice. A relative directory is read from the proxyfile's own directory, as `origins: <file>` is, also when the key is written in an included file; an absolute one as written. |
+| `rpc.proto.option` | The method option that marks a method the gateway routes. | Required. The option's full name, `<package>.<name>`, with no leading dot (the pattern `^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`). |
 | `log` | Which requests the request log writes. Without `log`, every request is logged. | A mapping with `status_from` and `sample`, both required. |
 | `log.status_from` | The lowest status that is always logged. | A whole number from 100 to 599. |
 | `log.sample` | The share of the other requests that is logged. | A whole percentage such as `1%`. |
@@ -220,8 +225,8 @@ HOCON:
 - `auth: off` on a route needs an `auth` key.
 - `cors` is not written when `origins` names a file, because the generator takes the CORS settings from that file and
   would ignore this key.
-- The RPC methods come from one place: `rpc.methods` or `--rpc-methods`, not both. They need an rpc entry in `routes`,
-  and the rpc entry needs them.
+- The RPC methods come from one place: `rpc.methods`, `rpc.proto` or `--rpc-methods`. They need an rpc entry in
+  `routes`, and the rpc entry needs them.
 
 ### Route rules
 
@@ -250,10 +255,10 @@ How routes are matched:
   `reset-before-request` conditions), so a request that the service saw is never sent twice.
 
 The rpc entry (`- rpc:` in YAML, `{ rpc { ... } }` in HOCON) is a place in the list. It holds one route for each method
-of `rpc.methods` or of the methods file, matched on the exact path a call carries, `/<package>.<Service>/<Method>`.
-Those routes are sorted by path and written where the entry stands, so a plain route written above the entry is tried
-before the RPC routes, and one written below it after them. A file has at most one rpc entry, and it needs methods:
-`rpc.methods` or `--rpc-methods`, never both.
+of `rpc.methods`, of the `.proto` files `rpc.proto` reads, or of the methods file, matched on the exact path a call
+carries, `/<package>.<Service>/<Method>`. Those routes are sorted by path and written where the entry stands, so a
+plain route written above the entry is tried before the RPC routes, and one written below it after them. A file has
+at most one rpc entry, and it needs methods from exactly one of `rpc.methods`, `rpc.proto` and `--rpc-methods`.
 
 | Key | Meaning | Rule |
 |---|---|---|
@@ -456,9 +461,9 @@ The rules of the form:
 - **Includes are relative to the file that holds them**, not to the working directory. A relative name may climb out of
   that directory, as `include "../shared/origins.conf"` does, and an absolute name is read as written, both as HOCON
   defines. `include "other.conf"` skips a file that is missing, as HOCON defines, and `include required("other.conf")`
-  refuses it by name. Use `required` for a file the gateway cannot do without. The one exception to the first rule is
-  a name inside `file(...)`, as in `include file("other.conf")`, which HOCON does not read relative to the including
-  file: proxyfile reads it relative to the working directory, so write `include "other.conf"` instead.
+  refuses it by name. Use `required` for a file the gateway cannot do without. `include file("other.conf")` is
+  refused, because HOCON reads a name inside `file(...)` from the working directory, so the same proxyfile would read
+  another file from another directory; write `include "other.conf"`, which is read beside the file that holds it.
 - **Substitutions read the files, never the environment.** `${name}` takes another key of the same file or of its
   includes. It never reads an environment variable, so the same files give the same bytes on every machine, and
   `listen = ${HOME}` is a problem. The key a substitution reads is a key of the format like any other, so a
@@ -490,22 +495,45 @@ What a problem looks like:
   later problem names the key path the included file wrote, for example
   `gateway.conf: rpc.methods[0]: the report "x,y" of a.v1.S/M contains a comma, the separator of x-gateway-reports`. A
   missing `include required(...)` reads `<included file>: cannot read include file: <reason>`.
+- The refusal of `include file(...)` names the file that holds the statement, with its line and column, also when
+  that is an included file, for example
+  `a.conf:1:1: include file(...) is read from the working directory, not beside this file; write include required("p.conf")`.
 - The ending `, not quoted or block text` follows a message about a whole number or `true` or `false` that was written
   as text. It is the YAML form's wording; in HOCON it means a string, and an unquoted word is one too, so `http = abc`
   gets it.
 
-**Editors.** IntelliJ's HOCON plugin recognises `.conf` files. A `Proxyfile` has no extension, so map it to the HOCON
-file type under Settings, Editor, File Types.
+### Editor support
+
+IntelliJ IDEA and the other JetBrains IDEs highlight HOCON through the HOCON plugin, `org.jetbrains.plugins.hocon`,
+which reads `.conf` files. A `Proxyfile` has no extension, so add the file name pattern `Proxyfile` to the HOCON file
+type under Settings, Editor, File Types (`proxyfile.conf` needs no pattern).
+
+VS Code highlights it through the HOCON extension `sabieber.HOCON`, which reads `.conf` and `.hocon` files as the
+language `hocon`; `"files.associations": {"Proxyfile": "hocon"}` in its settings adds the name.
+
+GitHub colours a file by Linguist, which knows HOCON but maps it only to `.hocon` and two scalafmt file names, so a
+repository's `.gitattributes` gets the line `Proxyfile linguist-language=HOCON`, and
+`*.conf linguist-language=HOCON` where its `.conf` files are proxyfiles, as in:
+
+```
+Proxyfile linguist-language=HOCON
+*.conf linguist-language=HOCON
+```
+
+This repository's `.gitattributes` holds both.
 
 ## The origins file and the methods file
 
 Since 1.1 both can be written in the proxyfile: the environments under `origins`, the CORS settings under `cors`, and
-the methods under `rpc.methods`. A HOCON proxyfile that wants a separate file uses `include`, as
-`examples/partial/gateway.conf` does for its methods. The 1.0 way stays accepted in every 1.x release, with the same
-rules: `origins: <file>` names a JSON origins file, and `--rpc-methods <file>` a JSON methods file. `rpc.methods` and
-`--rpc-methods` together are refused, and so is `cors` in the proxyfile when `origins` names a file.
+the methods under `rpc.methods`. From 1.3 the methods can also be read from the `.proto` files, with `rpc.proto`. A
+HOCON proxyfile that wants a separate file uses `include`, as `examples/partial/gateway.conf` does for its methods.
+The 1.0 way stays accepted in every 1.x release, with the same rules: `origins: <file>` names a JSON origins file,
+and `--rpc-methods <file>` a JSON methods file. Any two of `rpc.methods`, `rpc.proto` and `--rpc-methods` together
+are refused, because exactly one gives the methods. `cors` in the proxyfile is refused too when `origins` names a
+file.
 
-The two files are JSON. They are read with the YAML reader, so a problem in either names its line and column.
+The two files are JSON. They are read with the YAML reader, so a problem in either names its line and column, and a
+syntax error its line. A slash escaped as `\/`, which JSON allows and some writers produce, is read as `/`.
 
 ### The origins file
 
@@ -577,9 +605,10 @@ preflight, so an origin removed from the file may keep working that long in a br
 
 ### The methods file
 
-The methods are a list with one entry for each RPC method the gateway routes. They are the proxyfile's `rpc.methods` or,
-the 1.0 way, a JSON file that the `--rpc-methods` flag names. Which service a method goes to is decided by the rpc entry
-of `routes`, not by this list. This is a methods file; written as `rpc.methods`, it is the same list.
+The methods are a list with one entry for each RPC method the gateway routes. They are the proxyfile's `rpc.methods`,
+the methods `rpc.proto` reads from the `.proto` files (see "RPC methods from the protobuf sources"), or, the 1.0 way,
+a JSON file that the `--rpc-methods` flag names. Which service a method goes to is decided by the rpc entry of
+`routes`, not by this list. This is a methods file; written as `rpc.methods`, it is the same list.
 
 ```json
 [
@@ -597,6 +626,136 @@ of `routes`, not by this list. This is a methods file; written as `rpc.methods`,
 | `reports` | The reports the check is told for this method, in `x-gateway-reports`. | A list of text. No report contains a comma, because the list is sent as one value joined by commas. |
 
 A method listed twice is a problem.
+
+### RPC methods from the protobuf sources
+
+`rpc.proto` names the directories of `.proto` files and the method option that marks a routed method. proxyfile
+compiles the files in memory each time it renders or checks, so no list of methods is written anywhere. In YAML, it
+reads `rpc: {proto: {roots: [proto], option: example.gateway.v1.route}}`.
+
+The same in HOCON, as it stands in `examples/partial/Proxyfile`:
+
+```hocon
+rpc {
+  proto {
+    roots = [proto]
+    option = example.gateway.v1.route
+  }
+}
+```
+
+[`examples/partial/Proxyfile`](examples/partial/Proxyfile) holds the whole gateway.
+
+The roots hold two files, first `example/gateway/v1/route.proto`, which declares the option:
+
+```proto
+syntax = "proto3";
+
+package example.gateway.v1;
+
+import "google/protobuf/descriptor.proto";
+
+// What the gateway asks the auth check before a browser reaches a method.
+message Route {
+  // The action the caller must hold; empty means any caller may reach the method.
+  string action = 1;
+  // The actions the answer reports on.
+  repeated string reports = 2;
+}
+
+extend google.protobuf.MethodOptions {
+  // Marks a method the gateway routes. A method without it is not routed.
+  Route route = 50000;
+}
+```
+
+then `example/backend/v1/reports.proto`, which uses it:
+
+```proto
+syntax = "proto3";
+
+package example.backend.v1;
+
+import "example/gateway/v1/route.proto";
+
+service ReportService {
+  // Routed: a browser may call it, and the check is asked for the action read.
+  rpc ListReports(ListReportsRequest) returns (ListReportsResponse) {
+    option (example.gateway.v1.route) = {action: "read", reports: ["export", "share"]};
+  }
+  // Not routed: no route option.
+  rpc RebuildReports(RebuildReportsRequest) returns (RebuildReportsResponse);
+}
+
+message ListReportsRequest {}
+message ListReportsResponse {}
+message RebuildReportsRequest {}
+message RebuildReportsResponse {}
+```
+
+The gateway then routes one method, `/example.backend.v1.ReportService/ListReports`, with the action `read` and the
+reports `export` and `share`: the list `examples/partial/rpc-methods.conf` writes by hand.
+
+What proxyfile does with the keys, in this order, each step only when the steps before it found no problem:
+
+1. It reads the roots: every file whose name ends in `.proto`, at any depth under each root. A root may be a symbolic
+   link to a directory; below a root a linked `.proto` file is read as the file it names and a linked directory is not
+   walked. A root that cannot be read, that is not a directory or that holds no `.proto` file is a problem, and so are
+   two roots that hold a file at the same import path, because an import of that path would always read the first
+   root's file and nothing would read the other.
+2. It parses every file it read. A syntax error is a problem with its file, line and column.
+3. It chooses the files to compile: each file that declares a service, and every file it imports, at any depth. A file
+   that declares no service and is imported by none of those is parsed but not compiled: it has no method, and
+   compiling it could only fail on an import no route needs. Every import of a chosen file names a file under a root,
+   or one of the `google/protobuf` files protoc ships, which proxyfile carries built in (a root's own copy of one of
+   them comes first). Before it compiles, proxyfile names every import that names neither, at its import statement.
+4. It compiles the chosen files in memory with `github.com/bufbuild/protocompile`. Every compile error that library
+   reports is a problem with its file, line and column: an unknown type, a symbol declared twice (so a service or a
+   method declared twice never reaches the routes), an option used where its type does not fit.
+5. It finds the option by its full name among the compiled files. It extends `google.protobuf.MethodOptions` and holds
+   one message, and that message has a field `action` that holds one string; anything else is a problem. A field
+   `reports` is optional; when the message has it, it holds a list of strings. Other fields of the message are left
+   alone.
+6. It routes each method of each compiled service that carries the option, with the option's `action`, and its
+   `reports` when the message has that field (none otherwise). A method without the option is not routed. A method
+   whose option leaves `action` empty is routed with the empty action, as a methods-file entry with no `action` is.
+7. It sorts the methods by path, `/<service>/<method>`, in byte order, and hands them on.
+
+Accepted without a word: a method without the option; an option whose message has no `reports` field (then no method
+reports anything); a method whose `action` is empty; an option that no method carries, which routes nothing, as
+`methods: []` does; a file that declares no service and that no such file imports, even one whose imports name no
+file; every field of the option's message other than `action` and `reports`.
+
+The syntax is fixed, with no key: proxyfile reads proto2, proto3 and edition 2023 files, and a file in edition 2024 is
+a compile error. It reads no descriptor set, no `buf.yaml` and nothing from the network: only the files under the
+roots and the `google/protobuf` files it carries.
+
+A problem is printed as every other problem is (see "Commands"): a problem about a key at its line in YAML and at its
+key path in HOCON, a problem in a `.proto` file at that file's line and column. A `.proto` file is named by its root,
+resolved against the proxyfile's directory, joined with its import path.
+
+| Case | Where | Message |
+|---|---|---|
+| `rpc` holds both `methods` and `proto`, or neither | the `rpc` key | `exactly one of methods, proto is needed here` |
+| `rpc.proto` and `--rpc-methods` | the `proto` key | `rpc.proto is written here, so --rpc-methods must not be given` |
+| An empty `roots` | the `roots` key | `the roots list is empty` |
+| A root written twice | the second | `the root "proto" is written twice (the first on line 4)`; in HOCON `(the first at rpc.proto.roots[0])` |
+| A root that cannot be read | the root | `the root examples/partial/proto cannot be read: no such file or directory`, the reason as the system words it |
+| A root that is not a directory | the root | `the root examples/partial/proto is not a directory` |
+| A root with no `.proto` file | the root | `the root examples/partial/proto holds no .proto file` |
+| One import path under two roots | the later file | `the import path a/v1/s.proto is also under the root first/proto, which comes first in rpc.proto.roots` |
+| A syntax error | its file, line and column | protocompile's text, such as `syntax error: expecting ';'` |
+| An import that names no file | the import statement | `the import google/rpc/error_details.proto is under no root of rpc.proto.roots and is not a standard google/protobuf file` |
+| A compile error | its file, line and column | protocompile's text, such as `method a.v1.S.M: unknown request type Missing`, or `symbol "a.v1.S.M" already defined at a/v1/s.proto:6:7`, which names the other place by its import path, as protocompile writes it |
+| No compiled file defines the option | the `option` key | `no compiled file defines the option example.gateway.v1.rout; the compiled files are those under the roots that declare a service, and the files they import` |
+| The name is not an option | the `option` key | `example.gateway.v1.Route is a message, not an option`, with the kind the name has |
+| The option is not a method option | the `option` key | `the option o.v1.route extends google.protobuf.MessageOptions, not google.protobuf.MethodOptions` |
+| The option does not hold one message | the `option` key | `the option o.v1.route holds a string, not one message`, or `holds a list of messages, not one` |
+| No `action` that holds one string | the `option` key | `the option's message o.v1.Route has no field action that holds one string` |
+| A `reports` that is not a list of strings | the `option` key | `the field reports of the option's message o.v1.Route is not a list of strings` |
+
+`check` compiles the sources as `render` does, so a change to a routed method makes `check` fail until the next
+`render`. Every `.proto` file read is an input, so no output path may name one.
 
 ### The RPC table
 
@@ -693,11 +852,11 @@ the setting for good, change `auth.enabled` and render again.
 ## Editors
 
 The JSON Schema of the format gives completion and checking as you type. The schema describes the YAML form only. For a
-HOCON proxyfile, see the editor note under "The HOCON form". Put this line first in a YAML proxyfile, for editors that
+HOCON proxyfile, see "Editor support" under "The HOCON form". Put this line first in a YAML proxyfile, for editors that
 use the YAML language server, such as VS Code with the YAML extension:
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/kitecorp/proxyfile/v1.2.0/schema/proxyfile.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kitecorp/proxyfile/v1.3.0/schema/proxyfile.schema.json
 ```
 
 In a JetBrains IDE, open Settings, Languages & Frameworks, Schemas and DTDs, JSON Schema Mappings. Add a mapping with the

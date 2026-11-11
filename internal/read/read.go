@@ -3,6 +3,7 @@ package read
 
 import (
 	"path/filepath"
+	"slices"
 
 	"github.com/kitecorp/proxyfile/internal/format"
 	"github.com/kitecorp/proxyfile/internal/input"
@@ -21,6 +22,11 @@ type File struct {
 	// MethodsKey is the methods key inside rpc, nil when the proxyfile does not write it. render.Read tells an empty
 	// list from none by it, and names it when --rpc-methods is given as well.
 	MethodsKey *model.Pos
+	Proto      *Proto // rpc.proto; nil when not written
+	// Included is every file the include statements of a HOCON proxyfile name, also one that does not exist, in the
+	// order first named; nil for a YAML proxyfile, which has no includes. They are inputs of the run, so no output
+	// may name one.
+	Included []string
 }
 
 // Proxyfile reads a proxyfile and returns its model and the origins and RPC methods it writes, or the problems that
@@ -29,9 +35,11 @@ type File struct {
 //
 // The stages run in order and the first that finds a problem ends the run with all of its problems, sorted. Each
 // stage may then rely on the one before: decoding reads only a tree the check accepted, and the meaning rules read
-// only a complete model. The origins are read in the meaning rules' stage, so one run names the problems of both.
+// only a complete model. The origins and rpc.proto are read in the meaning rules' stage, so one run names the problems
+// of all three.
 func Proxyfile(path string) (*File, []model.Problem) {
-	front := frontFor(path)
+	var included []string
+	front := frontFor(path, &included)
 	if front == nil {
 		return nil, model.FileProblem(path, "proxyfile reads a file named Proxyfile or ending in .conf, .yaml or .yml")
 	}
@@ -44,13 +52,15 @@ func Proxyfile(path string) (*File, []model.Problem) {
 		return nil, problems
 	}
 	inline, originsProblems := readOrigins(root)
-	if problems := append(meaning(g), originsProblems...); len(problems) > 0 {
+	proto, protoProblems := readProto(root)
+	if problems := slices.Concat(meaning(g), originsProblems, protoProblems); len(problems) > 0 {
 		model.SortProblems(problems)
 		return nil, problems
 	}
-	file := &File{Gateway: g, Origins: inline}
-	// The check requires methods inside rpc, so they are written exactly when rpc is. Every rule of the methods is
-	// rpc.Resolve's, which render.Read runs on these as on a methods file's, so this stage only reads them.
+	file := &File{Gateway: g, Origins: inline, Proto: proto, Included: included}
+	// The check requires exactly one of methods and proto inside rpc, so methods are written exactly when rpc is and
+	// proto is not. Every rule of the methods is rpc.Resolve's, which render.Read runs on these as on a methods file's,
+	// so this stage only reads them.
 	if methods := root.Get("rpc").Entry("methods"); methods != nil {
 		file.Methods, file.MethodsKey = rpc.MethodsOf(methods.Value), &methods.KeyPos
 	}
@@ -71,13 +81,18 @@ func readOrigins(root *tree.Node) (*origins.File, []model.Problem) {
 }
 
 // frontFor picks the reader by the file name, never by the content: a guess could read a broken file of one form as
-// the other. nil means proxyfile reads no file of that name.
-func frontFor(path string) func(path string) (*tree.Node, []model.Problem) {
+// the other. nil means proxyfile reads no file of that name. The HOCON reader stores the files the includes name in
+// *included, because input.CheckedWith hands back only the tree.
+func frontFor(path string, included *[]string) func(path string) (*tree.Node, []model.Problem) {
 	switch ext := filepath.Ext(path); {
 	case ext == ".yaml" || ext == ".yml":
 		return input.YAMLFile
 	case ext == ".conf" || filepath.Base(path) == "Proxyfile":
-		return tree.FromHOCON
+		return func(path string) (*tree.Node, []model.Problem) {
+			root, files, problems := tree.FromHOCON(path)
+			*included = files
+			return root, problems
+		}
 	default:
 		return nil
 	}

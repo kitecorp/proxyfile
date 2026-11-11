@@ -1,0 +1,7 @@
+syntax = "proto2";
+
+package google.protobuf;
+
+message MethodOptions {
+  extensions 1000 to max;
+}

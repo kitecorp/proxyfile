@@ -1,0 +1,10 @@
+syntax = "proto3";
+
+package a.v1;
+
+service S {
+  rpc M(Empty) returns (Empty);
+  rpc M(Empty) returns (Empty);
+}
+
+message Empty {}
