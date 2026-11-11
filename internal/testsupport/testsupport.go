@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kitecorp/proxyfile/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/model"
 )
 
 // ProblemStrings returns each problem as the text a user reads, so a test compares problems with literal lines.

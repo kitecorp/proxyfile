@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"slices"
 
-	"github.com/kitecorp/proxyfile/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/model"
 )
 
 // rules holds the checks no single key can fail: a name that must match a declaration, two entries that clash, and

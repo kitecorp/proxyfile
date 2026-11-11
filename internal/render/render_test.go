@@ -15,8 +15,8 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"github.com/kitecorp/proxyfile/internal/model"
-	"github.com/kitecorp/proxyfile/internal/testsupport"
+	"github.com/kitecorp/proxyfile/v2/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/testsupport"
 )
 
 var update = flag.Bool("update", false, "rewrite the generated files of examples/")
@@ -49,7 +49,7 @@ func TestExampleTrees(t *testing.T) {
 
 // TestExamplesAreCurrent keeps the committed outputs of examples/ equal to what render writes; -update rewrites them.
 func TestExamplesAreCurrent(t *testing.T) {
-	for _, name := range []string{"minimal", "partial", "full", "tracing"} {
+	for _, name := range []string{"minimal", "partial", "full", "tracing", "grpc"} {
 		t.Run(name, func(t *testing.T) {
 			files, problems := render(requestFor(t, name, filepath.Join("..", "..", "examples", name, "envoy.yaml")))
 			if problems != nil {
@@ -78,7 +78,7 @@ func TestBothFormsGiveTheSameFiles(t *testing.T) {
 		name, file string // the example, and its HOCON file
 		files      int
 	}{{"minimal", "gateway.conf", 1}, {"partial", "gateway.conf", 2}, {"partial", "Proxyfile", 2}, {"full", "gateway.conf", 2},
-		{"tracing", "gateway.conf", 1}}
+		{"tracing", "gateway.conf", 1}, {"grpc", "gateway.conf", 1}}
 	for _, c := range cases {
 		t.Run(c.name+"/"+c.file, func(t *testing.T) {
 			req := requestFor(t, c.name, "envoy.yaml")
@@ -299,10 +299,10 @@ func TestInlineMethods(t *testing.T) {
 	}{
 		{name: "inline gives the flag's table", file: "g.yaml", proxyfile: partial},
 		{name: "both given", file: "g.yaml", proxyfile: partial, rpcMethods: "../../examples/partial/methods.json",
-			want: []string{"g.yaml:30:3: rpc.methods is written here, so --rpc-methods must not be given"}},
+			want: []string{"g.yaml:29:3: rpc.methods is written here, so --rpc-methods must not be given"}},
 		{name: "rpc.proto at an absolute root gives the flag's table", file: "g.yaml", proxyfile: partialProto},
 		{name: "rpc.proto and the flag", file: "g.yaml", proxyfile: partialProto, rpcMethods: "../../examples/partial/methods.json",
-			want: []string{"g.yaml:30:3: rpc.proto is written here, so --rpc-methods must not be given"}},
+			want: []string{"g.yaml:29:3: rpc.proto is written here, so --rpc-methods must not be given"}},
 		{name: "HOCON: rpc.proto and the flag", file: "Proxyfile", proxyfile: proxyfileProto, rpcMethods: "../../examples/partial/methods.json",
 			want: []string{"Proxyfile: rpc.proto: rpc.proto is written here, so --rpc-methods must not be given"}},
 		{name: "rpc.proto: a method no mapping matches, at its .proto line", file: "g.yaml", proxyfile: unmatched, want: []string{
@@ -310,9 +310,9 @@ func TestInlineMethods(t *testing.T) {
 			formsRoot + "/o/v1/s.proto:12:3: no rpc mapping matches o.v1.S",
 		}},
 		{name: "rpc.proto: a root with no .proto file, at the root", file: "g.yaml", proxyfile: noProtoFile,
-			want: []string{"g.yaml:30:19: the root " + emptyRoot + " holds no .proto file"}},
+			want: []string{"g.yaml:29:19: the root " + emptyRoot + " holds no .proto file"}},
 		{name: "rpc.proto: an option no file defines, at the option key", file: "g.yaml", proxyfile: noOption, want: []string{
-			"g.yaml:32:5: no compiled file defines the option example.gateway.v1.nowhere; the compiled files are those under " +
+			"g.yaml:31:5: no compiled file defines the option example.gateway.v1.nowhere; the compiled files are those under " +
 				"the roots that declare a service, and the files they import"}},
 		{name: "HOCON: a method listed twice", file: "g.conf", proxyfile: twice, want: []string{
 			"g.conf: rpc.methods[1]: the method example.backend.v1.ReportService/ListReports is listed twice (first at rpc.methods[0])"}},
@@ -458,14 +458,15 @@ typed_per_filter_config:
 	}
 }
 
-// Each row holds a combination no example has, so it is the only proof of the part it names: an rpc entry without
-// auth adds the Lua filter and the bridge but not set_metadata or ext_authz, and its RPC routes carry no metadata and
-// no question; a gateway with auth and no rpc entry has no Lua filter and no bridge; connections without heap watch
-// connections alone; the check's switch header is the one only_with_header names; with auth, the early header removal
-// adds the question headers and the accept names that remove_from_clients does not already cover; with tracing, the
-// early header removal is written for the two downstream headers alone and leaves out one an entry covers; without
-// sample no manifest is written; path_in_url: true writes no max_path_tag_length; and an environment that admits no
-// browser origin writes an empty CORS list.
+// Each row holds a combination no example has, so it is the only proof of the part it names: an rpc entry without auth
+// adds the Lua filter and the bridge but not set_metadata or ext_authz, and its RPC routes carry no metadata and no
+// question; a gateway with auth and no rpc entry has no Lua filter and no bridge; connections without heap watch
+// connections alone; with the Connect bridge off there is no Lua filter and no bridge, and an RPC route carries its
+// question alone; the check's switch header is the one only_with_header names; with auth, the early header removal adds
+// the question headers and the accept names that remove_from_clients does not already cover; with tracing, the early
+// header removal is written for the two downstream headers alone and leaves out one an entry covers; without sample no
+// manifest is written; path_in_url: true writes no max_path_tag_length; and an environment that admits no browser
+// origin writes an empty CORS list.
 func TestPartsNoExampleCombines(t *testing.T) {
 	manager := []any{"static_resources", "listeners", 0, "filter_chains", 0, "filters", 0, "typed_config"}
 	const rpcWithoutAuth = `listen: 8000
@@ -477,7 +478,7 @@ routes:
   - {name: q, prefix: /, to: q}
 `
 	const rpcMethod = `[{"service": "q.v1.S", "method": "Do", "action": "use", "reports": ["operate"]}]`
-	// tracingBase is a gateway with neither auth nor remove_from_clients; each tracing row appends its tracing key.
+	// tracingBase is a gateway with neither auth nor remove_from_clients; each tracing row appends its envoy block.
 	const tracingBase = `listen: 8000
 services:
   q: {http: 3000}
@@ -485,6 +486,8 @@ origins: origins.json
 routes:
   - {name: q, prefix: /, to: q}
 `
+	// bridgeOff turns the Connect bridge off; the rows append it to a gateway with an rpc entry.
+	const bridgeOff = "envoy: {connect_bridge: false}\n"
 	cases := []struct {
 		name, proxyfile, methods string // methods is written to methods.json and given to render when not empty
 		origins                  string // written to origins.json; testdata/origins.json when empty
@@ -505,6 +508,34 @@ match: {path: /q.v1.S/Do}
 typed_per_filter_config:
   envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}
   envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}
+route: {cluster: q_grpc}
+`},
+		// With the Connect bridge off, the Lua filter and the bridge are left out, and an RPC route carries no entry for
+		// them; with auth, the question's entry stays, alone.
+		{name: "bridge off, its filters", proxyfile: rpcWithoutAuth + bridgeOff, methods: rpcMethod,
+			at: slices.Concat(manager, []any{"http_filters"}), names: true,
+			want: `[envoy.filters.http.header_mutation, envoy.filters.http.rbac, envoy.filters.http.cors, envoy.filters.http.router]`},
+		{name: "bridge off", proxyfile: rpcWithoutAuth + bridgeOff, methods: rpcMethod,
+			at: slices.Concat(manager, []any{"route_config", "virtual_hosts", 0, "routes", 0}),
+			want: `
+name: q-rpc
+match: {path: /q.v1.S/Do}
+route: {cluster: q_grpc}
+`},
+		{name: "bridge off, with auth",
+			proxyfile: strings.Replace(rpcWithoutAuth, "origins:", "auth: {ask: q /check, timeout: 1s, enabled: true, when_unavailable: allow}\norigins:", 1) + bridgeOff,
+			methods:   rpcMethod, at: slices.Concat(manager, []any{"route_config", "virtual_hosts", 0, "routes", 0}),
+			want: `
+name: q-rpc
+match: {path: /q.v1.S/Do}
+metadata: {filter_metadata: {proxyfile: {action: use}}}
+typed_per_filter_config:
+  envoy.filters.http.header_mutation:
+    "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutationPerRoute
+    mutations:
+      request_mutations:
+      - append: {header: {key: x-gateway-action, value: use}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}
+      - append: {header: {key: x-gateway-reports, value: operate}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}
 route: {cluster: q_grpc}
 `},
 		{name: "auth without rpc",
@@ -610,14 +641,14 @@ routes:
 - remove: x-envoy-auth-failure-mode-allowed
 `},
 		// With tracing and nothing else to remove, the early header removal is written for the two tracing headers alone.
-		{name: "tracing alone removes the two downstream headers", proxyfile: tracingBase + "tracing: {provider: {xray: {segment: s}}}\n",
+		{name: "tracing alone removes the two downstream headers", proxyfile: tracingBase + "envoy: {tracing: {provider: {xray: {segment: s}}}}\n",
 			at: slices.Concat(manager, []any{"early_header_mutation_extensions", 0, "typed_config", "mutations"}),
 			want: `
 - remove: x-envoy-downstream-service-cluster
 - remove: x-envoy-downstream-service-node
 `},
 		// Without sample no manifest is written, so Envoy's own rule applies; without tags there is no custom_tags.
-		{name: "tracing with the fewest keys", proxyfile: tracingBase + "tracing: {provider: {xray: {segment: s}}}\n", at: slices.Concat(manager, []any{"tracing"}),
+		{name: "tracing with the fewest keys", proxyfile: tracingBase + "envoy: {tracing: {provider: {xray: {segment: s}}}}\n", at: slices.Concat(manager, []any{"tracing"}),
 			want: `
 max_path_tag_length: 0
 provider:
@@ -629,7 +660,7 @@ provider:
 `},
 		// path_in_url leaves Envoy's default length; two rules are written in the order given, the second under the first.
 		{name: "tracing with the path and two rules",
-			proxyfile: tracingBase + `tracing: {provider: {xray: {segment: s, agent: 10.0.0.9:2001, sample: {first: 3, rate: 50%, rules: [{path: /a, first: 1, rate: 100%}, {host: api.example.com, method: GET, first: 0, rate: 10%}]}}}, path_in_url: true}` + "\n",
+			proxyfile: tracingBase + `envoy: {tracing: {provider: {xray: {segment: s, agent: 10.0.0.9:2001, sample: {first: 3, rate: 50%, rules: [{path: /a, first: 1, rate: 100%}, {host: api.example.com, method: GET, first: 0, rate: 10%}]}}}, path_in_url: true}}` + "\n",
 			at:        slices.Concat(manager, []any{"tracing"}),
 			want: `
 provider:
@@ -647,7 +678,7 @@ provider:
 `},
 		// An entry of remove_from_clients that covers both removes them, so neither is written again.
 		{name: "remove_from_clients covers the two downstream headers",
-			proxyfile: tracingBase + "remove_from_clients: [x-envoy-*]\ntracing: {provider: {xray: {segment: s}}}\n",
+			proxyfile: tracingBase + "remove_from_clients: [x-envoy-*]\nenvoy: {tracing: {provider: {xray: {segment: s}}}}\n",
 			at:        slices.Concat(manager, []any{"early_header_mutation_extensions", 0, "typed_config", "mutations"}),
 			want: `
 - remove_on_match: {key_matcher: {prefix: x-envoy-}}

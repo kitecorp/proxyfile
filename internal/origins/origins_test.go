@@ -7,9 +7,9 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/kitecorp/proxyfile/internal/model"
-	"github.com/kitecorp/proxyfile/internal/testsupport"
-	"github.com/kitecorp/proxyfile/internal/tree"
+	"github.com/kitecorp/proxyfile/v2/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/testsupport"
+	"github.com/kitecorp/proxyfile/v2/internal/tree"
 )
 
 func TestPatternRegex(t *testing.T) {

@@ -24,18 +24,19 @@ Everything the format has no key for is the same in every gateway proxyfile writ
   with a body that describes the failure.
 - **Headers are removed early.** Everything in `remove_from_clients`, and with `auth` the header
   `x-envoy-auth-failure-mode-allowed`, is removed before routing and before any filter. With `auth`, the gateway also
-  removes from clients the two question headers and every header the check may set (each name of `auth.accept`),
-  whether or not `remove_from_clients` lists them, because a client must not be able to forge what the gateway asks the
-  check or what the check says. With `tracing`, `x-envoy-downstream-service-cluster` and
-  `x-envoy-downstream-service-node` are removed last, each unless an entry before it covers it.
+  removes from clients the two question headers and every header the check may set (each name of `auth.accept`), whether
+  or not `remove_from_clients` lists them, because a client must not be able to forge what the gateway asks the check or
+  what the check says. With `envoy.tracing`, `x-envoy-downstream-service-cluster` and `x-envoy-downstream-service-node`
+  are removed last, each unless an entry before it covers it.
 - **Retries** happen only on `connect-failure` and `reset-before-request`.
-- **The overload manager** checks every 0.25 seconds. It exists when `limits.heap` or `limits.connections` is written.
-- **The Connect bridge.** Each route of the rpc entry turns a Connect call into gRPC for the service's gRPC port,
-  and the answer back into Connect. Envoy's bridge still writes the HTTP status of an older Connect error-code table
-  for four codes, so a small Lua filter sets the current status: `canceled` 499, `deadline_exceeded` 504,
-  `failed_precondition` 400 and `unimplemented` 501. Both filters are off for every other route.
-- **Route metadata.** With `auth`, a plain route carries an empty action under `namespace`, and an RPC route carries its
-  method's action. A route with `auth: off` carries none. The auth-unavailable log line reads it.
+- **The overload manager** checks every 0.25 seconds. It exists when `envoy.heap` or `limits.connections` is written.
+- **The Connect bridge.** Each route of the rpc entry turns a Connect call into gRPC for the service's gRPC port, and
+  the answer back into Connect. Envoy's bridge still writes the HTTP status of an older Connect error-code table for
+  four codes, so a small Lua filter sets the current status: `canceled` 499, `deadline_exceeded` 504,
+  `failed_precondition` 400 and `unimplemented` 501. Both filters are off for every other route, and neither is written
+  when `envoy.connect_bridge` is `false`.
+- **Route metadata.** With `auth`, a plain route carries an empty action under `envoy.namespace`, and an RPC route
+  carries its method's action. A route with `auth: off` carries none. The auth-unavailable log line reads it.
 - **Three kinds of JSON log line on standard output.** The request log has the fields `time`, `route`, `host`, `method`,
   `protocol`, `status`, `flags`, `details`, `duration_ms`, `upstream_ms`, `bytes_in`, `bytes_out`, `upstream` and
   `request_id`, and with `auth` also `authz_us`, how long the check took (`null` when none ran). The upstream failure
@@ -45,13 +46,13 @@ Everything the format has no key for is the same in every gateway proxyfile writ
   `status_from`, every response with a response flag, and `sample` of the rest, chosen by the first eight hex digits of
   `x-request-id`.
 - **The order of the filters:** set metadata (with `auth`), header mutation, the RBAC refusal of a foreign browser
-  origin, CORS, the auth check (with `auth`), the Lua status filter and the Connect bridge (with an rpc entry), and
-  the router. A foreign origin is refused before the check could be called.
+  origin, CORS, the auth check (with `auth`), the Lua status filter and the Connect bridge (with an rpc entry, unless
+  `envoy.connect_bridge` is `false`), and the router. A foreign origin is refused before the check could be called.
 
 ## Fixed names
 
-These names never follow `namespace` or any other key, because other programs read them. A tool that changes a runtime
-value, for example, looks it up by its key.
+These names never follow `envoy.namespace` or any other key, because other programs read them. A tool that changes a
+runtime value, for example, looks it up by its key.
 
 | Name | What it is |
 |---|---|

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kitecorp/proxyfile/internal/model"
-	"github.com/kitecorp/proxyfile/internal/testsupport"
+	"github.com/kitecorp/proxyfile/v2/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/testsupport"
 )
 
 // b is the valid proxyfile the problem rows change, one change each.
@@ -113,17 +113,17 @@ func TestReadProblems(t *testing.T) {
 			document: b.Replaced(7, 7, "  - rpc:", `      to: {"*": {service: web}}`, "  - {name: web, prefix: /, to: web}"),
 			want:     []string{`g.yaml:8:27: rpc: the service "web" has no grpc port`}},
 		// A size or a time can match its pattern and still not fit in an int64.
-		{name: "size too large", document: b.Inserted(8, "limits: {heap: 9999999999999GiB}"),
-			want: []string{`g.yaml:8:16: "heap" must be a size such as 192MiB`}},
+		{name: "size too large", document: b.Inserted(8, "envoy: {heap: 9999999999999GiB}"),
+			want: []string{`g.yaml:8:15: "heap" must be a size such as 192MiB`}},
 		{name: "time too large", document: b.Inserted(8, "timeouts: {request: 9999999999999h}"),
 			want: []string{`g.yaml:8:21: "request" must be a time such as 125s, or none`}},
-		// Decoding finds heap before the header size, which is written first, so the two come out in written order only
-		// when they are sorted.
+		// Decoding finds the header size before heap, which is written first, so the two come out in written order only when
+		// they are sorted.
 		{name: "decoding problems, in order",
-			document: b.Inserted(8, "limits: {request_headers: {size: 9999999999999GiB, count: 1}, heap: 9999999999999GiB}"),
+			document: b.Inserted(8, "envoy: {heap: 9999999999999GiB}\nlimits: {request_headers: {size: 9999999999999GiB, count: 1}}"),
 			want: []string{
-				`g.yaml:8:34: "size" must be a size such as 96KiB`,
-				`g.yaml:8:69: "heap" must be a size such as 192MiB`,
+				`g.yaml:8:15: "heap" must be a size such as 192MiB`,
+				`g.yaml:9:34: "size" must be a size such as 96KiB`,
 			}},
 		// Envoy refuses a header block limit above 8192 KiB. The whole numbers' limits belong to the check (TestCheck).
 		{name: "header size above Envoy's limit",
@@ -176,7 +176,15 @@ func TestReadProblems(t *testing.T) {
 		{name: "HOCON: format check", file: "g.conf", document: strings.Replace(bHOCON, "listen = 8000", "liste = 8000", 1),
 			want: []string{
 				`g.conf: "listen" is required here`,
-				`g.conf: liste: unknown key "liste"; known here: admin, auth, cors, limits, listen, log, namespace, origins, remove_from_clients, routes, rpc, services, timeouts, tracing`,
+				`g.conf: liste: unknown key "liste"; known here: admin, auth, cors, envoy, haproxy, limits, listen, log, nginx, origins, remove_from_clients, routes, rpc, services, timeouts`,
+			}},
+		// A 1.x file is refused at every key that moved into the envoy block, each named by its key path, in one run.
+		{name: "HOCON: every 1.x key at its 1.x place", file: "g.conf",
+			document: "namespace = example.gateway\nlimits { heap = 64MiB }\n" + bHOCON + "tracing { provider { xray { segment = s } } }\n",
+			want: []string{
+				`g.conf: limits.heap: "heap" moved to envoy.heap in proxyfile 2.0`,
+				`g.conf: namespace: "namespace" moved to envoy.namespace in proxyfile 2.0`,
+				`g.conf: tracing: "tracing" moved to envoy.tracing in proxyfile 2.0`,
 			}},
 		{name: "HOCON: YAML text", file: "g.conf", document: b.String(),
 			want: []string{`g.conf:3:6: unexpected token 11`}},
@@ -216,18 +224,18 @@ func TestReadProblems(t *testing.T) {
 			}},
 		// The check's pattern for agent takes digits and dots and a port of up to five digits; the reader refuses an
 		// octet above 255 and a port above 65535.
-		{name: "agent above 255", document: b.Inserted(8, "tracing: {provider: {xray: {segment: s, agent: 300.1.2.3:2000}}}"),
-			want: []string{`g.yaml:8:48: "agent" must be an IPv4 address and a port from 1 to 65535, such as 127.0.0.1:2000`}},
-		{name: "agent port above 65535", document: b.Inserted(8, "tracing: {provider: {xray: {segment: s, agent: 127.0.0.1:65536}}}"),
-			want: []string{`g.yaml:8:48: "agent" must be an IPv4 address and a port from 1 to 65535, such as 127.0.0.1:2000`}},
+		{name: "agent above 255", document: b.Inserted(8, "envoy: {tracing: {provider: {xray: {segment: s, agent: 300.1.2.3:2000}}}}"),
+			want: []string{`g.yaml:8:56: "agent" must be an IPv4 address and a port from 1 to 65535, such as 127.0.0.1:2000`}},
+		{name: "agent port above 65535", document: b.Inserted(8, "envoy: {tracing: {provider: {xray: {segment: s, agent: 127.0.0.1:65536}}}}"),
+			want: []string{`g.yaml:8:56: "agent" must be an IPv4 address and a port from 1 to 65535, such as 127.0.0.1:2000`}},
 		// HOCON reads an unquoted colon as a separator, so the agent is written in quotes there.
 		{name: "HOCON: agent unquoted", file: "g.conf",
-			document: bHOCON + "tracing { provider { xray { segment = s, agent = 127.0.0.1:2000 } } }\n",
-			want:     []string{`g.conf:10:59: unexpected token 11`}},
+			document: bHOCON + "envoy { tracing { provider { xray { segment = s, agent = 127.0.0.1:2000 } } } }\n",
+			want:     []string{`g.conf:10:67: unexpected token 11`}},
 		// rate = 5% is a HOCON string, which the percentage rule reads; rate = 5 is a number, which it refuses.
 		{name: "HOCON: rate as a number", file: "g.conf",
-			document: bHOCON + "tracing { provider { xray { segment = s, sample { rate = 5 } } } }\n",
-			want:     []string{`g.conf: tracing.provider.xray.sample.rate: "rate" must be a whole percentage such as 5%`}},
+			document: bHOCON + "envoy { tracing { provider { xray { segment = s, sample { rate = 5 } } } } }\n",
+			want:     []string{`g.conf: envoy.tracing.provider.xray.sample.rate: "rate" must be a whole percentage such as 5%`}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -368,10 +376,10 @@ func TestReadFullExample(t *testing.T) {
 		environments = append(environments, environment.Name)
 	}
 	runChecks(t, []check{
-		{"namespace", g.Namespace, "example.gateway"},
+		{"namespace", g.Envoy.Namespace, "example.gateway"},
 		{"listen", g.Listen.Number, int64(10000)},
 		{"admin", g.Admin.Number, int64(9901)},
-		{"heap", g.Limits.Heap.Bytes, int64(268435456)},
+		{"heap", g.Envoy.Heap.Bytes, int64(268435456)},
 		{"connections", g.Limits.Connections.Number, int64(4096)},
 		{"request header size", g.Limits.RequestHeaders.Size.Bytes, int64(98304)},
 		{"request header count", g.Limits.RequestHeaders.Count.Number, int64(150)},
@@ -397,10 +405,10 @@ func TestReadFullExample(t *testing.T) {
 		}},
 		{"targets", targets(g), []string{"example.shop.* shop shop", "* accounts accounts-rpc"}},
 		{"log", fmt.Sprint(g.Log.StatusFrom, g.Log.SamplePercent), "400 1"},
-		{"services key", g.ServicesPos, model.Pos{File: "../../examples/full/gateway.yaml", Line: 14, Column: 1}},
-		{"routes key", g.RoutesPos, model.Pos{File: "../../examples/full/gateway.yaml", Line: 44, Column: 1}},
+		{"services key", g.ServicesPos, model.Pos{File: "../../examples/full/gateway.yaml", Line: 12, Column: 1}},
+		{"routes key", g.RoutesPos, model.Pos{File: "../../examples/full/gateway.yaml", Line: 42, Column: 1}},
 		{"methods", len(file.Methods), 3},
-		{"methods key", *file.MethodsKey, model.Pos{File: "../../examples/full/gateway.yaml", Line: 54, Column: 3}},
+		{"methods key", *file.MethodsKey, model.Pos{File: "../../examples/full/gateway.yaml", Line: 52, Column: 3}},
 	})
 }
 
@@ -445,7 +453,7 @@ func TestReadOtherExamples(t *testing.T) {
 	t.Run("minimal", func(t *testing.T) {
 		g := readExample(t, "minimal").Gateway
 		runChecks(t, []check{
-			{"namespace", g.Namespace, "proxyfile"},
+			{"envoy", g.Envoy, model.Envoy{Namespace: "proxyfile", ConnectBridge: true}},
 			{"admin", g.Admin, (*model.Port)(nil)},
 			{"limits", g.Limits, model.Limits{}},
 			{"timeouts", g.Timeouts, model.Timeouts{}},
@@ -460,9 +468,9 @@ func TestReadOtherExamples(t *testing.T) {
 	t.Run("partial", func(t *testing.T) {
 		g := readExample(t, "partial").Gateway
 		runChecks(t, []check{
-			{"namespace", g.Namespace, "proxyfile"},
+			{"namespace", g.Envoy.Namespace, "proxyfile"},
 			{"admin", g.Admin, (*model.Port)(nil)},
-			{"heap", g.Limits.Heap.Bytes, int64(67108864)},
+			{"heap", g.Envoy.Heap.Bytes, int64(67108864)},
 			{"connections and request headers", g.Limits.Connections == nil && g.Limits.RequestHeaders == nil, true},
 			{"timeouts", millis(g.Timeouts.Request, g.Timeouts.Idle, g.Timeouts.UpstreamIdle), []int64{30000, -1, -1}},
 			{"addresses", addresses(g), []string{"web 10.0.0.5", "identity ::1", "backend 127.0.0.1"}},
@@ -497,17 +505,17 @@ func TestReadTracing(t *testing.T) {
 		want                 *model.Tracing
 	}{
 		{name: "no tracing", document: b.String()},
-		{name: "the fewest keys", document: b.Inserted(8, "tracing: {provider: {xray: {segment: s}}}"),
+		{name: "the fewest keys", document: b.Inserted(8, "envoy: {tracing: {provider: {xray: {segment: s}}}}"),
 			want: &model.Tracing{XRay: model.XRay{Address: "127.0.0.1", Port: 2000, Segment: "s"}}},
 		{name: "the sample's defaults, a rule's patterns and the tags' order",
-			document: b.Inserted(8, "tracing: {provider: {xray: {segment: s, agent: 10.0.0.9:2001, sample: {rules: [{first: 3, rate: 50%}]}}}, "+
-				"tags: {zone: {env: ZONE}, area: {header: x-area, default: none}}, path_in_url: true}"),
+			document: b.Inserted(8, "envoy: {tracing: {provider: {xray: {segment: s, agent: 10.0.0.9:2001, sample: {rules: [{first: 3, rate: 50%}]}}}, "+
+				"tags: {zone: {env: ZONE}, area: {header: x-area, default: none}}, path_in_url: true}}"),
 			want: &model.Tracing{XRay: model.XRay{Address: "10.0.0.9", Port: 2001, Segment: "s", Sample: &model.Sample{
 				Default: model.SampleRule{First: 1, RatePercent: 5},
 				Rules:   []model.SampleRule{{Host: "*", Method: "*", Path: "*", First: 3, RatePercent: 50}},
 			}}, Tags: []model.Tag{{Name: "zone", Env: "ZONE"}, {Name: "area", Header: "x-area", Default: "none"}}, PathInURL: true}},
 		{name: "the tags' order, HOCON", file: "g.conf",
-			document: bHOCON + "tracing { provider { xray { segment = s } }, tags { zone { env = ZONE }, area { header = x-area } } }\n",
+			document: bHOCON + "envoy { tracing { provider { xray { segment = s } }, tags { zone { env = ZONE }, area { header = x-area } } } }\n",
 			want: &model.Tracing{XRay: model.XRay{Address: "127.0.0.1", Port: 2000, Segment: "s"},
 				Tags: []model.Tag{{Name: "zone", Env: "ZONE"}, {Name: "area", Header: "x-area"}}}},
 		{name: "every key, YAML", file: "../../examples/tracing/gateway.yaml", want: every},
@@ -524,8 +532,8 @@ func TestReadTracing(t *testing.T) {
 			if problems != nil {
 				t.Fatalf("problems = %q, want none", testsupport.ProblemStrings(problems))
 			}
-			if !reflect.DeepEqual(file.Gateway.Tracing, c.want) {
-				t.Errorf("Tracing = %#v, want %#v", file.Gateway.Tracing, c.want)
+			if !reflect.DeepEqual(file.Gateway.Envoy.Tracing, c.want) {
+				t.Errorf("Tracing = %#v, want %#v", file.Gateway.Envoy.Tracing, c.want)
 			}
 		})
 	}

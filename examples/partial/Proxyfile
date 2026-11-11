@@ -1,7 +1,6 @@
 # The partial example in HOCON, with its RPC methods read from the .proto files under proto/ in place of a list: it
 # renders the envoy.yaml and rpc-table.json that gateway.conf and gateway.yaml render.
 listen = 8000
-limits { heap = 64MiB }
 timeouts { request = 30s }
 services {
   web { http = 3000, address = "10.0.0.5" }
@@ -31,3 +30,4 @@ rpc {
     option = example.gateway.v1.route
   }
 }
+envoy { heap = 64MiB }

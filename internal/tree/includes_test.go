@@ -4,7 +4,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/kitecorp/proxyfile/internal/testsupport"
+	"github.com/kitecorp/proxyfile/v2/internal/testsupport"
 )
 
 // The statements are found where the library reads them, and nowhere else: in an object's field, at any depth, in the

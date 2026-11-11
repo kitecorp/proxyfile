@@ -16,19 +16,20 @@ origins:
   all: {hosts: [localhost], origins: ["http://localhost:3000"]}
 routes:
   - {name: app, prefix: /, to: app}
-tracing:
-  provider:
-    xray:
-      agent: 127.0.0.1:2000
-      segment: example-gateway
-      sample:
-        first: 1
-        rate: 5%
-        rules:
-          # A WebSocket's segment would last as long as the socket, so the gateway samples no handshake by its own
-          # rule.
-          - {host: "*", method: "*", path: "/live*", first: 0, rate: 0%}
-  tags:
-    environment: {env: APP_ENVIRONMENT, default: local}
-    request_id: {header: x-request-id}
-  path_in_url: false
+envoy:
+  tracing:
+    provider:
+      xray:
+        agent: 127.0.0.1:2000
+        segment: example-gateway
+        sample:
+          first: 1
+          rate: 5%
+          rules:
+            # A WebSocket's segment would last as long as the socket, so the gateway samples no handshake by its own
+            # rule.
+            - {host: "*", method: "*", path: "/live*", first: 0, rate: 0%}
+    tags:
+      environment: {env: APP_ENVIRONMENT, default: local}
+      request_id: {header: x-request-id}
+    path_in_url: false

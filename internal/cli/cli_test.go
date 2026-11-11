@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kitecorp/proxyfile/internal/testsupport"
+	"github.com/kitecorp/proxyfile/v2/internal/testsupport"
 )
 
-const usageText = `usage: proxyfile render [<file>] -o <envoy.yaml> [--rpc-methods <methods.json>] [--rpc-table <table.json>]
-       proxyfile check [<file>] -o <envoy.yaml> [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+const usageText = `usage: proxyfile render [<file>] -o <envoy.yaml> [--target envoy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+       proxyfile check [<file>] -o <envoy.yaml> [--target envoy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
        proxyfile schema
        proxyfile version
 `
@@ -73,13 +73,21 @@ func TestRun(t *testing.T) {
 			testsupport.WriteFile(t, path, strings.Replace(text, "listen: 8000\n", "liste: 8000\n", 1))
 		}, args: "render <tmp>/gateway.yaml -o <tmp>/out.yaml", exit: 1,
 			stderr: "<tmp>/gateway.yaml:3:1: \"listen\" is required here\n" +
-				"<tmp>/gateway.yaml:3:1: unknown key \"liste\"; known here: admin, auth, cors, limits, listen, log, namespace, origins, remove_from_clients, routes, rpc, services, timeouts, tracing\n",
+				"<tmp>/gateway.yaml:3:1: unknown key \"liste\"; known here: admin, auth, cors, envoy, haproxy, limits, listen, log, nginx, origins, remove_from_clients, routes, rpc, services, timeouts\n",
 			also: nothingWritten("minimal")},
 		{name: "no arguments", exit: 2, stderr: usageText},
 		{name: "help", args: "--help", stdout: usageText},
 		{name: "unknown command", args: "rendr", exit: 2, stderr: "proxyfile: unknown command \"rendr\"\n" + usageText},
 		{name: "no -o", args: "render a.yaml", exit: 2, stderr: "proxyfile render: -o is required\n"},
 		{name: "two files", args: "render a.yaml b.yaml -o c.yaml", exit: 2, stderr: "proxyfile render: give exactly one file\n"},
+		// envoy is the one target with a generator. The others are refused before any file is read, so a.yaml need not exist.
+		{name: "target envoy", args: "check <ex>/minimal/gateway.yaml -o <ex>/minimal/envoy.yaml --target envoy"},
+		{name: "target nginx", args: "render a.yaml -o b.yaml --target nginx", exit: 2,
+			stderr: "proxyfile render: --target nginx: no generator for nginx in this version; see docs/portability.md\n"},
+		{name: "target haproxy", args: "check a.yaml -o b.yaml --target haproxy", exit: 2,
+			stderr: "proxyfile check: --target haproxy: no generator for haproxy in this version; see docs/portability.md\n"},
+		{name: "unknown target", args: "render a.yaml -o b.yaml --target Envoy", exit: 2,
+			stderr: "proxyfile render: --target must be envoy, nginx or haproxy, not \"Envoy\"\n"},
 		// With no file given, the file is the one default name in the working directory.
 		{name: "default Proxyfile", setup: minimalWith(minimalConf, "Proxyfile"), chdir: true,
 			args: "render -o <tmp>/out.yaml",

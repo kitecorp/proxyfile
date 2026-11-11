@@ -88,20 +88,191 @@
       },
       "type": "object"
     },
+    "envoy": {
+      "additionalProperties": false,
+      "description": "The settings only the Envoy generator reads: the namespace of the gateway's metadata, its heap budget, X-Ray tracing and the Connect bridge.",
+      "properties": {
+        "connect_bridge": {
+          "description": "true turns each Connect call on an RPC route into gRPC for the service, and the answer back into Connect; false routes gRPC calls alone. true when not written.",
+          "type": "boolean"
+        },
+        "heap": {
+          "description": "The heap budget: the gateway shrinks its heap at 90% of it and refuses new requests at 98%.",
+          "pattern": "^[1-9][0-9]*(KiB|MiB|GiB)$",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "The namespace of the gateway's own metadata, which the routes and the request log use; proxyfile when not written.",
+          "pattern": "^[a-z][a-z0-9._-]*$",
+          "type": "string"
+        },
+        "tracing": {
+          "additionalProperties": false,
+          "description": "An X-Ray segment for each sampled request, sent to an agent over UDP.",
+          "properties": {
+            "path_in_url": {
+              "description": "true keeps the request's path in the segment's URL, its first 256 characters; false, the default, keeps the scheme and the host only.",
+              "type": "boolean"
+            },
+            "provider": {
+              "description": "The tracing system the segments go to: a mapping with one key that names it.",
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "description": "AWS X-Ray.",
+                  "properties": {
+                    "xray": {
+                      "additionalProperties": false,
+                      "description": "AWS X-Ray: where the segments go, their name and which requests are traced.",
+                      "properties": {
+                        "agent": {
+                          "description": "Where the segments go over UDP: an X-Ray daemon, or an agent that takes X-Ray segments; 127.0.0.1:2000 when not written.",
+                          "pattern": "^[0-9]{1,3}(\\.[0-9]{1,3}){3}:[1-9][0-9]{0,4}$",
+                          "type": "string"
+                        },
+                        "sample": {
+                          "additionalProperties": false,
+                          "description": "Which requests are traced when the request does not say: the rules, then the default. Without it, Envoy traces the first request each second and 5% of the others.",
+                          "properties": {
+                            "first": {
+                              "description": "How many requests each second are traced before rate applies; 1 when not written.",
+                              "maximum": 4294967295,
+                              "minimum": 0,
+                              "type": "integer"
+                            },
+                            "rate": {
+                              "description": "The share of the other requests that is traced; 5% when not written.",
+                              "pattern": "^(100|[1-9]?[0-9])%$",
+                              "type": "string"
+                            },
+                            "rules": {
+                              "description": "Rules tried in the order written, before the default; the first that matches a request decides.",
+                              "items": {
+                                "additionalProperties": false,
+                                "description": "One rule: what it matches, and its own first and rate.",
+                                "properties": {
+                                  "first": {
+                                    "description": "How many matching requests each second are traced before rate applies.",
+                                    "maximum": 4294967295,
+                                    "minimum": 0,
+                                    "type": "integer"
+                                  },
+                                  "host": {
+                                    "description": "Matches the Host header, with its port when the request has one; * when not written.",
+                                    "pattern": "^[A-Za-z0-9.:\\[\\]*?-]+$",
+                                    "type": "string"
+                                  },
+                                  "method": {
+                                    "description": "Matches the request's method; * when not written.",
+                                    "pattern": "^[A-Z*?]+$",
+                                    "type": "string"
+                                  },
+                                  "path": {
+                                    "description": "Matches the request's path, with its query; * when not written.",
+                                    "pattern": "^[/*][!-~]*$",
+                                    "type": "string"
+                                  },
+                                  "rate": {
+                                    "description": "The share of the other matching requests that is traced.",
+                                    "pattern": "^(100|[1-9]?[0-9])%$",
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "first",
+                                  "rate"
+                                ],
+                                "type": "object"
+                              },
+                              "type": "array"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "segment": {
+                          "description": "The name of the gateway's segments, which names its node in X-Ray's service map.",
+                          "pattern": "^[A-Za-z0-9 _.:/%\u0026#=+\\\\@-]{1,200}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "segment"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "xray"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "tags": {
+              "additionalProperties": {
+                "additionalProperties": false,
+                "description": "One tag: the environment variable or the request header it reads, and an optional default.",
+                "oneOf": [
+                  {
+                    "required": [
+                      "env"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "header"
+                    ]
+                  }
+                ],
+                "properties": {
+                  "default": {
+                    "description": "The value when the variable is unset or the header is absent; without it the segment gets no tag then.",
+                    "pattern": "[\\s\\S]",
+                    "type": "string"
+                  },
+                  "env": {
+                    "description": "An environment variable of the gateway's process, read once when Envoy starts.",
+                    "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                    "type": "string"
+                  },
+                  "header": {
+                    "description": "A request header.",
+                    "pattern": "^[a-z0-9][a-z0-9-]*$",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "description": "Annotations on each segment, by name.",
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9_]+$"
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "provider"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "haproxy": {
+      "additionalProperties": false,
+      "description": "The settings only HAProxy will read; this version has no HAProxy generator, so it takes no key.",
+      "properties": {},
+      "type": "object"
+    },
     "limits": {
       "additionalProperties": false,
-      "description": "Limits on memory, connections and request headers.",
+      "description": "Limits on connections and request headers.",
       "properties": {
         "connections": {
           "description": "The most connections at once, from clients and to each service.",
           "maximum": 4294967295,
           "minimum": 1,
           "type": "integer"
-        },
-        "heap": {
-          "description": "The heap budget: the gateway shrinks its heap at 90% of it and refuses new requests at 98%.",
-          "pattern": "^[1-9][0-9]*(KiB|MiB|GiB)$",
-          "type": "string"
         },
         "request_headers": {
           "additionalProperties": false,
@@ -156,10 +327,11 @@
       ],
       "type": "object"
     },
-    "namespace": {
-      "description": "The namespace of the gateway's own metadata, which the routes and the request log use; proxyfile when not written.",
-      "pattern": "^[a-z][a-z0-9._-]*$",
-      "type": "string"
+    "nginx": {
+      "additionalProperties": false,
+      "description": "The settings only nginx will read; this version has no nginx generator, so it takes no key.",
+      "properties": {},
+      "type": "object"
     },
     "origins": {
       "description": "The browser origins each environment admits, by environment name; or, as in 1.0, the name of an origins file, relative to this file.",
@@ -494,155 +666,6 @@
           "type": "string"
         }
       },
-      "type": "object"
-    },
-    "tracing": {
-      "additionalProperties": false,
-      "description": "An X-Ray segment for each sampled request, sent to an agent over UDP.",
-      "properties": {
-        "path_in_url": {
-          "description": "true keeps the request's path in the segment's URL, its first 256 characters; false, the default, keeps the scheme and the host only.",
-          "type": "boolean"
-        },
-        "provider": {
-          "description": "The tracing system the segments go to: a mapping with one key that names it.",
-          "oneOf": [
-            {
-              "additionalProperties": false,
-              "description": "AWS X-Ray.",
-              "properties": {
-                "xray": {
-                  "additionalProperties": false,
-                  "description": "AWS X-Ray: where the segments go, their name and which requests are traced.",
-                  "properties": {
-                    "agent": {
-                      "description": "Where the segments go over UDP: an X-Ray daemon, or an agent that takes X-Ray segments; 127.0.0.1:2000 when not written.",
-                      "pattern": "^[0-9]{1,3}(\\.[0-9]{1,3}){3}:[1-9][0-9]{0,4}$",
-                      "type": "string"
-                    },
-                    "sample": {
-                      "additionalProperties": false,
-                      "description": "Which requests are traced when the request does not say: the rules, then the default. Without it, Envoy traces the first request each second and 5% of the others.",
-                      "properties": {
-                        "first": {
-                          "description": "How many requests each second are traced before rate applies; 1 when not written.",
-                          "maximum": 4294967295,
-                          "minimum": 0,
-                          "type": "integer"
-                        },
-                        "rate": {
-                          "description": "The share of the other requests that is traced; 5% when not written.",
-                          "pattern": "^(100|[1-9]?[0-9])%$",
-                          "type": "string"
-                        },
-                        "rules": {
-                          "description": "Rules tried in the order written, before the default; the first that matches a request decides.",
-                          "items": {
-                            "additionalProperties": false,
-                            "description": "One rule: what it matches, and its own first and rate.",
-                            "properties": {
-                              "first": {
-                                "description": "How many matching requests each second are traced before rate applies.",
-                                "maximum": 4294967295,
-                                "minimum": 0,
-                                "type": "integer"
-                              },
-                              "host": {
-                                "description": "Matches the Host header, with its port when the request has one; * when not written.",
-                                "pattern": "^[A-Za-z0-9.:\\[\\]*?-]+$",
-                                "type": "string"
-                              },
-                              "method": {
-                                "description": "Matches the request's method; * when not written.",
-                                "pattern": "^[A-Z*?]+$",
-                                "type": "string"
-                              },
-                              "path": {
-                                "description": "Matches the request's path, with its query; * when not written.",
-                                "pattern": "^[/*][!-~]*$",
-                                "type": "string"
-                              },
-                              "rate": {
-                                "description": "The share of the other matching requests that is traced.",
-                                "pattern": "^(100|[1-9]?[0-9])%$",
-                                "type": "string"
-                              }
-                            },
-                            "required": [
-                              "first",
-                              "rate"
-                            ],
-                            "type": "object"
-                          },
-                          "type": "array"
-                        }
-                      },
-                      "type": "object"
-                    },
-                    "segment": {
-                      "description": "The name of the gateway's segments, which names its node in X-Ray's service map.",
-                      "pattern": "^[A-Za-z0-9 _.:/%\u0026#=+\\\\@-]{1,200}$",
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "segment"
-                  ],
-                  "type": "object"
-                }
-              },
-              "required": [
-                "xray"
-              ],
-              "type": "object"
-            }
-          ]
-        },
-        "tags": {
-          "additionalProperties": {
-            "additionalProperties": false,
-            "description": "One tag: the environment variable or the request header it reads, and an optional default.",
-            "oneOf": [
-              {
-                "required": [
-                  "env"
-                ]
-              },
-              {
-                "required": [
-                  "header"
-                ]
-              }
-            ],
-            "properties": {
-              "default": {
-                "description": "The value when the variable is unset or the header is absent; without it the segment gets no tag then.",
-                "pattern": "[\\s\\S]",
-                "type": "string"
-              },
-              "env": {
-                "description": "An environment variable of the gateway's process, read once when Envoy starts.",
-                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
-                "type": "string"
-              },
-              "header": {
-                "description": "A request header.",
-                "pattern": "^[a-z0-9][a-z0-9-]*$",
-                "type": "string"
-              }
-            },
-            "type": "object"
-          },
-          "description": "Annotations on each segment, by name.",
-          "propertyNames": {
-            "pattern": "^[A-Za-z0-9_]+$"
-          },
-          "type": "object"
-        }
-      },
-      "required": [
-        "provider"
-      ],
       "type": "object"
     }
   },

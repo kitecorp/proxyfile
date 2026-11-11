@@ -5,7 +5,7 @@ import (
 	"os"
 	"runtime/debug"
 
-	"github.com/kitecorp/proxyfile/internal/cli"
+	"github.com/kitecorp/proxyfile/v2/internal/cli"
 )
 
 // version is set by the release build: -ldflags "-X main.version=<version>".
@@ -16,7 +16,7 @@ func main() {
 }
 
 // programVersion is the release build's version, else the module version the go command recorded in the program
-// (go install github.com/kitecorp/proxyfile/cmd/proxyfile@v1.0.0 records v1.0.0), else (devel).
+// (go install github.com/kitecorp/proxyfile/v2/cmd/proxyfile@v2.0.0 records v2.0.0), else (devel).
 func programVersion() string {
 	if version != "" {
 		return version

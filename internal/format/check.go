@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/kitecorp/proxyfile/internal/model"
-	"github.com/kitecorp/proxyfile/internal/tree"
+	"github.com/kitecorp/proxyfile/v2/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/tree"
 )
 
 // patterns holds every pattern of the three descriptions, compiled when the package loads so that a pattern Go's
@@ -108,11 +108,16 @@ func itemSubject(item *tree.Node, list string) string {
 func (c *checker) mapping(f Field, n *tree.Node) {
 	for _, entry := range n.Entries {
 		field := f.Child(entry.Key)
-		if field == nil {
+		switch to, moved := f.Moved[entry.Key]; {
+		case field != nil:
+			c.value(*field, entry.Value, strconv.Quote(entry.Key))
+		case moved:
+			c.Add(entry.KeyPos, "%q moved to %s in proxyfile 2.0", entry.Key, to)
+		case f.Reserved:
+			c.Add(entry.KeyPos, "%q in %s: %s", entry.Key, f.Name, NoGenerator(f.Name))
+		default:
 			c.Add(entry.KeyPos, "unknown key %q; known here: %s", entry.Key, strings.Join(sortedNames(f.Fields), ", "))
-			continue
 		}
-		c.value(*field, entry.Value, strconv.Quote(entry.Key))
 	}
 	for _, field := range f.Fields {
 		if field.Required && n.Get(field.Name) == nil {

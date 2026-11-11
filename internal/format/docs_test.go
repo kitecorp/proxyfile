@@ -1,6 +1,7 @@
 package format
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,7 +11,7 @@ import (
 	"testing"
 	"unicode"
 
-	"github.com/kitecorp/proxyfile/internal/testsupport"
+	"github.com/kitecorp/proxyfile/v2/internal/testsupport"
 )
 
 const readmeFile = "../../README.md"
@@ -49,9 +50,9 @@ func TestDocsAreCurrent(t *testing.T) {
 	}
 }
 
-// The README lists every key at the top of a proxyfile, in the description's order and each with its Doc, as a link
-// to the page under docs/ whose key tables hold its row. A key added to the description fails here until it has its
-// line and its page.
+// The README lists every key at the top of a proxyfile, in the description's order and each with its class and its
+// Doc, as a link to the page under docs/ whose key tables hold its row. A key added to the description fails here until
+// it has its line and its page.
 func TestReadmeLinksEveryKey(t *testing.T) {
 	readme := string(testsupport.ReadFile(t, readmeFile))
 	_, section, found := strings.Cut(readme, "\n## Keys\n")
@@ -59,7 +60,7 @@ func TestReadmeLinksEveryKey(t *testing.T) {
 		t.Fatalf("%s has no ## Keys section", readmeFile)
 	}
 	section, _, _ = strings.Cut(section, "\n## ")
-	line := regexp.MustCompile("^- \\[`([^`]+)`\\]\\((docs/[^)#]+\\.md)\\): (.+)$")
+	line := regexp.MustCompile("^- \\[`([^`]+)`\\]\\((docs/[^)#]+\\.md)\\) \\(([a-z]+)\\): (.+)$")
 	var keys []string
 	for _, text := range strings.Split(section, "\n") {
 		if !strings.HasPrefix(text, "- ") {
@@ -67,14 +68,17 @@ func TestReadmeLinksEveryKey(t *testing.T) {
 		}
 		m := line.FindStringSubmatch(text)
 		if m == nil {
-			t.Errorf("README.md, Keys: %q is not of the form - [`<key>`](docs/<page>.md): <its Doc>", text)
+			t.Errorf("README.md, Keys: %q is not of the form - [`<key>`](docs/<page>.md) (<its class>): <its Doc>", text)
 			continue
 		}
-		key, page, doc := m[1], m[2], m[3]
+		key, page, class, doc := m[1], m[2], m[3], m[4]
 		keys = append(keys, key)
 		field := Proxyfile.Child(key)
 		if field == nil {
 			continue // the comparison of the whole list below names it
+		}
+		if want := cmp.Or(field.Class, core); class != want {
+			t.Errorf("README.md, Keys: the line of %s gives the class %q, want %q", key, class, want)
 		}
 		if want := escape(field.Doc); doc != want {
 			t.Errorf("README.md, Keys: the line of %s says %q, want its Doc, %q", key, doc, want)
@@ -151,24 +155,25 @@ func keyTables(text string) ([]keyTable, error) {
 
 // tableNamed returns the table a marker names: "." holds the keys at the top of a proxyfile that hold no keys of
 // their own, "origins file" and "methods file" the keys of those files, and any other name is the path of a key of
-// the proxyfile, whose table holds that key and every key under it.
+// the proxyfile, whose table holds that key and every key under it, in the class of the key that holds it.
 func tableNamed(name string) (string, error) {
 	switch name {
 	case ".":
 		leaves := slices.DeleteFunc(slices.Clone(Proxyfile.Fields), holdsKeys)
-		return string(Reference(Field{Kind: Map, Fields: leaves}, "")), nil
+		return string(Reference(Field{Kind: Map, Fields: leaves}, "", core)), nil
 	case "origins file":
-		return string(Reference(Origins, "")), nil
+		return string(Reference(Origins, "", core)), nil
 	case "methods file":
-		return string(Reference(Methods, "")), nil
+		return string(Reference(Methods, "", core)), nil
 	}
-	spec := &Proxyfile
+	spec, class := &Proxyfile, core
 	for _, key := range strings.Split(name, ".") {
+		class = cmp.Or(spec.Class, class)
 		if spec = spec.Child(key); spec == nil {
 			return "", fmt.Errorf("a table names %q, which is no key of the proxyfile, nor ., origins file or methods file", name)
 		}
 	}
-	return string(Reference(*spec, name)), nil
+	return string(Reference(*spec, name, class)), nil
 }
 
 // holdsKeys says whether the value of f has keys under it, which the table of f lists.

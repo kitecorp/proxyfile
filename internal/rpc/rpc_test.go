@@ -8,10 +8,10 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/kitecorp/proxyfile/internal/model"
-	"github.com/kitecorp/proxyfile/internal/read"
-	"github.com/kitecorp/proxyfile/internal/rpc"
-	"github.com/kitecorp/proxyfile/internal/testsupport"
+	"github.com/kitecorp/proxyfile/v2/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/read"
+	"github.com/kitecorp/proxyfile/v2/internal/rpc"
+	"github.com/kitecorp/proxyfile/v2/internal/testsupport"
 )
 
 // longest maps one package each to four services, so each method shows which of the patterns that match it wins.

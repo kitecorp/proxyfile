@@ -5,12 +5,12 @@ import (
 	"path/filepath"
 	"slices"
 
-	"github.com/kitecorp/proxyfile/internal/format"
-	"github.com/kitecorp/proxyfile/internal/input"
-	"github.com/kitecorp/proxyfile/internal/model"
-	"github.com/kitecorp/proxyfile/internal/origins"
-	"github.com/kitecorp/proxyfile/internal/rpc"
-	"github.com/kitecorp/proxyfile/internal/tree"
+	"github.com/kitecorp/proxyfile/v2/internal/format"
+	"github.com/kitecorp/proxyfile/v2/internal/input"
+	"github.com/kitecorp/proxyfile/v2/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/origins"
+	"github.com/kitecorp/proxyfile/v2/internal/rpc"
+	"github.com/kitecorp/proxyfile/v2/internal/tree"
 )
 
 // File is a proxyfile after reading. The origins and the RPC methods it may hold have their types in packages that

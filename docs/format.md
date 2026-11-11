@@ -1,23 +1,23 @@
 # The format
 
-A proxyfile describes one gateway in keys, in YAML or in HOCON. This page holds a file with every key, the forms of
-sizes, times and percentages, the rules that compare keys with each other, and the two JSON files of 1.0.
+A proxyfile describes one gateway in keys, in YAML or in HOCON. This page holds a file with every key but the few it
+names, the forms of sizes, times and percentages, the rules that compare keys with each other, the two JSON files of
+1.0, and [which keys a 1.x file moves](#from-1x-to-20).
 
-`examples/full/gateway.yaml` holds every key a proxyfile can have except `services.<name>.address` and `tracing`, with
-invented values: `cors`, the `origins` by environment and `rpc.methods` are among them. `examples/partial` writes
-`address` and gives its methods three ways: `gateway.yaml` with `--rpc-methods examples/partial/methods.json`,
-`gateway.conf` through `include required("rpc-methods.conf")`, and `Proxyfile` through `rpc.proto` and the `.proto`
-files under `proto/`. `examples/tracing/gateway.yaml` writes `tracing`. Only `listen`, `services`, `origins` and
-`routes` are required. The rest is left out when you do not need it.
+`examples/full/gateway.yaml` holds every key a proxyfile can have except `services.<name>.address`, `envoy.tracing`,
+`rpc.proto` and the `nginx` and `haproxy` blocks, which take no key in this version, with invented values: `cors`, the
+`origins` by environment and `rpc.methods` are among them. `examples/partial` writes `address` and gives its methods
+three ways: `gateway.yaml` with `--rpc-methods examples/partial/methods.json`, `gateway.conf` through
+`include required("rpc-methods.conf")`, and `Proxyfile` through `rpc.proto` and the `.proto` files under `proto/`.
+`examples/tracing/gateway.yaml` writes `envoy.tracing`, and `examples/grpc/gateway.yaml` turns `envoy.connect_bridge`
+off. Only `listen`, `services`, `origins` and `routes` are required. The rest is left out when you do not need it.
 
 ```yaml
 # yaml-language-server: $schema=../../schema/proxyfile.schema.json
-# Every key a proxyfile can hold, with invented values, except tracing, which has its own example.
-namespace: example.gateway
+# Every key but services.<name>.address, rpc.proto, envoy.tracing, nginx and haproxy, with invented values.
 listen: 10000
 admin: 9901
 limits:
-  heap: 256MiB
   connections: 4096
   request_headers: {size: 96KiB, count: 150}
 timeouts:
@@ -69,6 +69,10 @@ rpc:
     - {service: example.accounts.v1.ProfileService, method: GetProfile}
     - {service: example.shop.v1.CartService, method: AddItem, action: buy, reports: [browse]}
 log: {status_from: 400, sample: 1%}
+envoy:
+  namespace: example.gateway
+  heap: 256MiB
+  connect_bridge: true
 ```
 
 The first line points an editor at the schema in this repository. In your own files, use the URL under
@@ -104,13 +108,27 @@ HOCON:
 
 Since 1.1 both can be written in the proxyfile: the environments under `origins`, the CORS settings under `cors`, and
 the methods under `rpc.methods`. From 1.3 the methods can also be read from the `.proto` files, with `rpc.proto`. A
-HOCON proxyfile that wants a separate file uses `include`, as `examples/partial/gateway.conf` does for its methods.
-The 1.0 way stays accepted in every 1.x release, with the same rules: `origins: <file>` names a JSON origins file,
-and `--rpc-methods <file>` a JSON methods file. Any two of `rpc.methods`, `rpc.proto` and `--rpc-methods` together
-are refused, because exactly one gives the methods. `cors` in the proxyfile is refused too when `origins` names a
-file.
+HOCON proxyfile that wants a separate file uses `include`, as `examples/partial/gateway.conf` does for its methods. The
+1.0 way is still accepted in 2.0, with the same rules: `origins: <file>` names a JSON origins file, and
+`--rpc-methods <file>` a JSON methods file. Any two of `rpc.methods`, `rpc.proto` and `--rpc-methods` together are
+refused, because exactly one gives the methods. `cors` in the proxyfile is refused too when `origins` names a file.
 
 The two files are JSON. They are read with the YAML reader, so a problem in either names its line and column, and a
 syntax error its line. A slash escaped as `\/`, which JSON allows and some writers produce, is read as `/`.
 
 [origins](origins.md#the-origins-file) describes the origins file, and [rpc](rpc.md#the-methods-file) the methods file.
+
+## From 1.x to 2.0
+
+proxyfile 2.0 moves the three keys only Envoy reads into the [`envoy`](envoy.md) block. A 1.x file is refused with one
+problem for each key still at its 1.x place, and each problem names where the key goes:
+
+| In 1.x | In 2.0 |
+|---|---|
+| `namespace` | `envoy.namespace` |
+| `limits.heap` | `envoy.heap` |
+| `tracing` | `envoy.tracing` |
+
+Every other key stays where it was, and a file with the three keys moved renders the same bytes as in 1.x. The
+Connect bridge on RPC routes, which 1.x always wrote, is now `envoy.connect_bridge`, `true` when not written, so a 1.x
+file needs no line for it.

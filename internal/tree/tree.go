@@ -3,7 +3,7 @@
 // which syntax a file used.
 package tree
 
-import "github.com/kitecorp/proxyfile/internal/model"
+import "github.com/kitecorp/proxyfile/v2/internal/model"
 
 type Kind int
 

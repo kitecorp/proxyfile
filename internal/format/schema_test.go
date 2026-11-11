@@ -14,7 +14,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6/kind"
 	"go.yaml.in/yaml/v3"
 
-	"github.com/kitecorp/proxyfile/internal/testsupport"
+	"github.com/kitecorp/proxyfile/v2/internal/testsupport"
 )
 
 var update = flag.Bool("update", false, "rewrite schema/proxyfile.schema.json, and the key tables of README.md and docs/")
@@ -53,19 +53,23 @@ func TestSchemaAcceptsTheExamples(t *testing.T) {
 		{name: "partial", file: "partial"},
 		{name: "full", file: "full"},
 		{name: "tracing", file: "tracing"},
+		{name: "grpc", file: "grpc"},
 		// The checker refuses it too (TestCheck, "tag with env and header"); oneOf admits a tag with exactly one of the
 		// two.
 		{name: "tag with env and header", file: "tracing", from: "request_id: {header: x-request-id}",
 			to:   "request_id: {header: x-request-id, env: A}",
-			want: []string{`at '/tracing/tags/request_id': 'oneOf' failed, subschemas 0, 1 matched`}},
+			want: []string{`at '/envoy/tracing/tags/request_id': 'oneOf' failed, subschemas 0, 1 matched`}},
 		{name: "rpc.proto", file: "partial", extra: "rpc:\n  proto: {roots: [proto], option: example.gateway.v1.route}\n"},
 		// The checker refuses it too (TestCheck, "rpc with methods and proto").
 		{name: "rpc with methods and proto", file: "full", from: "\nrpc:\n", to: "\nrpc:\n  proto: {roots: [proto], option: o.v1.route}\n",
 			want: []string{`at '/rpc': 'oneOf' failed, subschemas 0, 1 matched`}},
 		{name: "unknown key", file: "full", extra: "listne: 1\n",
 			want: []string{`at '': additional properties 'listne' not allowed`}},
+		// The checker refuses it too (TestCheck, "a key in nginx"): a reserved block takes no key.
+		{name: "a key in nginx", file: "minimal", extra: "nginx: {worker_connections: 1024}\n",
+			want: []string{`at '/nginx': additional properties 'worker_connections' not allowed`}},
 		{name: "size in MB", file: "full", from: "heap: 256MiB", to: "heap: 256MB",
-			want: []string{`at '/limits/heap': '256MB' does not match pattern '^[1-9][0-9]*(KiB|MiB|GiB)$'`}},
+			want: []string{`at '/envoy/heap': '256MB' does not match pattern '^[1-9][0-9]*(KiB|MiB|GiB)$'`}},
 		// The checker refuses it too (TestCheck, "plain number as text"). oneOf reports why each choice refused the item:
 		// the first two lines are the rpc entry's choice, the last the route's.
 		{name: "plain number as text", file: "full", from: "name: shop,", to: "name: 404,", want: []string{

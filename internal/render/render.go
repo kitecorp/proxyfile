@@ -3,13 +3,13 @@
 package render
 
 import (
-	"github.com/kitecorp/proxyfile/internal/envoy"
-	"github.com/kitecorp/proxyfile/internal/model"
-	"github.com/kitecorp/proxyfile/internal/origins"
-	"github.com/kitecorp/proxyfile/internal/protofiles"
-	"github.com/kitecorp/proxyfile/internal/read"
-	"github.com/kitecorp/proxyfile/internal/rpc"
-	"github.com/kitecorp/proxyfile/internal/tree"
+	"github.com/kitecorp/proxyfile/v2/internal/envoy"
+	"github.com/kitecorp/proxyfile/v2/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/origins"
+	"github.com/kitecorp/proxyfile/v2/internal/protofiles"
+	"github.com/kitecorp/proxyfile/v2/internal/read"
+	"github.com/kitecorp/proxyfile/v2/internal/rpc"
+	"github.com/kitecorp/proxyfile/v2/internal/tree"
 )
 
 type Request struct{ Proxyfile, Out, RPCMethods, RPCTable string } // RPCMethods, RPCTable "" when not given

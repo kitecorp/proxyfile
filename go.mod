@@ -1,4 +1,4 @@
-module github.com/kitecorp/proxyfile
+module github.com/kitecorp/proxyfile/v2
 
 go 1.27.3
 

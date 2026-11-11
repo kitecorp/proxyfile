@@ -1,6 +1,6 @@
 package tree
 
-import "github.com/kitecorp/proxyfile/internal/model"
+import "github.com/kitecorp/proxyfile/v2/internal/model"
 
 // FromJSON reads a JSON file with the YAML front, which reads JSON as YAML's flow form, with each \/ in a string read
 // as /. JSON writes a slash in a string as / or \/ (RFC 8259, section 7), and go-yaml refuses \/ (found unknown

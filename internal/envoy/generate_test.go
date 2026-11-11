@@ -5,8 +5,8 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"github.com/kitecorp/proxyfile/internal/model"
-	"github.com/kitecorp/proxyfile/internal/origins"
+	"github.com/kitecorp/proxyfile/v2/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/origins"
 )
 
 // A value from the input comes out as written, whatever it holds. An environment's name can be any text: an origins
@@ -23,7 +23,7 @@ func TestInputTextComesOutAsWritten(t *testing.T) {
 			app := model.Service{Name: "app", Address: model.Text{Value: "127.0.0.1"},
 				Ports: []model.ServicePort{{Protocol: model.HTTP, Number: 3000}}}
 			in := Input{
-				Gateway: &model.Gateway{Namespace: "proxyfile", Listen: model.Port{Number: 8000}, Services: []model.Service{app},
+				Gateway: &model.Gateway{Envoy: model.Envoy{Namespace: "proxyfile"}, Listen: model.Port{Number: 8000}, Services: []model.Service{app},
 					Routes: []model.Route{{Name: model.Text{Value: "app"}, Match: model.Prefix, Value: model.Text{Value: "/"},
 						To: model.Text{Value: "app"}}}},
 				Origins: &origins.File{Environments: []origins.Environment{{Name: c.environment, Hosts: []string{"localhost"}}}},
