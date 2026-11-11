@@ -26,8 +26,12 @@ const (
 // Field describes one key of a file format. The checker reads it, and `proxyfile schema` prints it as JSON Schema,
 // so the keys an editor offers are the keys the program accepts.
 type Field struct {
-	Name     string // the key; "" for the root, list items and dictionary values
-	Doc      string // one sentence, the schema's description
+	Name string // the key; "" for the root, list items and dictionary values
+	Doc  string // one sentence, the schema's description; on a Key, what a key means, which the schema has no place for
+	// Rule completes the key's row in the documentation's key tables (Reference) with what the other fields cannot
+	// say, such as a rule the reader checks across keys or a default of Envoy's. It is Markdown, and the schema
+	// leaves it out.
+	Rule     string
 	Kind     Kind
 	Required bool
 	Fields   []Field  // Map
@@ -76,6 +80,12 @@ const (
 // the check's, and the reader's tooLarge cannot walk the provider's Either to read it from the description.
 const AgentExpect = "an IPv4 address and a port from 1 to 65535, such as 127.0.0.1:2000"
 
+// withRule returns f, written by one of the helpers here, with the Rule its key's row adds.
+func withRule(f Field, rule string) Field {
+	f.Rule = rule
+	return f
+}
+
 func port(name, doc string, required bool) Field {
 	return Field{Name: name, Doc: doc, Kind: Int, Required: required, Min: 1, Max: 65535}
 }
@@ -109,7 +119,8 @@ func first(doc string, required bool) Field {
 }
 
 func rate(doc string, required bool) Field {
-	return Field{Name: "rate", Doc: doc, Kind: Text, Required: required, Pattern: model.PercentPattern, Expect: "a whole percentage such as 5%"}
+	return Field{Name: "rate", Doc: doc, Kind: Text, Required: required, Pattern: model.PercentPattern, Expect: "a whole percentage such as 5%",
+		Rule: "From `0%` to `100%`, the form of `log.sample`."}
 }
 
 // MatchKinds are the keys of which a route writes exactly one, and ServicePorts the port keys of a service, each
@@ -117,7 +128,8 @@ func rate(doc string, required bool) Field {
 // added to either is read without a second list to keep in step.
 var (
 	MatchKinds   = []string{"prefix", "path", "pattern"}
-	ServicePorts = []Field{port("http", "The service's HTTP port.", false), port("grpc", "The service's gRPC port.", false)}
+	ServicePorts = []Field{withRule(port("http", "The service's HTTP port.", false), "Spoken as HTTP/1.1."),
+		withRule(port("grpc", "The service's gRPC port.", false), "Spoken as HTTP/2 without TLS (h2c).")}
 )
 
 // Proxyfile describes the file proxyfile reads: every key, its kind and its rule. The meaning rules that need more
@@ -129,33 +141,39 @@ var Proxyfile = Field{
 		{Name: "namespace", Doc: "The namespace of the gateway's own metadata, which the routes and the request log use; proxyfile when not written.",
 			Kind: Text, Pattern: `^[a-z][a-z0-9._-]*$`, Expect: "lower-case letters, digits, dots, - and _, starting with a letter"},
 		port("listen", "The port of the public listener, on 0.0.0.0.", true),
-		port("admin", "The port of the admin listener, on 127.0.0.1; no admin listener when not written.", false),
+		withRule(port("admin", "The port of the admin listener, on 127.0.0.1; no admin listener when not written.", false),
+			"Not the same as `listen`. It answers only `/ready`, `/stats` and `/server_info`."),
 		{Name: "limits", Doc: "Limits on memory, connections and request headers.", Kind: Map, Fields: []Field{
 			{Name: "heap", Doc: "The heap budget: the gateway shrinks its heap at 90% of it and refuses new requests at 98%.",
 				Kind: Text, Pattern: model.SizePattern, Expect: sizeExpect},
 			{Name: "connections", Doc: "The most connections at once, from clients and to each service.", Kind: Int, Min: 1, Max: largestUint32},
 			{Name: "request_headers", Doc: "The largest header block and the most header fields a request may carry.", Kind: Map, Fields: []Field{
-				{Name: "size", Doc: "The largest header block of a request.", Kind: Text, Required: true, Pattern: model.SizePattern, Expect: sizeExpect},
+				// Its own example, not the heap's: 192MiB is above the 8MiB limit the reader holds a header block to.
+				{Name: "size", Doc: "The largest header block of a request.", Kind: Text, Required: true, Pattern: model.SizePattern,
+					Expect: "a size such as 96KiB", Rule: "At most `8MiB`."},
 				{Name: "count", Doc: "The most header fields in a request.", Kind: Int, Required: true, Min: 1, Max: largestUint32},
 			}},
 		}},
 		{Name: "timeouts", Doc: "How long a request, an idle request and an idle connection to a service may last.", Kind: Map, Fields: []Field{
-			timeOrNone("request", "The longest a whole request may take."),
+			withRule(timeOrNone("request", "The longest a whole request may take."),
+				"Without it a route has Envoy's default of 15 seconds, counted from the end of the request. `none` removes the limit."),
 			timeOrNone("idle", "The longest a request may go without sending or receiving data."),
-			timeOrNone("upstream_idle", "The longest a connection to a service is kept open with no request on it."),
+			withRule(timeOrNone("upstream_idle", "The longest a connection to a service is kept open with no request on it."),
+				"Envoy's default is 1 hour."),
 		}},
-		{Name: "services", Doc: "The services behind the gateway, on the same host, by name.", Kind: Dict, Required: true,
+		{Name: "services", Doc: "The services behind the gateway, on the same host, by name.", Kind: Dict, Required: true, Rule: "At least one service.",
 			Key: &Field{Name: "service name", Kind: Text, Pattern: serviceNamePattern, Expect: serviceNameExpect},
-			Item: &Field{Doc: "One service: a port per protocol, an optional Host header and an optional address.", Kind: Map, Fields: slices.Concat(ServicePorts, []Field{
+			Item: &Field{Doc: "One service: a port per protocol, an optional Host header and an optional address.", Kind: Map, Rule: "It has at least one port.", Fields: slices.Concat(ServicePorts, []Field{
 				{Name: "host_header", Doc: "The Host header a request carries when a route sends it to this service.",
-					Kind: Text, Pattern: `^[A-Za-z0-9.:\[\]-]+$`, Expect: "a host, with an optional port"},
-				{Name: "address", Doc: "The service's IP address; 127.0.0.1 when not written.", Kind: Text, Pattern: `^[^\t\n\f\r ]+$`, Expect: "an IP address"},
+					Kind: Text, Pattern: `^[A-Za-z0-9.:\[\]-]+$`, Expect: "a host, with an optional port", Rule: "Without it a request keeps the client's Host."},
+				{Name: "address", Doc: "The service's IP address; 127.0.0.1 when not written.", Kind: Text, Pattern: `^[^\t\n\f\r ]+$`, Expect: "an IP address",
+					Rule: "Not a name: Envoy looks up no name for a static cluster."},
 			})}},
-		{Name: "auth", Doc: "The external check every request goes through before it reaches a service.", Kind: Map, Fields: []Field{
+		{Name: "auth", Doc: "The external check every request goes through before it reaches a service.", Kind: Map, Rule: "Without `auth` there is no check.", Fields: []Field{
 			{Name: "ask", Doc: "The service and the path the gateway asks.", Kind: Text, Required: true,
-				Pattern: `^[a-z][a-z0-9-]* /[^\t\n\f\r ]*$`, Expect: "a service and a path, such as accounts /check"},
+				Pattern: `^[a-z][a-z0-9-]* /[^\t\n\f\r ]*$`, Expect: "a service and a path, such as accounts /check", Rule: "The service needs an `http` port."},
 			{Name: "timeout", Doc: "How long the gateway waits for the answer.", Kind: Text, Required: true,
-				Pattern: model.TimePattern, Expect: "a time such as 2s"},
+				Pattern: model.TimePattern, Expect: "a time such as 2s", Rule: "At most `4294967295s`. `none` is not accepted."},
 			{Name: "enabled", Doc: "true runs the check on every request it applies to, false on none.", Kind: Bool, Required: true},
 			{Name: "when_unavailable", Doc: "What happens to a request when the check cannot be asked: allow lets it through, deny refuses it.",
 				Kind: Enum, Required: true, Values: []string{"allow", "deny"}},
@@ -163,60 +181,68 @@ var Proxyfile = Field{
 			// header-matcher names it reads itself, this one among them (the header match input keeps it as a
 			// LowerCaseString, http/matching/inputs.h).
 			{Name: "only_with_header", Doc: "The check runs only on requests that carry this header.",
-				Kind: Text, Pattern: lowerHeaderPattern, Expect: lowerHeaderExpect},
+				Kind: Text, Pattern: lowerHeaderPattern, Expect: lowerHeaderExpect, Rule: "A request without it, or with it empty, goes through with no check."},
 			headers("send", "The request headers the check is sent; a name ending in * is a prefix."),
 			headers("accept", "The headers of the check's answer that reach the service; a name ending in * is a prefix."),
 		}},
-		headers("remove_from_clients", "Headers removed from every client request before routing and before any filter; a name ending in * is a prefix."),
-		corsField,
+		withRule(headers("remove_from_clients", "Headers removed from every client request before routing and before any filter; a name ending in * is a prefix."),
+			"No route, filter or service sees a client's copy. Envoy holds header names in lower case, so a name with a capital would never match."),
+		withRule(corsField, "Not written when `origins` names a file, which holds its own `cors`."),
 		{Name: "origins", Doc: "The browser origins each environment admits, by environment name; or, as in 1.0, the name of an origins file, relative to this file.",
-			Kind: Either, Required: true, Expect: "a mapping of environments by name, or a file name", Choices: []Field{
+			Kind: Either, Required: true, Expect: "a mapping of environments by name, or a file name", Rule: "At least one environment.", Choices: []Field{
 				{Kind: Text, Pattern: `^[^\t\n\f\r ]+$`, Expect: "a file name"},
 				{Kind: Dict, Key: &Field{Name: "environment name", Kind: Text, Pattern: `[\s\S]`, Expect: "one character or more"},
 					Item: &Field{Doc: "One environment: its hosts and the browser origins it admits.", Kind: Map, Fields: environmentLists}},
 			}},
 		{Name: "routes", Doc: "The routes, tried in the order written; the rpc entry marks where the RPC routes go.", Kind: List, Required: true,
+			Rule: "Not empty. The rpc entry is `- rpc:` in YAML and `{ rpc { ... } }` in HOCON.",
 			Item: &Field{Kind: Either, Expect: "a mapping: a route or an rpc entry", Choices: []Field{
 				{Doc: "The place in the order where the RPC routes go.", Kind: Map, Select: "rpc", Fields: []Field{
-					{Name: "rpc", Doc: "The RPC routes: one exact-path route for each RPC method.", Kind: Map, Required: true, Fields: []Field{
-						retries("How many times an RPC call that never reached its service is tried again."),
-						{Name: "to", Doc: "The service the RPC methods of each package go to.", Kind: Dict, Required: true,
-							Key: &Field{Name: "package pattern", Kind: Text,
-								Pattern: `^(\*|[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*(\.\*)?)$`,
-								Expect:  "*, a package name ending in .*, or a full service name"},
-							Item: &Field{Kind: Either, Expect: "a service name, or a mapping with service and name", Choices: []Field{
-								serviceName("", "The service the methods go to.", false),
-								{Doc: "The service the methods go to, and the name of their routes.", Kind: Map, Fields: []Field{
-									serviceName("service", "The service the methods go to.", true),
-									{Name: "name", Doc: "The name of the routes; the service's name followed by -rpc when not written.",
-										Kind: Text, Pattern: routeNamePattern, Expect: routeNameExpect},
-								}},
-							}}},
-					}},
+					{Name: "rpc", Doc: "The RPC routes: one exact-path route for each RPC method.", Kind: Map, Required: true,
+						Rule: "At most one rpc entry in a file. It needs methods from exactly one of `rpc.methods`, `rpc.proto` and `--rpc-methods`.", Fields: []Field{
+							retries("How many times an RPC call that never reached its service is tried again."),
+							{Name: "to", Doc: "The service the RPC methods of each package go to.", Kind: Dict, Required: true, Rule: "Not empty.",
+								Key: &Field{Name: "package pattern", Kind: Text,
+									Doc: "Which services' methods go to the value: * matches every service, a package name ending in .* every service " +
+										"whose full name starts with that package and a dot, and a full service name that service alone.",
+									Pattern: `^(\*|[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*(\.\*)?)$`,
+									Expect:  "*, a package name ending in .*, or a full service name"},
+								Item: &Field{Kind: Either, Expect: "a service name, or a mapping with service and name", Rule: "The service needs a `grpc` port.", Choices: []Field{
+									serviceName("", "The service the methods go to.", false),
+									{Doc: "The service the methods go to, and the name of their routes.", Kind: Map, Fields: []Field{
+										serviceName("service", "The service the methods go to.", true),
+										{Name: "name", Doc: "The name of the routes; the service's name followed by -rpc when not written.",
+											Kind: Text, Pattern: routeNamePattern, Expect: routeNameExpect},
+									}},
+								}}},
+						}},
 				}},
 				{Doc: "A route: a name, what it matches and the service it goes to.", Kind: Map, OneOf: MatchKinds, Fields: []Field{
-					{Name: "name", Doc: "The route's name.", Kind: Text, Required: true, Pattern: routeNamePattern, Expect: routeNameExpect},
+					{Name: "name", Doc: "The route's name.", Kind: Text, Required: true, Pattern: routeNamePattern, Expect: routeNameExpect,
+						Rule: "It appears in the request log. Not used twice, and not `rpc`."},
 					path("prefix", "Matches paths that start with this text."),
 					path("path", "Matches this path exactly."),
 					// Envoy refuses an empty regex (min_len 1 on the regex field, api/envoy/type/matcher/v3/regex.proto).
 					// [\s\S] is any one character, a line end included, in RE2 and in ECMA-262, the syntax of JSON Schema
 					// patterns, so the check and the schema both refuse the empty text and nothing else.
 					{Name: "pattern", Doc: "Matches paths by this regular expression, in RE2 syntax.", Kind: Text,
-						Pattern: `[\s\S]`, Expect: "a regular expression that is not empty"},
+						Pattern: `[\s\S]`, Expect: "a regular expression that is not empty", Rule: "It must compile."},
 					{Name: "method", Doc: "Matches only requests with this HTTP method.", Kind: Text, Pattern: `^[A-Z]+$`, Expect: "an HTTP method in capitals, such as POST"},
-					serviceName("to", "The service the route goes to.", true),
-					path("rewrite", "Replaces the matched prefix or path before the request goes to the service."),
-					{Name: "auth", Doc: "off sends the route's requests to the service without the check.", Kind: Enum, Values: []string{"off"}},
+					withRule(serviceName("to", "The service the route goes to.", true), "A declared service with an `http` port."),
+					withRule(path("rewrite", "Replaces the matched prefix or path before the request goes to the service."), "Not allowed with `pattern`."),
+					{Name: "auth", Doc: "off sends the route's requests to the service without the check.", Kind: Enum, Values: []string{"off"},
+						Rule: "Needs an `auth` key."},
 					retries("How many times a request that never reached the service is tried again."),
 				}},
 			}}},
 		{Name: "rpc", Doc: "The RPC methods the gateway routes; the routes' rpc entry maps them to services.", Kind: Map,
+			Rule:  "Written here or read from `.proto` files, instead of in a methods file. Not given together with `--rpc-methods`.",
 			OneOf: []string{"methods", "proto"}, Fields: []Field{
 				{Name: "methods", Doc: "One entry for each RPC method the gateway routes, as a build writes them from the gRPC descriptors.",
-					Kind: List, Item: &methodField},
+					Kind: List, Item: &methodField, Rule: "It may be empty. Which service a method goes to is decided by the rpc entry of `routes`."},
 				protoField,
 			}},
-		{Name: "log", Doc: "Which requests the request log writes.", Kind: Map, Fields: []Field{
+		{Name: "log", Doc: "Which requests the request log writes.", Kind: Map, Rule: "Without `log`, every request is logged.", Fields: []Field{
 			{Name: "status_from", Doc: "The lowest status that is always logged.", Kind: Int, Required: true, Min: 100, Max: 599},
 			{Name: "sample", Doc: "The share of the other requests that is logged.", Kind: Text, Required: true,
 				Pattern: model.PercentPattern, Expect: "a whole percentage such as 1%"},
@@ -228,10 +254,14 @@ var Proxyfile = Field{
 // protoField is the proto key of rpc (design section 5, "RPC methods from the protobuf sources"). The reader adds the
 // two rules a description cannot hold: the roots list is not empty, and no root is written twice.
 var protoField = Field{Name: "proto", Doc: "The RPC methods, read from the .proto files under roots: each method that carries the method option named by option.",
-	Kind: Map, Fields: []Field{
-		texts("roots", "The directories of .proto files, each an import root: relative to the proxyfile's directory, or absolute.", true),
+	Kind: Map, Rule: "Compiled each time proxyfile runs. Not given with `--rpc-methods`.", Fields: []Field{
+		withRule(texts("roots", "The directories of .proto files, each an import root: relative to the proxyfile's directory, or absolute.", true),
+			"Not empty, and no directory written twice. Each is an import root, as protoc's `--proto_path` is: a file's import path "+
+				"is its path under its root, written with `/`. A relative directory is read from the proxyfile's own directory, as "+
+				"`origins: <file>` is, also when the key is written in an included file; an absolute one as written."),
 		{Name: "option", Doc: "The full name of the method option that marks a method the gateway routes.", Kind: Text, Required: true,
-			Pattern: `^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`, Expect: "an option's full name such as example.gateway.v1.route"},
+			Pattern: `^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`, Expect: "an option's full name such as example.gateway.v1.route",
+			Rule: "Written `<package>.<name>`, with no leading dot."},
 	}}
 
 // tracingField is the tracing key (design section 5, "Tracing"). The reader adds the one rule a pattern cannot hold:
@@ -250,10 +280,11 @@ var tracingField = Field{Name: "tracing", Doc: "An X-Ray segment for each sample
 					{Name: "segment", Doc: "The name of the gateway's segments, which names its node in X-Ray's service map.", Kind: Text, Required: true,
 						Pattern: `^[A-Za-z0-9 _.:/%&#=+\\@-]{1,200}$`, Expect: `1 to 200 characters: letters, digits, spaces and _ . : / % & # = + \ - @`},
 					{Name: "sample", Doc: "Which requests are traced when the request does not say: the rules, then the default. Without it, Envoy traces the first request each second and 5% of the others.",
-						Kind: Map, Fields: []Field{
+						Kind: Map, Rule: "Without it no manifest is written and Envoy's own rule applies, which is `first: 1, rate: 5%`.", Fields: []Field{
 							first("How many requests each second are traced before rate applies; 1 when not written.", false),
 							rate("The share of the other requests that is traced; 5% when not written.", false),
 							{Name: "rules", Doc: "Rules tried in the order written, before the default; the first that matches a request decides.", Kind: List,
+								Rule: "It may be empty. Each rule decides with its own `first` and `rate`.",
 								Item: &Field{Doc: "One rule: what it matches, and its own first and rate.", Kind: Map, Fields: []Field{
 									{Name: "host", Doc: "Matches the Host header, with its port when the request has one; * when not written.", Kind: Text,
 										Pattern: `^[A-Za-z0-9.:\[\]*?-]+$`, Expect: "a pattern of letters, digits, ., -, :, [, ], * and ?"},
@@ -268,7 +299,7 @@ var tracingField = Field{Name: "tracing", Doc: "An X-Ray segment for each sample
 				}},
 			}},
 		}},
-	{Name: "tags", Doc: "Annotations on each segment, by name.", Kind: Dict,
+	{Name: "tags", Doc: "Annotations on each segment, by name.", Kind: Dict, Rule: "Written order is kept, in both forms.",
 		Key: &Field{Name: "tag name", Kind: Text, Pattern: `^[A-Za-z0-9_]+$`, Expect: "letters, digits and _"},
 		Item: &Field{Doc: "One tag: the environment variable or the request header it reads, and an optional default.", Kind: Map,
 			OneOf: []string{"env", "header"}, Fields: []Field{
@@ -291,12 +322,15 @@ var (
 		{Name: "allow_headers", Doc: "The value of Access-Control-Allow-Headers.", Kind: Text},
 		{Name: "expose_headers", Doc: "The value of Access-Control-Expose-Headers.", Kind: Text},
 		{Name: "max_age", Doc: "The value of Access-Control-Max-Age: how long a browser may keep a preflight answer.",
-			Kind: Text, Pattern: `^[0-9]+$`, Expect: "a number of seconds"},
+			Kind: Text, Pattern: `^[0-9]+$`, Expect: "a number of seconds", Rule: "Written as text."},
 	}}
 	environmentLists = []Field{
-		texts("hosts", "The host names the environment serves, without a port.", true),
-		texts("origins", "The browser origins admitted exactly, each scheme://host[:port].", false),
-		texts("patterns", "The browser origins admitted by pattern, where * matches any run of characters.", false),
+		withRule(texts("hosts", "The host names the environment serves, without a port.", true),
+			"Not empty. Lower-case host names, such as `api.example.com`. No host is in two environments."),
+		withRule(texts("origins", "The browser origins admitted exactly, each scheme://host[:port].", false),
+			"Lower case, `http` or `https`, no path."),
+		withRule(texts("patterns", "The browser origins admitted by pattern, where * matches any run of characters.", false),
+			"A `*` matches dots too. Each is `scheme://host[:port]` with at least one `*`."),
 	}
 )
 
@@ -308,8 +342,10 @@ var Origins = Field{
 	Fields: []Field{
 		corsField,
 		{Name: "environments", Doc: "The environments, each with its hosts and the browser origins it admits.", Kind: List, Required: true,
+			Rule: "At least one environment.",
 			Item: &Field{Doc: "One environment.", Kind: Map, Fields: slices.Concat([]Field{
-				{Name: "name", Doc: "The environment's name.", Kind: Text, Required: true},
+				{Name: "name", Doc: "The environment's name.", Kind: Text, Required: true,
+					Rule: "It names the environment's virtual host. Not empty, and not used by another environment."},
 			}, environmentLists)}},
 	},
 }
@@ -329,6 +365,8 @@ var methodField = Field{Doc: "One RPC method.", Kind: Map, Fields: []Field{
 		Pattern: `^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$`, Expect: "a full service name such as shop.v1.CartService"},
 	{Name: "method", Doc: "The method's name.", Kind: Text, Required: true,
 		Pattern: `^[A-Za-z_][A-Za-z0-9_]*$`, Expect: "a method name such as AddItem"},
-	{Name: "action", Doc: "The action the check is told for this method.", Kind: Text},
-	texts("reports", "The reports the check is told for this method.", false),
+	{Name: "action", Doc: "The action the check is told for this method.", Kind: Text,
+		Rule: "Sent to the check in `x-gateway-action`; empty when not written."},
+	withRule(texts("reports", "The reports the check is told for this method.", false),
+		"Sent to the check in `x-gateway-reports`. No report contains a comma, because the list is sent as one value joined by commas."),
 }}
