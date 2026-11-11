@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package o.v1;
+
+import "o/v1/forms.proto";
+
+service S {
+  rpc Read(Empty) returns (Empty) {
+    option (o.v1.route) = {action: "read", reports: ["export"]};
+    option (o.v1.bare) = {action: "own", owner: "ops"};
+  }
+  rpc Open(Empty) returns (Empty) {
+    option (o.v1.route) = {};
+  }
+  rpc Quiet(Empty) returns (Empty);
+}
+
+message Empty {}

@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package o.v1;
+
+import "google/protobuf/descriptor.proto";
+
+message Route {
+  string action = 1;
+}
+
+extend google.protobuf.MethodOptions {
+  Route route = 50000;
+}
+
+service S {
+  rpc Read(Empty) returns (Empty) {
+    option (o.v1.route) = {action: "read"};
+  }
+}
+
+message Empty {}

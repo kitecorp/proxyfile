@@ -363,6 +363,18 @@
     "rpc": {
       "additionalProperties": false,
       "description": "The RPC methods the gateway routes; the routes' rpc entry maps them to services.",
+      "oneOf": [
+        {
+          "required": [
+            "methods"
+          ]
+        },
+        {
+          "required": [
+            "proto"
+          ]
+        }
+      ],
       "properties": {
         "methods": {
           "description": "One entry for each RPC method the gateway routes, as a build writes them from the gRPC descriptors.",
@@ -399,11 +411,31 @@
             "type": "object"
           },
           "type": "array"
+        },
+        "proto": {
+          "additionalProperties": false,
+          "description": "The RPC methods, read from the .proto files under roots: each method that carries the method option named by option.",
+          "properties": {
+            "option": {
+              "description": "The full name of the method option that marks a method the gateway routes.",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$",
+              "type": "string"
+            },
+            "roots": {
+              "description": "The directories of .proto files, each an import root: relative to the proxyfile's directory, or absolute.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "roots",
+            "option"
+          ],
+          "type": "object"
         }
       },
-      "required": [
-        "methods"
-      ],
       "type": "object"
     },
     "services": {

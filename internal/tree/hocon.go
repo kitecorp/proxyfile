@@ -15,9 +15,22 @@ import (
 )
 
 // FromHOCON reads the HOCON file at path into the tree the YAML front builds for the same gateway, so every check after
-// the tree reads one form. It returns either the root or the problems, never both, as FromYAML does. It takes the path,
-// not the bytes, because the library reads an include relative to the including file only when it opens that file.
-func FromHOCON(path string) (*Node, []model.Problem) {
+// the tree reads one form, and returns the files its include statements name, which are inputs of the run as much as
+// the file at path. It returns either the root and the files or the problems, never both, as FromYAML does. It takes
+// the path, not the bytes, because the library reads an include relative to the including file only when it opens
+// that file.
+//
+// The files are found in the text, before the library parses, because the library opens the included files itself
+// and does not say which (resolveInclude and loadIncludeFile, o3co internal/resolver/resolver.go:1615 and 1747, read
+// with os.ReadFile at 1769). The same scan refuses include file(...) before the library opens anything, because the
+// library reads a relative name inside file(...) from the working directory, not beside the including file
+// (resolver.go:1628-1641), so one proxyfile would read different files from different directories.
+func FromHOCON(path string) (*Node, []string, []model.Problem) {
+	files, problems := includes(path)
+	if problems != nil {
+		model.SortProblems(problems)
+		return nil, nil, problems
+	}
 	// The library's one-step parse resolves substitutions with the environment switched on (o3co hocon.go:91), and
 	// resolving falls back to os.LookupEnv for a substitution the files do not satisfy (o3co resolver.go:1135-1141).
 	// The same files must give the same bytes on every machine, so the parse leaves the substitutions in place and a
@@ -27,9 +40,9 @@ func FromHOCON(path string) (*Node, []model.Problem) {
 		config, err = config.Resolve(hocon.DefaultResolveOptions().WithUseSystemEnvironment(false))
 	}
 	if err != nil {
-		return nil, hoconProblems(path, err)
+		return nil, nil, hoconProblems(path, err)
 	}
-	return walker{file: path}.object(config, ""), nil
+	return walker{file: path}.object(config, ""), files, nil
 }
 
 // The library stops at its first error, so the error is the stage's only problem.

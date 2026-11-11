@@ -210,10 +210,12 @@ var Proxyfile = Field{
 					retries("How many times a request that never reached the service is tried again."),
 				}},
 			}}},
-		{Name: "rpc", Doc: "The RPC methods the gateway routes; the routes' rpc entry maps them to services.", Kind: Map, Fields: []Field{
-			{Name: "methods", Doc: "One entry for each RPC method the gateway routes, as a build writes them from the gRPC descriptors.",
-				Kind: List, Required: true, Item: &methodField},
-		}},
+		{Name: "rpc", Doc: "The RPC methods the gateway routes; the routes' rpc entry maps them to services.", Kind: Map,
+			OneOf: []string{"methods", "proto"}, Fields: []Field{
+				{Name: "methods", Doc: "One entry for each RPC method the gateway routes, as a build writes them from the gRPC descriptors.",
+					Kind: List, Item: &methodField},
+				protoField,
+			}},
 		{Name: "log", Doc: "Which requests the request log writes.", Kind: Map, Fields: []Field{
 			{Name: "status_from", Doc: "The lowest status that is always logged.", Kind: Int, Required: true, Min: 100, Max: 599},
 			{Name: "sample", Doc: "The share of the other requests that is logged.", Kind: Text, Required: true,
@@ -222,6 +224,15 @@ var Proxyfile = Field{
 		tracingField,
 	},
 }
+
+// protoField is the proto key of rpc (design section 5, "RPC methods from the protobuf sources"). The reader adds the
+// two rules a description cannot hold: the roots list is not empty, and no root is written twice.
+var protoField = Field{Name: "proto", Doc: "The RPC methods, read from the .proto files under roots: each method that carries the method option named by option.",
+	Kind: Map, Fields: []Field{
+		texts("roots", "The directories of .proto files, each an import root: relative to the proxyfile's directory, or absolute.", true),
+		{Name: "option", Doc: "The full name of the method option that marks a method the gateway routes.", Kind: Text, Required: true,
+			Pattern: `^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$`, Expect: "an option's full name such as example.gateway.v1.route"},
+	}}
 
 // tracingField is the tracing key (design section 5, "Tracing"). The reader adds the one rule a pattern cannot hold:
 // an agent that is an IPv4 address and a port.

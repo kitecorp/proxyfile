@@ -116,10 +116,12 @@ func TestRun(t *testing.T) {
 					t.Errorf("Proxyfile = %q, want %q", got, minimalConf)
 				}
 			}},
+		{name: "output names the proxyfile by a relative path", setup: copyMinimal, chdir: true,
+			args: "render <tmp>/gateway.yaml -o gateway.yaml", exit: 2, stderr: overwrite, also: nothingWritten("minimal", "gateway.yaml")},
 		// The methods may be written in the proxyfile, so the table's need for them is known only after the read.
 		{name: "table without methods", setup: copyMinimal,
 			args: "render <tmp>/gateway.yaml -o <tmp>/out.yaml --rpc-table <tmp>/t.json", exit: 2,
-			stderr: "proxyfile render: --rpc-table needs rpc.methods or --rpc-methods\n",
+			stderr: "proxyfile render: --rpc-table needs rpc.methods, rpc.proto or --rpc-methods\n",
 			also: func(t *testing.T, tmp string) {
 				nothingWritten("minimal")(t, tmp)
 				if _, err := os.Stat(filepath.Join(tmp, "t.json")); !errors.Is(err, fs.ErrNotExist) {
@@ -145,6 +147,9 @@ func TestRun(t *testing.T) {
 					t.Errorf("t.json = %q, want %q", got, "[]\n")
 				}
 			}},
+		// The .proto files rpc.proto reads give the methods as well, and check finds the committed table current.
+		{name: "table from rpc.proto",
+			args: "check <ex>/partial/Proxyfile -o <ex>/partial/envoy.yaml --rpc-table <ex>/partial/rpc-table.json"},
 		{name: "output names an input", setup: copyMinimal, args: "render <tmp>/gateway.yaml -o <tmp>/gateway.yaml", exit: 2,
 			stderr: overwrite, also: nothingWritten("minimal", "gateway.yaml")},
 		{name: "output names an input, another spelling", setup: copyMinimal,
@@ -170,6 +175,16 @@ func TestRun(t *testing.T) {
 					t.Errorf("origins.json changed")
 				}
 			}},
+		// A file the proxyfile includes is an input too, though no flag and no key names it.
+		{name: "output names an included file", setup: func(t *testing.T, tmp string) { copyExample(t, tmp, "partial") },
+			args: "render <tmp>/gateway.conf -o <tmp>/rpc-methods.conf", exit: 2, stderr: overwrite,
+			also: nothingWritten("partial", "rpc-methods.conf")},
+		{name: "table names an included file", setup: func(t *testing.T, tmp string) { copyExample(t, tmp, "partial") },
+			args: "render <tmp>/gateway.conf -o <tmp>/out.yaml --rpc-table <tmp>/rpc-methods.conf", exit: 2, stderr: overwrite,
+			also: nothingWritten("partial", "rpc-methods.conf")},
+		{name: "output names a .proto file", setup: func(t *testing.T, tmp string) { copyExample(t, tmp, "partial") },
+			args: "render <tmp>/Proxyfile -o <tmp>/proto/example/backend/v1/reports.proto", exit: 2, stderr: overwrite,
+			also: nothingWritten("partial", "proto/example/backend/v1/reports.proto")},
 		{name: "version", args: "version", stdout: "proxyfile v9.9.9\n"},
 		{name: "schema", args: "schema", stdout: string(testsupport.ReadFile(t, "../../schema/proxyfile.schema.json"))},
 	}
@@ -204,16 +219,11 @@ func TestRun(t *testing.T) {
 	}
 }
 
-// copyExample copies every file of examples/<name> into dir.
+// copyExample copies examples/<name> into dir, its directories included.
 func copyExample(t *testing.T, dir, name string) {
 	t.Helper()
-	entries, err := os.ReadDir(filepath.Join(examples, name))
-	if err != nil {
-		t.Fatalf("ReadDir: %v", err)
-	}
-	for _, entry := range entries {
-		data := testsupport.ReadFile(t, filepath.Join(examples, name, entry.Name()))
-		testsupport.WriteFile(t, filepath.Join(dir, entry.Name()), string(data))
+	if err := os.CopyFS(dir, os.DirFS(filepath.Join(examples, name))); err != nil {
+		t.Fatalf("CopyFS: %v", err)
 	}
 }
 
@@ -235,12 +245,18 @@ func minimalWith(text string, names ...string) func(t *testing.T, tmp string) {
 // nothingWritten returns a check that out.yaml was not written and that each named file of the row's directory still
 // holds the bytes of the same file in examples/<example>.
 func nothingWritten(example string, names ...string) func(t *testing.T, tmp string) {
+	// examples is relative to the package directory, so the example is found here, when the table is built, and not in
+	// the check, which a row that changes directory runs from its own directory.
+	dir, absErr := filepath.Abs(filepath.Join(examples, example))
 	return func(t *testing.T, tmp string) {
+		if absErr != nil {
+			t.Fatalf("Abs: %v", absErr)
+		}
 		if _, err := os.Stat(filepath.Join(tmp, "out.yaml")); !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("out.yaml: Stat error = %v, want that it does not exist", err)
 		}
 		for _, name := range names {
-			if !bytes.Equal(testsupport.ReadFile(t, filepath.Join(tmp, name)), testsupport.ReadFile(t, filepath.Join(examples, example, name))) {
+			if !bytes.Equal(testsupport.ReadFile(t, filepath.Join(tmp, name)), testsupport.ReadFile(t, filepath.Join(dir, name))) {
 				t.Errorf("%s changed", name)
 			}
 		}

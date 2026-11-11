@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package example.backend.v1;
+
+import "example/gateway/v1/route.proto";
+
+service ReportService {
+  // Routed: a browser may call it, and the check is asked for the action read.
+  rpc ListReports(ListReportsRequest) returns (ListReportsResponse) {
+    option (example.gateway.v1.route) = {action: "read", reports: ["export", "share"]};
+  }
+  // Not routed: no route option.
+  rpc RebuildReports(RebuildReportsRequest) returns (RebuildReportsResponse);
+}
+
+message ListReportsRequest {}
+message ListReportsResponse {}
+message RebuildReportsRequest {}
+message RebuildReportsResponse {}

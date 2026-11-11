@@ -55,14 +55,18 @@ func FileProblem(path, message string) []Problem {
 }
 
 // CannotRead is the problem of a file that cannot be read. Every reader of every form reports it with this one text,
-// so a missing file reads the same whichever reader met it. The problem already starts with the path, so the path an
-// os error holds is left out rather than written twice.
+// so a missing file reads the same whichever reader met it.
 func CannotRead(path string, err error) Problem {
-	reason := err.Error()
+	return Problem{Pos: Pos{File: path}, Message: "the file cannot be read: " + Reason(err)}
+}
+
+// Reason is why a file or directory cannot be read, as a problem words it. The message it goes in names the path
+// already, so the path an os error holds is left out rather than written twice.
+func Reason(err error) string {
 	if pathErr, ok := errors.AsType[*fs.PathError](err); ok {
-		reason = pathErr.Err.Error()
+		return pathErr.Err.Error()
 	}
-	return Problem{Pos: Pos{File: path}, Message: "the file cannot be read: " + reason}
+	return err.Error()
 }
 
 // Problems collects the problems of one stage. A stage goes on after a problem, so one run names every problem of

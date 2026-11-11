@@ -58,6 +58,10 @@ func TestSchemaAcceptsTheExamples(t *testing.T) {
 		{name: "tag with env and header", file: "tracing", from: "request_id: {header: x-request-id}",
 			to:   "request_id: {header: x-request-id, env: A}",
 			want: []string{`at '/tracing/tags/request_id': 'oneOf' failed, subschemas 0, 1 matched`}},
+		{name: "rpc.proto", file: "partial", extra: "rpc:\n  proto: {roots: [proto], option: example.gateway.v1.route}\n"},
+		// The checker refuses it too (TestCheck, "rpc with methods and proto").
+		{name: "rpc with methods and proto", file: "full", from: "\nrpc:\n", to: "\nrpc:\n  proto: {roots: [proto], option: o.v1.route}\n",
+			want: []string{`at '/rpc': 'oneOf' failed, subschemas 0, 1 matched`}},
 		{name: "unknown key", file: "full", extra: "listne: 1\n",
 			want: []string{`at '': additional properties 'listne' not allowed`}},
 		{name: "size in MB", file: "full", from: "heap: 256MiB", to: "heap: 256MB",

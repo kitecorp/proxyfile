@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package o.v1;
+
+import "google/protobuf/descriptor.proto";
+
+message Route {
+  string action = 1;
+  repeated string reports = 2;
+}
+
+message Bare {
+  string action = 1;
+  string owner = 2;
+}
+
+message NoAction {
+  string name = 1;
+}
+
+message BadReports {
+  string action = 1;
+  string reports = 2;
+}
+
+extend google.protobuf.MethodOptions {
+  Route route = 50000;
+  Bare bare = 50001;
+  Route unused = 50002;
+  string text = 50003;
+  repeated Route routes = 50004;
+  NoAction no_action = 50005;
+  BadReports bad_reports = 50006;
+  uint32 count = 50007;
+  int64 size = 50008;
+  repeated bytes blobs = 50009;
+}
+
+extend google.protobuf.MessageOptions {
+  Route message_route = 50000;
+}

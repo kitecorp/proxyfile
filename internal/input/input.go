@@ -11,10 +11,9 @@ import (
 	"github.com/kitecorp/proxyfile/internal/tree"
 )
 
-// Checked reads the file at path with the YAML front. The origins and methods files are JSON, which the YAML front
-// reads.
+// Checked reads the JSON file at path, an origins or a methods file, with the JSON front.
 func Checked(path string, spec format.Field) (*tree.Node, []model.Problem) {
-	return CheckedWith(path, spec, YAMLFile)
+	return CheckedWith(path, spec, JSONFile)
 }
 
 // CheckedWith reads the file at path with front and returns its tree when spec accepts it. Otherwise it returns the
@@ -36,9 +35,20 @@ func CheckedWith(path string, spec format.Field,
 
 // YAMLFile is the YAML front: it reads the file at path and builds its tree.
 func YAMLFile(path string) (*tree.Node, []model.Problem) {
+	return readWith(path, tree.FromYAML)
+}
+
+// JSONFile is the JSON front: it reads the file at path and builds its tree.
+func JSONFile(path string) (*tree.Node, []model.Problem) {
+	return readWith(path, tree.FromJSON)
+}
+
+// readWith reads the file at path and hands its bytes to front, tree.FromYAML or tree.FromJSON.
+func readWith(path string,
+	front func(file string, data []byte) (*tree.Node, []model.Problem)) (*tree.Node, []model.Problem) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, []model.Problem{model.CannotRead(path, err)}
 	}
-	return tree.FromYAML(path, data)
+	return front(path, data)
 }

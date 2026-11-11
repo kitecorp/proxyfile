@@ -1,0 +1,7 @@
+syntax = "proto3";
+
+package d.v1;
+
+import "nowhere/x.proto";
+
+message L {}

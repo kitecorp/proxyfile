@@ -70,19 +70,22 @@ func TestExamplesAreCurrent(t *testing.T) {
 	}
 }
 
-// One gateway, whichever way it is written: every file a render of the HOCON example writes equals the committed file
-// byte for byte, and TestExamplesAreCurrent keeps the committed files equal to the render of the YAML example.
+// One gateway, whichever way it is written: every file a render of each HOCON file of an example writes equals the
+// committed file byte for byte, and TestExamplesAreCurrent keeps the committed files equal to the render of the YAML
+// example.
 func TestBothFormsGiveTheSameFiles(t *testing.T) {
 	cases := []struct {
-		name  string
-		files int
-	}{{"minimal", 1}, {"partial", 2}, {"full", 2}, {"tracing", 1}}
+		name, file string // the example, and its HOCON file
+		files      int
+	}{{"minimal", "gateway.conf", 1}, {"partial", "gateway.conf", 2}, {"partial", "Proxyfile", 2}, {"full", "gateway.conf", 2},
+		{"tracing", "gateway.conf", 1}}
 	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
+		t.Run(c.name+"/"+c.file, func(t *testing.T) {
 			req := requestFor(t, c.name, "envoy.yaml")
-			req.Proxyfile = filepath.Join("..", "..", "examples", c.name, "gateway.conf")
-			// The partial HOCON example includes rpc-methods.conf and the full one writes rpc.methods, so neither takes
-			// the methods file the partial YAML example is rendered with.
+			req.Proxyfile = filepath.Join("..", "..", "examples", c.name, c.file)
+			// The partial example's gateway.conf includes rpc-methods.conf, its Proxyfile reads the .proto files under
+			// proto/, and the full one writes rpc.methods, so none takes the methods file the partial YAML example is
+			// rendered with.
 			req.RPCMethods = ""
 			files, problems := render(req)
 			if problems != nil {
@@ -149,8 +152,9 @@ func minimalNaming(t *testing.T, file string) string {
 	return strings.Replace(example, testsupport.MinimalInlineOrigins, "origins: "+file+"\n", 1)
 }
 
-// Inputs is what the command line's output-path rule protects, so it lists the origins file and the methods file
-// only when the run read them: origins and rpc.methods written in the proxyfile have no path of their own.
+// Inputs is what the command line's output-path rule protects, so it lists the files a HOCON proxyfile includes and
+// the .proto files rpc.proto reads, and the origins file and the methods file only when the run read them: origins
+// and rpc.methods written in the proxyfile have no path of their own.
 func TestInputs(t *testing.T) {
 	dir := t.TempDir()
 	testsupport.WriteFile(t, filepath.Join(dir, "g.yaml"), minimalNaming(t, "origins.json"))
@@ -169,6 +173,11 @@ func TestInputs(t *testing.T) {
 		{name: "methods file",
 			req:  Request{Proxyfile: "../../examples/partial/gateway.yaml", RPCMethods: "../../examples/partial/methods.json"},
 			want: []string{"../../examples/partial/gateway.yaml", "../../examples/partial/methods.json"}},
+		{name: "included file", req: Request{Proxyfile: "../../examples/partial/gateway.conf"},
+			want: []string{"../../examples/partial/gateway.conf", "../../examples/partial/rpc-methods.conf"}},
+		{name: ".proto files", req: Request{Proxyfile: "../../examples/partial/Proxyfile"},
+			want: []string{"../../examples/partial/Proxyfile", "../../examples/partial/proto/example/backend/v1/reports.proto",
+				"../../examples/partial/proto/example/gateway/v1/route.proto"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -196,7 +205,7 @@ func TestRenderProblems(t *testing.T) {
 	}{
 		{name: "rpc entry without methods",
 			proxyfile: "listen: 8000\nservices:\n  backend: {grpc: 5000}\norigins: origins.json\nroutes:\n  - rpc: {to: {\"*\": backend}}\n",
-			want:      []string{"g.yaml:6:5: the routes have an rpc entry, so rpc.methods or --rpc-methods must list the RPC methods"}},
+			want:      []string{"g.yaml:6:5: the routes have an rpc entry, so rpc.methods, rpc.proto or --rpc-methods must list the RPC methods"}},
 		{name: "origins file missing", proxyfile: minimal,
 			want: []string{"missing.json: the file cannot be read: no such file or directory"}},
 		// An absolute path is read as written, not under the proxyfile's directory, so the problem names it whole.
@@ -208,7 +217,7 @@ func TestRenderProblems(t *testing.T) {
 		{name: "problems of two inputs, together and sorted",
 			proxyfile: "listen: 8000\nservices:\n  backend: {grpc: 5000}\norigins: origins-absent.json\nroutes:\n  - rpc: {to: {\"*\": backend}}\n",
 			want: []string{
-				"g.yaml:6:5: the routes have an rpc entry, so rpc.methods or --rpc-methods must list the RPC methods",
+				"g.yaml:6:5: the routes have an rpc entry, so rpc.methods, rpc.proto or --rpc-methods must list the RPC methods",
 				"origins-absent.json: the file cannot be read: no such file or directory",
 			}},
 	}
@@ -229,8 +238,9 @@ func TestRenderProblems(t *testing.T) {
 	}
 }
 
-// The RPC methods written in the proxyfile give what the methods file gives, the two together are refused, and the
-// methods' own rules hold in either form.
+// The RPC methods written in the proxyfile, as rpc.methods or read from the .proto files rpc.proto names, give what the
+// methods file gives, either one together with the methods file is refused, and the methods' own rules hold in every
+// form.
 func TestInlineMethods(t *testing.T) {
 	partial := string(testsupport.ReadFile(t, "../../examples/partial/gateway.yaml")) + testsupport.PartialMethods
 	// The minimal example has no rpc entry, so methods written into it are given for no RPC route.
@@ -246,6 +256,41 @@ func TestInlineMethods(t *testing.T) {
 	}
 	twice := strings.Replace(partialConf, include, `rpc { methods = [ { service = "example.backend.v1.ReportService", method = ListReports }, `+
 		`{ service = "example.backend.v1.ReportService", method = ListReports } ] }`+"\n", 1)
+	// The partial example's .proto files by their absolute path, which is read as written.
+	protoRoot, err := filepath.Abs("../../examples/partial/proto")
+	if err != nil {
+		t.Fatal(err)
+	}
+	partialYAML := string(testsupport.ReadFile(t, "../../examples/partial/gateway.yaml"))
+	partialProto := partialYAML + "rpc:\n  proto: {roots: [" + protoRoot + "], option: example.gateway.v1.route}\n"
+	// The compiler's test tree, whose package o.v1 the mapping example.* does not match, so its methods' problems name
+	// their .proto lines.
+	formsRoot, err := filepath.Abs("../protofiles/testdata/forms")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const anyPackage = `"*": backend`
+	if !strings.Contains(partialYAML, anyPackage) {
+		t.Fatalf("the partial example holds no %q to replace", anyPackage)
+	}
+	unmatched := strings.Replace(partialYAML, anyPackage, `"example.*": backend`, 1) +
+		"rpc:\n  proto: {roots: [" + formsRoot + "], option: o.v1.route}\n"
+	// The partial example's Proxyfile with its root written whole, so the row reads the same files from a temporary
+	// directory.
+	partialProxyfile := string(testsupport.ReadFile(t, "../../examples/partial/Proxyfile"))
+	const relativeRoot = "roots = [proto]"
+	if !strings.Contains(partialProxyfile, relativeRoot) {
+		t.Fatalf("the partial Proxyfile holds no %q to replace", relativeRoot)
+	}
+	proxyfileProto := strings.Replace(partialProxyfile, relativeRoot, "roots = [\""+protoRoot+"\"]", 1)
+	// The compiler's own problems stop the run and name the place written: a root's at the root, an option's at the
+	// option key, which this one writes on a line of its own.
+	emptyRoot, err := filepath.Abs("../protofiles/testdata/empty")
+	if err != nil {
+		t.Fatal(err)
+	}
+	noProtoFile := partialYAML + "rpc:\n  proto: {roots: [" + emptyRoot + "], option: example.gateway.v1.route}\n"
+	noOption := partialYAML + "rpc:\n  proto:\n    roots: [" + protoRoot + "]\n    option: example.gateway.v1.nowhere\n"
 	cases := []struct {
 		name, file, proxyfile string // proxyfile is written to file in a temporary directory
 		rpcMethods            string // given as --rpc-methods when set
@@ -255,6 +300,20 @@ func TestInlineMethods(t *testing.T) {
 		{name: "inline gives the flag's table", file: "g.yaml", proxyfile: partial},
 		{name: "both given", file: "g.yaml", proxyfile: partial, rpcMethods: "../../examples/partial/methods.json",
 			want: []string{"g.yaml:30:3: rpc.methods is written here, so --rpc-methods must not be given"}},
+		{name: "rpc.proto at an absolute root gives the flag's table", file: "g.yaml", proxyfile: partialProto},
+		{name: "rpc.proto and the flag", file: "g.yaml", proxyfile: partialProto, rpcMethods: "../../examples/partial/methods.json",
+			want: []string{"g.yaml:30:3: rpc.proto is written here, so --rpc-methods must not be given"}},
+		{name: "HOCON: rpc.proto and the flag", file: "Proxyfile", proxyfile: proxyfileProto, rpcMethods: "../../examples/partial/methods.json",
+			want: []string{"Proxyfile: rpc.proto: rpc.proto is written here, so --rpc-methods must not be given"}},
+		{name: "rpc.proto: a method no mapping matches, at its .proto line", file: "g.yaml", proxyfile: unmatched, want: []string{
+			formsRoot + "/o/v1/s.proto:8:3: no rpc mapping matches o.v1.S",
+			formsRoot + "/o/v1/s.proto:12:3: no rpc mapping matches o.v1.S",
+		}},
+		{name: "rpc.proto: a root with no .proto file, at the root", file: "g.yaml", proxyfile: noProtoFile,
+			want: []string{"g.yaml:30:19: the root " + emptyRoot + " holds no .proto file"}},
+		{name: "rpc.proto: an option no file defines, at the option key", file: "g.yaml", proxyfile: noOption, want: []string{
+			"g.yaml:32:5: no compiled file defines the option example.gateway.v1.nowhere; the compiled files are those under " +
+				"the roots that declare a service, and the files they import"}},
 		{name: "HOCON: a method listed twice", file: "g.conf", proxyfile: twice, want: []string{
 			"g.conf: rpc.methods[1]: the method example.backend.v1.ReportService/ListReports is listed twice (first at rpc.methods[0])"}},
 		{name: "inline, no rpc entry", file: "g.yaml", proxyfile: minimalMethods,

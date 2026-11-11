@@ -113,6 +113,13 @@ func TestResolve(t *testing.T) {
 			`m.json:3:3: the report "a,b" of example.shop.v1.C/M contains a comma, the separator of x-gateway-reports`,
 			"m.json:4:3: the method example.shop.v1.C/M is listed twice (first on line 3)",
 		}},
+		// An escaped slash is read as a slash, and the method after it on the line keeps its column.
+		{name: "escaped slash", proxyfile: single.String(),
+			methods: `[{"service": "example.shop.v1.C", "method": "M", "reports": ["a\/b,c"]}, {"service": "example.shop.v1.C", "method": "M"}]`,
+			want: []string{
+				`m.json:1:2: the report "a/b,c" of example.shop.v1.C/M contains a comma, the separator of x-gateway-reports`,
+				"m.json:1:74: the method example.shop.v1.C/M is listed twice (first on line 1)",
+			}},
 		{name: "no rpc entry", example: "../../examples/minimal/gateway.yaml", methods: `[]`,
 			want: []string{"../../examples/minimal/gateway.yaml:8:1: RPC methods are given, but the routes have no rpc entry"}},
 		// Without an rpc entry no method has a target, but the rules of the methods themselves still run, so one run

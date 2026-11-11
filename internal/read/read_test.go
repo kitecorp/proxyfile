@@ -199,6 +199,21 @@ func TestReadProblems(t *testing.T) {
 			want: []string{`g.conf: cors.max_age: "max_age" must be text; quote it`}},
 		{name: "HOCON: file missing", file: "missing.conf", absent: true,
 			want: []string{`missing.conf: the file cannot be read: no such file or directory`}},
+		{name: "roots empty", document: b.Inserted(8, "rpc: {proto: {roots: [], option: o.v1.route}}"),
+			want: []string{`g.yaml:8:15: the roots list is empty`}},
+		{name: "root written twice", document: b.Inserted(8, "rpc: {proto: {roots: [proto, ../x, proto, proto], option: o.v1.route}}"),
+			want: []string{
+				`g.yaml:8:36: the root "proto" is written twice (the first on line 8)`,
+				`g.yaml:8:43: the root "proto" is written twice (the first on line 8)`,
+			}},
+		// The format check reads the tree, so the HOCON form gets the YAML form's choice rule.
+		{name: "HOCON: rpc with methods and proto", file: "g.conf", document: bHOCON + "rpc { methods = [], proto { roots = [proto], option = o.v1.route } }\n",
+			want: []string{`g.conf: rpc: exactly one of methods, proto is needed here`}},
+		{name: "HOCON: root written twice", file: "g.conf", document: bHOCON + "rpc { proto { roots = [proto, proto, proto], option = o.v1.route } }\n",
+			want: []string{
+				`g.conf: rpc.proto.roots[1]: the root "proto" is written twice (the first at rpc.proto.roots[0])`,
+				`g.conf: rpc.proto.roots[2]: the root "proto" is written twice (the first at rpc.proto.roots[0])`,
+			}},
 		// The check's pattern for agent takes digits and dots and a port of up to five digits; the reader refuses an
 		// octet above 255 and a port above 65535.
 		{name: "agent above 255", document: b.Inserted(8, "tracing: {provider: {xray: {segment: s, agent: 300.1.2.3:2000}}}"),
@@ -387,6 +402,41 @@ func TestReadFullExample(t *testing.T) {
 		{"methods", len(file.Methods), 3},
 		{"methods key", *file.MethodsKey, model.Pos{File: "../../examples/full/gateway.yaml", Line: 54, Column: 3}},
 	})
+}
+
+// rpc.proto is read as written, in both forms, with each root at its place and the keys a problem names; the roots
+// are resolved and the files read by render.
+func TestReadProto(t *testing.T) {
+	cases := []struct {
+		name, file, document string
+		want                 *Proto
+	}{
+		{name: "no rpc.proto", file: "g.yaml", document: b.String()},
+		{name: "YAML", file: "g.yaml", document: b.Inserted(8, "rpc: {proto: {roots: [proto, /abs/x], option: o.v1.route}}"),
+			want: &Proto{Key: model.Pos{File: "g.yaml", Line: 8, Column: 7}, OptionKey: model.Pos{File: "g.yaml", Line: 8, Column: 39},
+				Option: "o.v1.route",
+				Roots: []model.Text{{Value: "proto", Pos: model.Pos{File: "g.yaml", Line: 8, Column: 23}},
+					{Value: "/abs/x", Pos: model.Pos{File: "g.yaml", Line: 8, Column: 30}}}}},
+		{name: "HOCON", file: "g.conf", document: bHOCON + "rpc { proto { roots = [proto, /abs/x], option = o.v1.route } }\n",
+			want: &Proto{Key: model.Pos{File: "g.conf", Path: "rpc.proto"}, OptionKey: model.Pos{File: "g.conf", Path: "rpc.proto.option"},
+				Option: "o.v1.route",
+				Roots: []model.Text{{Value: "proto", Pos: model.Pos{File: "g.conf", Path: "rpc.proto.roots[0]"}},
+					{Value: "/abs/x", Pos: model.Pos{File: "g.conf", Path: "rpc.proto.roots[1]"}}}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			testsupport.WriteFile(t, filepath.Join(dir, c.file), c.document)
+			t.Chdir(dir)
+			file, problems := Proxyfile(c.file)
+			if problems != nil {
+				t.Fatalf("problems = %q, want none", testsupport.ProblemStrings(problems))
+			}
+			if !reflect.DeepEqual(file.Proto, c.want) {
+				t.Errorf("Proto = %+v, want %+v", file.Proto, c.want)
+			}
+		})
+	}
 }
 
 // The minimal and partial examples hold the other side of each optional key: the defaults, a check that is off and

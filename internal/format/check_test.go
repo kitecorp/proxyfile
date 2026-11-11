@@ -145,12 +145,26 @@ func TestCheck(t *testing.T) {
 		{name: "cors max_age a number", spec: Proxyfile,
 			document: m.Replaced(4, 4, "cors: {max_age: 600}", "origins:", "  all: {hosts: [localhost]}"),
 			want:     []string{`g.yaml:4:17: "max_age" must be text; quote it`}},
-		// The RPC methods may be written in the proxyfile, as the methods file writes them; rpc holds nothing else, so
-		// an rpc written without them is a mistake.
+		// The RPC methods may be written in the proxyfile, as the methods file writes them, or read from .proto files;
+		// rpc holds exactly one of the two, so an rpc written without either is a mistake, and one with both would
+		// leave one list unread.
 		{name: "rpc methods inline", spec: Proxyfile,
 			document: m.Inserted(7, "rpc: {methods: [{service: shop.v1.CartService, method: AddItem}]}")},
 		{name: "rpc without methods", spec: Proxyfile, document: m.Inserted(7, "rpc: {}"),
-			want: []string{`g.yaml:7:6: "methods" is required here`}},
+			want: []string{`g.yaml:7:6: exactly one of methods, proto is needed here`}},
+		{name: "rpc proto", spec: Proxyfile, document: m.Inserted(7, "rpc: {proto: {roots: [proto, /abs/proto], option: example.gateway.v1.route}}")},
+		{name: "rpc with methods and proto", spec: Proxyfile, document: m.Inserted(7, "rpc: {methods: [], proto: {roots: [proto], option: o.v1.route}}"),
+			want: []string{`g.yaml:7:6: exactly one of methods, proto is needed here`}},
+		{name: "rpc with a misspelt key", spec: Proxyfile, document: m.Inserted(7, "rpc: {protos: {}}"),
+			want: []string{`g.yaml:7:6: exactly one of methods, proto is needed here`, `g.yaml:7:7: unknown key "protos"; known here: methods, proto`}},
+		{name: "proto without its keys", spec: Proxyfile, document: m.Inserted(7, "rpc: {proto: {}}"),
+			want: []string{`g.yaml:7:14: "option" is required here`, `g.yaml:7:14: "roots" is required here`}},
+		{name: "proto values", spec: Proxyfile, document: m.Inserted(7, "rpc: {proto: {roots: proto, option: .o.route, root: x}}"),
+			want: []string{
+				`g.yaml:7:22: "roots" must be a list`,
+				`g.yaml:7:37: "option" must be an option's full name such as example.gateway.v1.route`,
+				`g.yaml:7:47: unknown key "root"; known here: option, roots`,
+			}},
 		{name: "tracing example", spec: Proxyfile, file: "../../examples/tracing/gateway.yaml"},
 		{name: "tracing, the fewest keys", spec: Proxyfile, document: m.Inserted(7, "tracing: {provider: {xray: {segment: example-gateway}}}")},
 		{name: "tracing without provider", spec: Proxyfile, document: m.Inserted(7, "tracing: {path_in_url: true}"),
