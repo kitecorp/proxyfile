@@ -17,7 +17,7 @@ import (
 	"github.com/kitecorp/proxyfile/internal/testsupport"
 )
 
-var update = flag.Bool("update", false, "rewrite schema/proxyfile.schema.json")
+var update = flag.Bool("update", false, "rewrite schema/proxyfile.schema.json, and the key tables of README.md and docs/")
 
 const schemaFile = "../../schema/proxyfile.schema.json"
 

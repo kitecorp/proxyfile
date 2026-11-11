@@ -122,7 +122,7 @@ func TestReadProblems(t *testing.T) {
 		{name: "decoding problems, in order",
 			document: b.Inserted(8, "limits: {request_headers: {size: 9999999999999GiB, count: 1}, heap: 9999999999999GiB}"),
 			want: []string{
-				`g.yaml:8:34: "size" must be a size such as 192MiB`,
+				`g.yaml:8:34: "size" must be a size such as 96KiB`,
 				`g.yaml:8:69: "heap" must be a size such as 192MiB`,
 			}},
 		// Envoy refuses a header block limit above 8192 KiB. The whole numbers' limits belong to the check (TestCheck).
