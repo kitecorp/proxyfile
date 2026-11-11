@@ -625,6 +625,8 @@ a JSON file that the `--rpc-methods` flag names. Which service a method goes to 
 | `action` | The action the check is told for this method, in `x-gateway-action`. | Text. Empty when not written. |
 | `reports` | The reports the check is told for this method, in `x-gateway-reports`. | A list of text. No report contains a comma, because the list is sent as one value joined by commas. |
 
+Actions and reports must not contain a newline, carriage return or NUL: Envoy cannot accept those bytes in a header value.
+
 A method listed twice is a problem.
 
 ### RPC methods from the protobuf sources
