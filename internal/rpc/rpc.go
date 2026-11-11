@@ -100,9 +100,17 @@ func Resolve(g *model.Gateway, methods []Method) ([]Route, []model.Problem) {
 		} else {
 			first[path] = method.Pos
 		}
+		if strings.ContainsAny(method.Action, "\x00\n\r") {
+			problems.Add(method.Pos, "the action %q of %s/%s contains a newline, carriage return or NUL, which a header value cannot hold",
+				method.Action, method.Service, method.Method)
+		}
 		// The route sends the reports to the check as one header value, joined by commas, so a report holding a comma
 		// would arrive as two.
 		for _, report := range method.Reports {
+			if strings.ContainsAny(report, "\x00\n\r") {
+				problems.Add(method.Pos, "the report %q of %s/%s contains a newline, carriage return or NUL, which a header value cannot hold",
+					report, method.Service, method.Method)
+			}
 			if strings.Contains(report, ",") {
 				problems.Add(method.Pos, "the report %q of %s/%s contains a comma, the separator of x-gateway-reports",
 					report, method.Service, method.Method)
