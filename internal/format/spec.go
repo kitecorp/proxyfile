@@ -5,7 +5,7 @@ import (
 	"math"
 	"slices"
 
-	"github.com/kitecorp/proxyfile/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/model"
 )
 
 // Kind is what a key's value must be. Map has the keys its Fields name and Dict the keys its writer chooses; Either
@@ -50,6 +50,16 @@ type Field struct {
 	Values   []string // Enum
 	Choices  []Field  // Either: a Text choice, and Map or Dict choices
 	Select   string   // a Map choice of an Either: chosen when the node has this key; the Map or Dict choice without Select is the default
+	// Moved names, by key, the keys of a Map that proxyfile 1.x read here and 2.0 reads at another place, with that place,
+	// so the check names it instead of calling the key unknown.
+	Moved map[string]string
+	// Reserved marks the block of a proxy proxyfile has no generator for yet (Map): it is accepted empty, and every key
+	// written in it is refused with NoGenerator.
+	Reserved bool
+	// Class is the proxy whose generator alone reads the key and every key under it that names no class of its own:
+	// envoy, nginx or haproxy. A key that names none, held by none that does, is core: every proxy can carry it
+	// (docs/portability.md).
+	Class string
 }
 
 const (
@@ -79,6 +89,14 @@ const (
 // AgentExpect is exported because the reader's message for an agent its pattern admits but ParseAgent refuses must be
 // the check's, and the reader's tooLarge cannot walk the provider's Either to read it from the description.
 const AgentExpect = "an IPv4 address and a port from 1 to 65535, such as 127.0.0.1:2000"
+
+// NoGenerator says why a target and a key of its block are refused: proxyfile has no generator for that proxy yet.
+func NoGenerator(backend string) string {
+	return "no generator for " + backend + " in this version; see docs/portability.md"
+}
+
+// core is the class of a key every proxy can carry: one that names no class and is held by no key that names one.
+const core = "core"
 
 // withRule returns f, written by one of the helpers here, with the Rule its key's row adds.
 func withRule(f Field, rule string) Field {
@@ -135,17 +153,14 @@ var (
 // Proxyfile describes the file proxyfile reads: every key, its kind and its rule. The meaning rules that need more
 // than one key, such as a route naming a declared service, belong to the reader.
 var Proxyfile = Field{
-	Doc:  "A proxyfile: one gateway, the services behind it and the routes to them, from which proxyfile writes an Envoy configuration.",
-	Kind: Map,
+	Doc:   "A proxyfile: one gateway, the services behind it and the routes to them, from which proxyfile writes an Envoy configuration.",
+	Kind:  Map,
+	Moved: map[string]string{"namespace": "envoy.namespace", "tracing": "envoy.tracing"},
 	Fields: []Field{
-		{Name: "namespace", Doc: "The namespace of the gateway's own metadata, which the routes and the request log use; proxyfile when not written.",
-			Kind: Text, Pattern: `^[a-z][a-z0-9._-]*$`, Expect: "lower-case letters, digits, dots, - and _, starting with a letter"},
 		port("listen", "The port of the public listener, on 0.0.0.0.", true),
 		withRule(port("admin", "The port of the admin listener, on 127.0.0.1; no admin listener when not written.", false),
 			"Not the same as `listen`. It answers only `/ready`, `/stats` and `/server_info`."),
-		{Name: "limits", Doc: "Limits on memory, connections and request headers.", Kind: Map, Fields: []Field{
-			{Name: "heap", Doc: "The heap budget: the gateway shrinks its heap at 90% of it and refuses new requests at 98%.",
-				Kind: Text, Pattern: model.SizePattern, Expect: sizeExpect},
+		{Name: "limits", Doc: "Limits on connections and request headers.", Kind: Map, Moved: map[string]string{"heap": "envoy.heap"}, Fields: []Field{
 			{Name: "connections", Doc: "The most connections at once, from clients and to each service.", Kind: Int, Min: 1, Max: largestUint32},
 			{Name: "request_headers", Doc: "The largest header block and the most header fields a request may carry.", Kind: Map, Fields: []Field{
 				// Its own example, not the heap's: 192MiB is above the 8MiB limit the reader holds a header block to.
@@ -247,8 +262,29 @@ var Proxyfile = Field{
 			{Name: "sample", Doc: "The share of the other requests that is logged.", Kind: Text, Required: true,
 				Pattern: model.PercentPattern, Expect: "a whole percentage such as 1%"},
 		}},
-		tracingField,
+		envoyField, reserved("nginx", "nginx"), reserved("haproxy", "HAProxy"),
 	},
+}
+
+// envoyField is the envoy block: the keys only the Envoy generator reads. proxyfile 1.x read them at the top of the
+// file and under limits; the Moved of the root and of limits names each one's new place, so a 1.x file is refused with
+// it.
+var envoyField = Field{Name: "envoy", Doc: "The settings only the Envoy generator reads: the namespace of the gateway's metadata, its heap budget, X-Ray tracing and the Connect bridge.",
+	Kind: Map, Class: "envoy", Fields: []Field{
+		{Name: "namespace", Doc: "The namespace of the gateway's own metadata, which the routes and the request log use; proxyfile when not written.",
+			Kind: Text, Pattern: `^[a-z][a-z0-9._-]*$`, Expect: "lower-case letters, digits, dots, - and _, starting with a letter"},
+		{Name: "heap", Doc: "The heap budget: the gateway shrinks its heap at 90% of it and refuses new requests at 98%.",
+			Kind: Text, Pattern: model.SizePattern, Expect: sizeExpect},
+		tracingField,
+		{Name: "connect_bridge", Doc: "true turns each Connect call on an RPC route into gRPC for the service, and the answer back into Connect; false routes gRPC calls alone. true when not written.",
+			Kind: Bool, Rule: "`false` also leaves out the Lua filter that corrects the status of the bridge's errors."},
+	}}
+
+// reserved is the block, named name, of a proxy that has no generator in this version. It is accepted empty, so a file
+// can hold it before the generator comes, and a key in it is refused rather than left unread.
+func reserved(name, proxy string) Field {
+	return Field{Name: name, Doc: "The settings only " + proxy + " will read; this version has no " + proxy + " generator, so it takes no key.",
+		Kind: Map, Reserved: true, Class: name}
 }
 
 // protoField is the proto key of rpc (design section 5, "RPC methods from the protobuf sources"). The reader adds the

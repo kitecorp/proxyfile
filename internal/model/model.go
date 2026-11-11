@@ -4,7 +4,6 @@ package model
 // later stage may name in a problem keeps the position it was written at; a default that was not written has no
 // position, and nothing refuses a default.
 type Gateway struct {
-	Namespace         string // "proxyfile" when not written
 	Listen            Port
 	Admin             *Port
 	Limits            Limits
@@ -17,7 +16,15 @@ type Gateway struct {
 	Routes            []Route // written order
 	RoutesPos         Pos     // the `routes` key
 	Log               *Log
-	Tracing           *Tracing // nil when not written
+	Envoy             Envoy
+}
+
+// Envoy is the envoy block: what only the Envoy generator reads.
+type Envoy struct {
+	Namespace     string   // "proxyfile" when not written
+	Heap          *Size    // nil when not written
+	Tracing       *Tracing // nil when not written
+	ConnectBridge bool     // true when not written
 }
 
 type Port struct {
@@ -31,7 +38,6 @@ type Text struct {
 }
 
 type Limits struct {
-	Heap           *Size
 	Connections    *Count
 	RequestHeaders *RequestHeaders
 }
@@ -154,14 +160,14 @@ type Log struct {
 	Pos           Pos // the `log` key
 }
 
-// Tracing is the tracing key: an X-Ray segment for each sampled request.
+// Tracing is the envoy.tracing key: an X-Ray segment for each sampled request.
 type Tracing struct {
 	XRay      XRay
 	Tags      []Tag // written order
 	PathInURL bool
 }
 
-// XRay is tracing.provider.xray, the one provider of 1.2.
+// XRay is envoy.tracing.provider.xray, the one provider of 1.2.
 type XRay struct {
 	Address string // the agent's IPv4 address; 127.0.0.1 when not written
 	Port    int64  // the agent's UDP port; 2000 when not written

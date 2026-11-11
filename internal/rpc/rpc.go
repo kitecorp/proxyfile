@@ -7,11 +7,11 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/kitecorp/proxyfile/internal/format"
-	"github.com/kitecorp/proxyfile/internal/input"
-	"github.com/kitecorp/proxyfile/internal/model"
-	"github.com/kitecorp/proxyfile/internal/quote"
-	"github.com/kitecorp/proxyfile/internal/tree"
+	"github.com/kitecorp/proxyfile/v2/internal/format"
+	"github.com/kitecorp/proxyfile/v2/internal/input"
+	"github.com/kitecorp/proxyfile/v2/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/quote"
+	"github.com/kitecorp/proxyfile/v2/internal/tree"
 )
 
 // Method is one entry of the methods, as written in either place.

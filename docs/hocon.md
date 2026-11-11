@@ -21,10 +21,13 @@ routes = [
 ]
 ```
 
-[`examples/full/gateway.conf`](../examples/full/gateway.conf) writes every key but `services.<name>.address` and
-`tracing` and sits beside [`examples/full/gateway.yaml`](../examples/full/gateway.yaml), which gives the same file.
-[`examples/tracing/gateway.conf`](../examples/tracing/gateway.conf) writes `tracing` and sits beside its YAML twin,
-[`examples/tracing/gateway.yaml`](../examples/tracing/gateway.yaml).
+[`examples/full/gateway.conf`](../examples/full/gateway.conf) writes every key but `services.<name>.address`,
+`envoy.tracing`, `rpc.proto` and the `nginx` and `haproxy` blocks, and sits beside
+[`examples/full/gateway.yaml`](../examples/full/gateway.yaml), which gives the same file.
+[`examples/tracing/gateway.conf`](../examples/tracing/gateway.conf) writes `envoy.tracing` and sits beside its YAML
+twin, [`examples/tracing/gateway.yaml`](../examples/tracing/gateway.yaml).
+[`examples/grpc/gateway.conf`](../examples/grpc/gateway.conf) turns `envoy.connect_bridge` off and sits beside
+[`examples/grpc/gateway.yaml`](../examples/grpc/gateway.yaml).
 [`examples/partial/gateway.conf`](../examples/partial/gateway.conf) pulls its methods in with
 `include required("rpc-methods.conf")`: a plain `include` is skipped when the file is missing, and `required` refuses it
 by name.

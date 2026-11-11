@@ -5,8 +5,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/kitecorp/proxyfile/internal/model"
-	"github.com/kitecorp/proxyfile/internal/testsupport"
+	"github.com/kitecorp/proxyfile/v2/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/testsupport"
 )
 
 // Each row compiles a tree under testdata. The roots are written at g.yaml:8:23 and g.yaml:8:30, and the option at

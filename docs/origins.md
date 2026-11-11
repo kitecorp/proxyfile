@@ -19,13 +19,13 @@ preflight, so an origin removed from the file may keep working that long in a br
 Each list is sorted in byte order and holds no value twice, so adding or removing a value changes one line.
 
 <!-- keys: origins -->
-| Key | Meaning | Rule |
-|---|---|---|
-| `origins` | The browser origins each environment admits, by environment name; or, as in 1.0, the name of an origins file, relative to this file. | Required. A mapping of environments by name, or a file name. At least one environment. |
-| `origins.<environment name>` | One environment: its hosts and the browser origins it admits. | A mapping. The environment name is one character or more. |
-| `origins.<environment name>.hosts` | The host names the environment serves, without a port. | Required. A list; each item is text. Not empty. Lower-case host names, such as `api.example.com`. No host is in two environments. |
-| `origins.<environment name>.origins` | The browser origins admitted exactly, each scheme://host\[:port\]. | A list; each item is text. Lower case, `http` or `https`, no path. |
-| `origins.<environment name>.patterns` | The browser origins admitted by pattern, where \* matches any run of characters. | A list; each item is text. A `*` matches dots too. Each is `scheme://host[:port]` with at least one `*`. |
+| Key | Meaning | Rule | Class |
+|---|---|---|---|
+| `origins` | The browser origins each environment admits, by environment name; or, as in 1.0, the name of an origins file, relative to this file. | Required. A mapping of environments by name, or a file name. At least one environment. | core |
+| `origins.<environment name>` | One environment: its hosts and the browser origins it admits. | A mapping. The environment name is one character or more. | core |
+| `origins.<environment name>.hosts` | The host names the environment serves, without a port. | Required. A list; each item is text. Not empty. Lower-case host names, such as `api.example.com`. No host is in two environments. | core |
+| `origins.<environment name>.origins` | The browser origins admitted exactly, each scheme://host\[:port\]. | A list; each item is text. Lower case, `http` or `https`, no path. | core |
+| `origins.<environment name>.patterns` | The browser origins admitted by pattern, where \* matches any run of characters. | A list; each item is text. A `*` matches dots too. Each is `scheme://host[:port]` with at least one `*`. | core |
 <!-- /keys -->
 
 ## The origins file
@@ -69,16 +69,16 @@ form report it. An origins file looks like this:
 ```
 
 <!-- keys: origins file -->
-| Key | Meaning | Rule |
-|---|---|---|
-| `cors` | The CORS settings every environment shares. | A mapping. |
-| `cors.allow_methods` | The value of Access-Control-Allow-Methods. | Text. |
-| `cors.allow_headers` | The value of Access-Control-Allow-Headers. | Text. |
-| `cors.expose_headers` | The value of Access-Control-Expose-Headers. | Text. |
-| `cors.max_age` | The value of Access-Control-Max-Age: how long a browser may keep a preflight answer. | A number of seconds. Written as text. |
-| `environments` | The environments, each with its hosts and the browser origins it admits. | Required. A list; each item is a mapping. At least one environment. |
-| `environments[].name` | The environment's name. | Required. Text. It names the environment's virtual host. Not empty, and not used by another environment. |
-| `environments[].hosts` | The host names the environment serves, without a port. | Required. A list; each item is text. Not empty. Lower-case host names, such as `api.example.com`. No host is in two environments. |
-| `environments[].origins` | The browser origins admitted exactly, each scheme://host\[:port\]. | A list; each item is text. Lower case, `http` or `https`, no path. |
-| `environments[].patterns` | The browser origins admitted by pattern, where \* matches any run of characters. | A list; each item is text. A `*` matches dots too. Each is `scheme://host[:port]` with at least one `*`. |
+| Key | Meaning | Rule | Class |
+|---|---|---|---|
+| `cors` | The CORS settings every environment shares. | A mapping. | core |
+| `cors.allow_methods` | The value of Access-Control-Allow-Methods. | Text. | core |
+| `cors.allow_headers` | The value of Access-Control-Allow-Headers. | Text. | core |
+| `cors.expose_headers` | The value of Access-Control-Expose-Headers. | Text. | core |
+| `cors.max_age` | The value of Access-Control-Max-Age: how long a browser may keep a preflight answer. | A number of seconds. Written as text. | core |
+| `environments` | The environments, each with its hosts and the browser origins it admits. | Required. A list; each item is a mapping. At least one environment. | core |
+| `environments[].name` | The environment's name. | Required. Text. It names the environment's virtual host. Not empty, and not used by another environment. | core |
+| `environments[].hosts` | The host names the environment serves, without a port. | Required. A list; each item is text. Not empty. Lower-case host names, such as `api.example.com`. No host is in two environments. | core |
+| `environments[].origins` | The browser origins admitted exactly, each scheme://host\[:port\]. | A list; each item is text. Lower case, `http` or `https`, no path. | core |
+| `environments[].patterns` | The browser origins admitted by pattern, where \* matches any run of characters. | A list; each item is text. A `*` matches dots too. Each is `scheme://host[:port]` with at least one `*`. | core |
 <!-- /keys -->

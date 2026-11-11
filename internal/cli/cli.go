@@ -11,14 +11,14 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/kitecorp/proxyfile/internal/format"
-	"github.com/kitecorp/proxyfile/internal/model"
-	"github.com/kitecorp/proxyfile/internal/render"
-	"github.com/kitecorp/proxyfile/internal/tree"
+	"github.com/kitecorp/proxyfile/v2/internal/format"
+	"github.com/kitecorp/proxyfile/v2/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/render"
+	"github.com/kitecorp/proxyfile/v2/internal/tree"
 )
 
-const usage = `usage: proxyfile render [<file>] -o <envoy.yaml> [--rpc-methods <methods.json>] [--rpc-table <table.json>]
-       proxyfile check [<file>] -o <envoy.yaml> [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+const usage = `usage: proxyfile render [<file>] -o <envoy.yaml> [--target envoy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+       proxyfile check [<file>] -o <envoy.yaml> [--target envoy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
        proxyfile schema
        proxyfile version
 `
@@ -26,6 +26,10 @@ const usage = `usage: proxyfile render [<file>] -o <envoy.yaml> [--rpc-methods <
 // defaultNames are the files render and check look for in the working directory when no file is given, in the order
 // the messages list them.
 var defaultNames = []string{"Proxyfile", "proxyfile.conf", "proxyfile.yaml", "proxyfile.yml"}
+
+// targets are the proxies --target names, in the order a message lists them. proxyfile has a generator for envoy alone
+// in this version, and refuses the other two by name rather than write an Envoy file for a gateway meant for them.
+var targets = []string{"envoy", "nginx", "haproxy"}
 
 // The exit codes: done, a problem in the input or a difference check found, and wrong usage.
 const (
@@ -101,6 +105,7 @@ func request(command string, args []string) (render.Request, error) {
 	out := flags.String("o", "", "")
 	methods := flags.String("rpc-methods", "", "")
 	table := flags.String("rpc-table", "", "")
+	target := flags.String("target", "envoy", "")
 	var files []string
 	for {
 		if err := flags.Parse(args); err != nil {
@@ -117,6 +122,10 @@ func request(command string, args []string) (render.Request, error) {
 		return render.Request{}, errors.New("-o is required")
 	case len(files) > 1:
 		return render.Request{}, errors.New("give exactly one file")
+	case !slices.Contains(targets, *target):
+		return render.Request{}, fmt.Errorf("--target must be %s, not %q", orList(targets), *target)
+	case *target != "envoy":
+		return render.Request{}, fmt.Errorf("--target %s: %s", *target, format.NoGenerator(*target))
 	}
 	if len(files) == 0 {
 		file, err := defaultFile()
@@ -139,8 +148,7 @@ func defaultFile() (string, error) {
 	}
 	switch len(found) {
 	case 0:
-		last := len(defaultNames) - 1
-		return "", fmt.Errorf("no file given and no %s or %s here", strings.Join(defaultNames[:last], ", "), defaultNames[last])
+		return "", fmt.Errorf("no file given and no %s here", orList(defaultNames))
 	case 1:
 		return found[0], nil
 	}
@@ -207,4 +215,10 @@ func compare(files []render.File, stderr io.Writer) int {
 		}
 	}
 	return exit
+}
+
+// orList joins names as a sentence lists them, "a, b or c". Each list it is given here holds two names or more.
+func orList(names []string) string {
+	last := len(names) - 1
+	return strings.Join(names[:last], ", ") + " or " + names[last]
 }

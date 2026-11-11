@@ -9,7 +9,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/kitecorp/proxyfile/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/model"
 )
 
 // includes returns the files named by the include statements of the HOCON file at path and of every file they name,

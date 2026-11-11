@@ -1,9 +1,7 @@
 # yaml-language-server: $schema=../../schema/proxyfile.schema.json
 # The other side of each optional key: no admin listener, the default namespace, a check that is off and denies
-# when it cannot be asked, one limit, one timeout, addresses that are not the default.
+# when it cannot be asked, the heap budget alone, one timeout, addresses that are not the default.
 listen: 8000
-limits:
-  heap: 64MiB
 timeouts:
   request: 30s
 services:
@@ -26,3 +24,4 @@ routes:
   - {name: login, path: /login, method: POST, to: identity, rewrite: /session, auth: off}
   - {name: web, prefix: /, to: web}
 log: {status_from: 500, sample: 0%}
+envoy: {heap: 64MiB}

@@ -11,7 +11,7 @@ import (
 
 	hocon "github.com/o3co/go.hocon"
 
-	"github.com/kitecorp/proxyfile/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/model"
 )
 
 // FromHOCON reads the HOCON file at path into the tree the YAML front builds for the same gateway, so every check after

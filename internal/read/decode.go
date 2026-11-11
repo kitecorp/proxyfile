@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/kitecorp/proxyfile/internal/format"
-	"github.com/kitecorp/proxyfile/internal/model"
-	"github.com/kitecorp/proxyfile/internal/tree"
+	"github.com/kitecorp/proxyfile/v2/internal/format"
+	"github.com/kitecorp/proxyfile/v2/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/tree"
 )
 
 // decoder fills the model from a tree format.Check accepted, so every key it finds has the kind and the form the
@@ -46,7 +46,6 @@ var lowerTimeBounds = map[string]int64{"auth.timeout": largestAuthTimeoutSeconds
 func decode(root *tree.Node) (*model.Gateway, []model.Problem) {
 	d := decoder{}
 	g := &model.Gateway{
-		Namespace:         cmp.Or(root.GetText("namespace"), "proxyfile"),
 		Listen:            *port(root.Get("listen")),
 		Admin:             port(root.Get("admin")),
 		Limits:            d.limits(root),
@@ -59,7 +58,7 @@ func decode(root *tree.Node) (*model.Gateway, []model.Problem) {
 		Routes:            d.routes(root.Get("routes")),
 		RoutesPos:         root.Entry("routes").KeyPos,
 		Log:               logSettings(root.Entry("log")),
-		Tracing:           d.tracing(root.Get("tracing")),
+		Envoy:             d.envoy(root),
 	}
 	if problems := d.Sorted(); problems != nil {
 		return nil, problems
@@ -68,7 +67,7 @@ func decode(root *tree.Node) (*model.Gateway, []model.Problem) {
 }
 
 func (d *decoder) limits(root *tree.Node) model.Limits {
-	limits := model.Limits{Heap: d.size(root, "limits", "heap"), Connections: count(root.Get("limits").Get("connections"))}
+	limits := model.Limits{Connections: count(root.Get("limits").Get("connections"))}
 	if requestHeaders := root.Get("limits").Get("request_headers"); requestHeaders != nil {
 		limits.RequestHeaders = &model.RequestHeaders{Count: *count(requestHeaders.Get("count"))}
 		if size := d.size(root, "limits", "request_headers", "size"); size != nil {
@@ -79,6 +78,17 @@ func (d *decoder) limits(root *tree.Node) model.Limits {
 		}
 	}
 	return limits
+}
+
+// envoy reads the envoy block, which holds what only the Envoy generator reads.
+func (d *decoder) envoy(root *tree.Node) model.Envoy {
+	n := root.Get("envoy")
+	return model.Envoy{
+		Namespace:     cmp.Or(n.GetText("namespace"), "proxyfile"),
+		Heap:          d.size(root, "envoy", "heap"),
+		Tracing:       d.tracing(n.Get("tracing")),
+		ConnectBridge: n.GetText("connect_bridge") != "false",
+	}
 }
 
 func (d *decoder) timeouts(root *tree.Node) model.Timeouts {

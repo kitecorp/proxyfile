@@ -6,9 +6,9 @@ package input
 import (
 	"os"
 
-	"github.com/kitecorp/proxyfile/internal/format"
-	"github.com/kitecorp/proxyfile/internal/model"
-	"github.com/kitecorp/proxyfile/internal/tree"
+	"github.com/kitecorp/proxyfile/v2/internal/format"
+	"github.com/kitecorp/proxyfile/v2/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/tree"
 )
 
 // Checked reads the JSON file at path, an origins or a methods file, with the JSON front.

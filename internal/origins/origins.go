@@ -7,10 +7,10 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/kitecorp/proxyfile/internal/format"
-	"github.com/kitecorp/proxyfile/internal/input"
-	"github.com/kitecorp/proxyfile/internal/model"
-	"github.com/kitecorp/proxyfile/internal/tree"
+	"github.com/kitecorp/proxyfile/v2/internal/format"
+	"github.com/kitecorp/proxyfile/v2/internal/input"
+	"github.com/kitecorp/proxyfile/v2/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/tree"
 )
 
 // File is the origins after reading, from either place, with every rule below checked.

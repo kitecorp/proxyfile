@@ -1,8 +1,8 @@
 package read
 
 import (
-	"github.com/kitecorp/proxyfile/internal/model"
-	"github.com/kitecorp/proxyfile/internal/tree"
+	"github.com/kitecorp/proxyfile/v2/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/tree"
 )
 
 // Proto is rpc.proto as written. render.Read resolves the roots against the proxyfile's directory and compiles the

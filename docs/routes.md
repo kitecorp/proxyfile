@@ -23,22 +23,22 @@ the longest text, and `*` is last. The order in which the patterns are written d
 pattern matches is a problem.
 
 <!-- keys: routes -->
-| Key | Meaning | Rule |
-|---|---|---|
-| `routes` | The routes, tried in the order written; the rpc entry marks where the RPC routes go. | Required. A list; each item is a mapping: a route or an rpc entry. Not empty. The rpc entry is `- rpc:` in YAML and `{ rpc { ... } }` in HOCON. |
-| `routes[].rpc` | The RPC routes: one exact-path route for each RPC method. | A mapping. At most one rpc entry in a file. It needs methods from exactly one of `rpc.methods`, `rpc.proto` and `--rpc-methods`. |
-| `routes[].rpc.retries` | How many times an RPC call that never reached its service is tried again. | A whole number from 0 to 4294967295. |
-| `routes[].rpc.to` | The service the RPC methods of each package go to. | Required. A mapping keyed by package pattern. Not empty. |
-| `routes[].rpc.to.<package pattern>` | Which services' methods go to the value: \* matches every service, a package name ending in .\* every service whose full name starts with that package and a dot, and a full service name that service alone. | A service name, or a mapping with service and name; as text, lower-case letters, digits and -, starting with a letter. The package pattern is \*, a package name ending in .\*, or a full service name. The service needs a `grpc` port. |
-| `routes[].rpc.to.<package pattern>.service` | The service the methods go to. | Required. Lower-case letters, digits and -, starting with a letter. |
-| `routes[].rpc.to.<package pattern>.name` | The name of the routes; the service's name followed by -rpc when not written. | Letters, digits, dots, - and \_. |
-| `routes[].name` | The route's name. | Required. Letters, digits, dots, - and \_. It appears in the request log. Not used twice, and not `rpc`. |
-| `routes[].prefix` | Matches paths that start with this text. | A path starting with /. Exactly one of `prefix`, `path` and `pattern` is written. |
-| `routes[].path` | Matches this path exactly. | A path starting with /. Exactly one of `prefix`, `path` and `pattern` is written. |
-| `routes[].pattern` | Matches paths by this regular expression, in RE2 syntax. | A regular expression that is not empty. It must compile. Exactly one of `prefix`, `path` and `pattern` is written. |
-| `routes[].method` | Matches only requests with this HTTP method. | An HTTP method in capitals, such as POST. |
-| `routes[].to` | The service the route goes to. | Required. Lower-case letters, digits and -, starting with a letter. A declared service with an `http` port. |
-| `routes[].rewrite` | Replaces the matched prefix or path before the request goes to the service. | A path starting with /. Not allowed with `pattern`. |
-| `routes[].auth` | off sends the route's requests to the service without the check. | `off`. Needs an `auth` key. |
-| `routes[].retries` | How many times a request that never reached the service is tried again. | A whole number from 0 to 4294967295. |
+| Key | Meaning | Rule | Class |
+|---|---|---|---|
+| `routes` | The routes, tried in the order written; the rpc entry marks where the RPC routes go. | Required. A list; each item is a mapping: a route or an rpc entry. Not empty. The rpc entry is `- rpc:` in YAML and `{ rpc { ... } }` in HOCON. | core |
+| `routes[].rpc` | The RPC routes: one exact-path route for each RPC method. | A mapping. At most one rpc entry in a file. It needs methods from exactly one of `rpc.methods`, `rpc.proto` and `--rpc-methods`. | core |
+| `routes[].rpc.retries` | How many times an RPC call that never reached its service is tried again. | A whole number from 0 to 4294967295. | core |
+| `routes[].rpc.to` | The service the RPC methods of each package go to. | Required. A mapping keyed by package pattern. Not empty. | core |
+| `routes[].rpc.to.<package pattern>` | Which services' methods go to the value: \* matches every service, a package name ending in .\* every service whose full name starts with that package and a dot, and a full service name that service alone. | A service name, or a mapping with service and name; as text, lower-case letters, digits and -, starting with a letter. The package pattern is \*, a package name ending in .\*, or a full service name. The service needs a `grpc` port. | core |
+| `routes[].rpc.to.<package pattern>.service` | The service the methods go to. | Required. Lower-case letters, digits and -, starting with a letter. | core |
+| `routes[].rpc.to.<package pattern>.name` | The name of the routes; the service's name followed by -rpc when not written. | Letters, digits, dots, - and \_. | core |
+| `routes[].name` | The route's name. | Required. Letters, digits, dots, - and \_. It appears in the request log. Not used twice, and not `rpc`. | core |
+| `routes[].prefix` | Matches paths that start with this text. | A path starting with /. Exactly one of `prefix`, `path` and `pattern` is written. | core |
+| `routes[].path` | Matches this path exactly. | A path starting with /. Exactly one of `prefix`, `path` and `pattern` is written. | core |
+| `routes[].pattern` | Matches paths by this regular expression, in RE2 syntax. | A regular expression that is not empty. It must compile. Exactly one of `prefix`, `path` and `pattern` is written. | core |
+| `routes[].method` | Matches only requests with this HTTP method. | An HTTP method in capitals, such as POST. | core |
+| `routes[].to` | The service the route goes to. | Required. Lower-case letters, digits and -, starting with a letter. A declared service with an `http` port. | core |
+| `routes[].rewrite` | Replaces the matched prefix or path before the request goes to the service. | A path starting with /. Not allowed with `pattern`. | core |
+| `routes[].auth` | off sends the route's requests to the service without the check. | `off`. Needs an `auth` key. | core |
+| `routes[].retries` | How many times a request that never reached the service is tried again. | A whole number from 0 to 4294967295. | core |
 <!-- /keys -->

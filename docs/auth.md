@@ -21,14 +21,14 @@ service needs no Envoy-specific type.
   own idle timeout, so the gateway closes an idle connection first.
 
 <!-- keys: auth -->
-| Key | Meaning | Rule |
-|---|---|---|
-| `auth` | The external check every request goes through before it reaches a service. | A mapping. Without `auth` there is no check. |
-| `auth.ask` | The service and the path the gateway asks. | Required. A service and a path, such as accounts /check. The service needs an `http` port. |
-| `auth.timeout` | How long the gateway waits for the answer. | Required. A time such as 2s. At most `4294967295s`. `none` is not accepted. |
-| `auth.enabled` | true runs the check on every request it applies to, false on none. | Required. `true` or `false`. |
-| `auth.when_unavailable` | What happens to a request when the check cannot be asked: allow lets it through, deny refuses it. | Required. `allow` or `deny`. |
-| `auth.only_with_header` | The check runs only on requests that carry this header. | A lower-case header name. A request without it, or with it empty, goes through with no check. |
-| `auth.send` | The request headers the check is sent; a name ending in \* is a prefix. | A list; each item is a lower-case header name, or a prefix ending in \*. |
-| `auth.accept` | The headers of the check's answer that reach the service; a name ending in \* is a prefix. | A list; each item is a lower-case header name, or a prefix ending in \*. |
+| Key | Meaning | Rule | Class |
+|---|---|---|---|
+| `auth` | The external check every request goes through before it reaches a service. | A mapping. Without `auth` there is no check. | core |
+| `auth.ask` | The service and the path the gateway asks. | Required. A service and a path, such as accounts /check. The service needs an `http` port. | core |
+| `auth.timeout` | How long the gateway waits for the answer. | Required. A time such as 2s. At most `4294967295s`. `none` is not accepted. | core |
+| `auth.enabled` | true runs the check on every request it applies to, false on none. | Required. `true` or `false`. | core |
+| `auth.when_unavailable` | What happens to a request when the check cannot be asked: allow lets it through, deny refuses it. | Required. `allow` or `deny`. | core |
+| `auth.only_with_header` | The check runs only on requests that carry this header. | A lower-case header name. A request without it, or with it empty, goes through with no check. | core |
+| `auth.send` | The request headers the check is sent; a name ending in \* is a prefix. | A list; each item is a lower-case header name, or a prefix ending in \*. | core |
+| `auth.accept` | The headers of the check's answer that reach the service; a name ending in \* is a prefix. | A list; each item is a lower-case header name, or a prefix ending in \*. | core |
 <!-- /keys -->

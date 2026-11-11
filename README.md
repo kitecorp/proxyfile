@@ -10,7 +10,7 @@ forgets to render.
 
 ```mermaid
 flowchart LR
-    source["proxyfile<br/>YAML or HOCON"] --> render["proxyfile render"]
+    source["proxyfile, YAML or HOCON:<br/>core keys, envoy block"] --> render["proxyfile render<br/>--target envoy"]
     protos[".proto files"] -->|rpc.proto| render
     render --> generated["envoy.yaml<br/>committed"]
     generated --> check["proxyfile check<br/>in the build: renders again,<br/>refuses a drift"]
@@ -28,8 +28,8 @@ The release has `proxyfile-linux-amd64`, `proxyfile-linux-arm64`, `proxyfile-dar
 `proxyfile-darwin-arm64`, with `checksums.txt` and `proxyfile.schema.json` beside them.
 
 ```sh
-curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v1.3.0/proxyfile-linux-amd64
-curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v1.3.0/checksums.txt
+curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v2.0.0/proxyfile-linux-amd64
+curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v2.0.0/checksums.txt
 shasum -a 256 -c --ignore-missing checksums.txt
 install -m 0755 proxyfile-linux-amd64 /usr/local/bin/proxyfile
 ```
@@ -37,20 +37,20 @@ install -m 0755 proxyfile-linux-amd64 /usr/local/bin/proxyfile
 In a Dockerfile, copy the program out of the image. The image holds `/proxyfile` and nothing else.
 
 ```dockerfile
-COPY --from=ghcr.io/kitecorp/proxyfile:1.3.0 /proxyfile /usr/local/bin/proxyfile
+COPY --from=ghcr.io/kitecorp/proxyfile:2.0.0 /proxyfile /usr/local/bin/proxyfile
 ```
 
 With Go installed (the Go version `go.mod` names or newer):
 
 ```sh
-go install github.com/kitecorp/proxyfile/cmd/proxyfile@v1.3.0
+go install github.com/kitecorp/proxyfile/v2/cmd/proxyfile@v2.0.0
 ```
 
 ## Commands
 
 ```
-usage: proxyfile render [<file>] -o <envoy.yaml> [--rpc-methods <methods.json>] [--rpc-table <table.json>]
-       proxyfile check [<file>] -o <envoy.yaml> [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+usage: proxyfile render [<file>] -o <envoy.yaml> [--target envoy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+       proxyfile check [<file>] -o <envoy.yaml> [--target envoy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
        proxyfile schema
        proxyfile version
 ```
@@ -69,28 +69,32 @@ A proxyfile is written in YAML or in HOCON, with the same keys in both, and both
 `Proxyfile` or ending in `.conf` is HOCON, and one ending in `.yaml` or `.yml` is YAML. With no file named, proxyfile
 reads `Proxyfile`, `proxyfile.conf`, `proxyfile.yaml` or `proxyfile.yml` from the working directory. Only `listen`,
 `services`, `origins` and `routes` are required. [docs/format.md](docs/format.md) holds a file with every key but
-`tracing` and `services.<name>.address`, and the rules across keys, [docs/hocon.md](docs/hocon.md) the HOCON form, and
-[docs/defaults.md](docs/defaults.md) what every gateway gets with no key.
+`envoy.tracing`, `services.<name>.address`, `rpc.proto` and the `nginx` and `haproxy` blocks, and the rules across keys,
+[docs/hocon.md](docs/hocon.md) the HOCON form, and [docs/defaults.md](docs/defaults.md) what every gateway gets with no
+key. [docs/portability.md](docs/portability.md) says which keys every proxy can carry and which belong to Envoy alone,
+and [From 1.x to 2.0](docs/format.md#from-1x-to-20) which keys a 1.x file moves.
 
 ## Keys
 
-Each key's page says what it does and holds a table of every key under it, written from the format description that
-the checker and the schema read.
+Each key's page says what it does and holds a table of every key under it, written from the format description that the
+checker and the schema read. Each key's class follows its link: `core` for a key every proxy can carry, or the proxy
+whose block holds it ([docs/portability.md](docs/portability.md)).
 
-- [`namespace`](docs/listener.md): The namespace of the gateway's own metadata, which the routes and the request log use; proxyfile when not written.
-- [`listen`](docs/listener.md): The port of the public listener, on 0.0.0.0.
-- [`admin`](docs/listener.md): The port of the admin listener, on 127.0.0.1; no admin listener when not written.
-- [`limits`](docs/limits.md): Limits on memory, connections and request headers.
-- [`timeouts`](docs/timeouts.md): How long a request, an idle request and an idle connection to a service may last.
-- [`services`](docs/services.md): The services behind the gateway, on the same host, by name.
-- [`auth`](docs/auth.md): The external check every request goes through before it reaches a service.
-- [`remove_from_clients`](docs/listener.md): Headers removed from every client request before routing and before any filter; a name ending in \* is a prefix.
-- [`cors`](docs/cors.md): The CORS settings every environment shares.
-- [`origins`](docs/origins.md): The browser origins each environment admits, by environment name; or, as in 1.0, the name of an origins file, relative to this file.
-- [`routes`](docs/routes.md): The routes, tried in the order written; the rpc entry marks where the RPC routes go.
-- [`rpc`](docs/rpc.md): The RPC methods the gateway routes; the routes' rpc entry maps them to services.
-- [`log`](docs/log.md): Which requests the request log writes.
-- [`tracing`](docs/tracing.md): An X-Ray segment for each sampled request, sent to an agent over UDP.
+- [`listen`](docs/listener.md) (core): The port of the public listener, on 0.0.0.0.
+- [`admin`](docs/listener.md) (core): The port of the admin listener, on 127.0.0.1; no admin listener when not written.
+- [`limits`](docs/limits.md) (core): Limits on connections and request headers.
+- [`timeouts`](docs/timeouts.md) (core): How long a request, an idle request and an idle connection to a service may last.
+- [`services`](docs/services.md) (core): The services behind the gateway, on the same host, by name.
+- [`auth`](docs/auth.md) (core): The external check every request goes through before it reaches a service.
+- [`remove_from_clients`](docs/listener.md) (core): Headers removed from every client request before routing and before any filter; a name ending in \* is a prefix.
+- [`cors`](docs/cors.md) (core): The CORS settings every environment shares.
+- [`origins`](docs/origins.md) (core): The browser origins each environment admits, by environment name; or, as in 1.0, the name of an origins file, relative to this file.
+- [`routes`](docs/routes.md) (core): The routes, tried in the order written; the rpc entry marks where the RPC routes go.
+- [`rpc`](docs/rpc.md) (core): The RPC methods the gateway routes; the routes' rpc entry maps them to services.
+- [`log`](docs/log.md) (core): Which requests the request log writes.
+- [`envoy`](docs/envoy.md) (envoy): The settings only the Envoy generator reads: the namespace of the gateway's metadata, its heap budget, X-Ray tracing and the Connect bridge.
+- [`nginx`](docs/portability.md) (nginx): The settings only nginx will read; this version has no nginx generator, so it takes no key.
+- [`haproxy`](docs/portability.md) (haproxy): The settings only HAProxy will read; this version has no HAProxy generator, so it takes no key.
 
 ## Editors
 

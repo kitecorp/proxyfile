@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kitecorp/proxyfile/internal/model"
-	"github.com/kitecorp/proxyfile/internal/testsupport"
+	"github.com/kitecorp/proxyfile/v2/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/testsupport"
 )
 
 func TestFromHOCONAccepts(t *testing.T) {

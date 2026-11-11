@@ -4,17 +4,17 @@
 `rpc.proto`, and the rpc entry of [routes](routes.md) sends them to the services.
 
 <!-- keys: rpc -->
-| Key | Meaning | Rule |
-|---|---|---|
-| `rpc` | The RPC methods the gateway routes; the routes' rpc entry maps them to services. | A mapping. Written here or read from `.proto` files, instead of in a methods file. Not given together with `--rpc-methods`. |
-| `rpc.methods` | One entry for each RPC method the gateway routes, as a build writes them from the gRPC descriptors. | A list; each item is a mapping. It may be empty. Which service a method goes to is decided by the rpc entry of `routes`. Exactly one of `methods` and `proto` is written. |
-| `rpc.methods[].service` | The full name of the method's service. | Required. A full service name such as shop.v1.CartService. |
-| `rpc.methods[].method` | The method's name. | Required. A method name such as AddItem. |
-| `rpc.methods[].action` | The action the check is told for this method. | Text. Sent to the check in `x-gateway-action`; empty when not written. |
-| `rpc.methods[].reports` | The reports the check is told for this method. | A list; each item is text. Sent to the check in `x-gateway-reports`. No report contains a comma, because the list is sent as one value joined by commas. |
-| `rpc.proto` | The RPC methods, read from the .proto files under roots: each method that carries the method option named by option. | A mapping. Compiled each time proxyfile runs. Not given with `--rpc-methods`. Exactly one of `methods` and `proto` is written. |
-| `rpc.proto.roots` | The directories of .proto files, each an import root: relative to the proxyfile's directory, or absolute. | Required. A list; each item is text. Not empty, and no directory written twice. Each is an import root, as protoc's `--proto_path` is: a file's import path is its path under its root, written with `/`. A relative directory is read from the proxyfile's own directory, as `origins: <file>` is, also when the key is written in an included file; an absolute one as written. |
-| `rpc.proto.option` | The full name of the method option that marks a method the gateway routes. | Required. An option's full name such as example.gateway.v1.route. Written `<package>.<name>`, with no leading dot. |
+| Key | Meaning | Rule | Class |
+|---|---|---|---|
+| `rpc` | The RPC methods the gateway routes; the routes' rpc entry maps them to services. | A mapping. Written here or read from `.proto` files, instead of in a methods file. Not given together with `--rpc-methods`. | core |
+| `rpc.methods` | One entry for each RPC method the gateway routes, as a build writes them from the gRPC descriptors. | A list; each item is a mapping. It may be empty. Which service a method goes to is decided by the rpc entry of `routes`. Exactly one of `methods` and `proto` is written. | core |
+| `rpc.methods[].service` | The full name of the method's service. | Required. A full service name such as shop.v1.CartService. | core |
+| `rpc.methods[].method` | The method's name. | Required. A method name such as AddItem. | core |
+| `rpc.methods[].action` | The action the check is told for this method. | Text. Sent to the check in `x-gateway-action`; empty when not written. | core |
+| `rpc.methods[].reports` | The reports the check is told for this method. | A list; each item is text. Sent to the check in `x-gateway-reports`. No report contains a comma, because the list is sent as one value joined by commas. | core |
+| `rpc.proto` | The RPC methods, read from the .proto files under roots: each method that carries the method option named by option. | A mapping. Compiled each time proxyfile runs. Not given with `--rpc-methods`. Exactly one of `methods` and `proto` is written. | core |
+| `rpc.proto.roots` | The directories of .proto files, each an import root: relative to the proxyfile's directory, or absolute. | Required. A list; each item is text. Not empty, and no directory written twice. Each is an import root, as protoc's `--proto_path` is: a file's import path is its path under its root, written with `/`. A relative directory is read from the proxyfile's own directory, as `origins: <file>` is, also when the key is written in an included file; an absolute one as written. | core |
+| `rpc.proto.option` | The full name of the method option that marks a method the gateway routes. | Required. An option's full name such as example.gateway.v1.route. Written `<package>.<name>`, with no leading dot. | core |
 <!-- /keys -->
 
 ## The methods file
@@ -34,12 +34,12 @@ written as `rpc.methods`, it is the same list.
 ```
 
 <!-- keys: methods file -->
-| Key | Meaning | Rule |
-|---|---|---|
-| `service` | The full name of the method's service. | Required. A full service name such as shop.v1.CartService. |
-| `method` | The method's name. | Required. A method name such as AddItem. |
-| `action` | The action the check is told for this method. | Text. Sent to the check in `x-gateway-action`; empty when not written. |
-| `reports` | The reports the check is told for this method. | A list; each item is text. Sent to the check in `x-gateway-reports`. No report contains a comma, because the list is sent as one value joined by commas. |
+| Key | Meaning | Rule | Class |
+|---|---|---|---|
+| `service` | The full name of the method's service. | Required. A full service name such as shop.v1.CartService. | core |
+| `method` | The method's name. | Required. A method name such as AddItem. | core |
+| `action` | The action the check is told for this method. | Text. Sent to the check in `x-gateway-action`; empty when not written. | core |
+| `reports` | The reports the check is told for this method. | A list; each item is text. Sent to the check in `x-gateway-reports`. No report contains a comma, because the list is sent as one value joined by commas. | core |
 <!-- /keys -->
 
 A method listed twice is a problem.

@@ -16,10 +16,12 @@ directory, and exactly one of them must exist.
 
 `--help`, `-h` and `help` print the usage text on standard output and exit with 0.
 
-The flags may stand before or after the file. A proxyfile with an rpc entry (`- rpc:` in YAML, `{ rpc { ... } }` in
-HOCON) takes its methods from exactly one of `rpc.methods`, `rpc.proto` and `--rpc-methods`, and methods given with
-no rpc entry are refused. `--rpc-table` needs one of the three. An output path may not name the proxyfile,
-a file it includes, its origins file, its methods file or a `.proto` file it reads, nor the other output.
+The flags may stand before or after the file. `--target` names the proxy the configuration is for: `envoy`, the default,
+is the one this version writes, and `nginx` and `haproxy` are refused until each has a generator
+([Portability](portability.md)). A proxyfile with an rpc entry (`- rpc:` in YAML, `{ rpc { ... } }` in HOCON) takes its
+methods from exactly one of `rpc.methods`, `rpc.proto` and `--rpc-methods`, and methods given with no rpc entry are
+refused. `--rpc-table` needs one of the three. An output path may not name the proxyfile, a file it includes, its
+origins file, its methods file or a `.proto` file it reads, nor the other output.
 
 The generated file starts with this line, and the same input always gives the same bytes:
 
@@ -48,5 +50,5 @@ a YAML file gives:
 
 ```
 gateway.yaml:3:1: "listen" is required here
-gateway.yaml:3:1: unknown key "liste"; known here: admin, auth, cors, limits, listen, log, namespace, origins, remove_from_clients, routes, rpc, services, timeouts, tracing
+gateway.yaml:3:1: unknown key "liste"; known here: admin, auth, cors, envoy, haproxy, limits, listen, log, nginx, origins, remove_from_clients, routes, rpc, services, timeouts
 ```
