@@ -32,10 +32,11 @@ Each list is sorted in byte order and holds no value twice, so adding or removin
 
 When `origins` names a file, a relative path is read from the proxyfile's directory, and an absolute path as written.
 Written in the proxyfile, `origins` is instead a mapping from each environment's name to its `hosts`, `origins` and
-`patterns`, and `cors` is a key of its own beside it, as [`examples/full/gateway.yaml`](../examples/full/gateway.yaml)
-shows. Every key and rule below holds in both places, with two differences. The file writes an environment's name as
-`name`, and the proxyfile as the key. A HOCON proxyfile merges an environment written twice, where the file and the YAML
-form report it. An origins file looks like this:
+`patterns`, and `cors` is a key of its own beside it, as
+[`examples/full/yaml/proxyfile.yaml`](../examples/full/yaml/proxyfile.yaml) shows. Every key and rule below holds in
+both places, with two differences. The file writes an environment's name as `name`, and the proxyfile as the key. A
+HOCON proxyfile merges an environment written twice, where the file and the YAML form report it. An origins file looks
+like this:
 
 ```json
 {

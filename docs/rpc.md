@@ -50,18 +50,19 @@ A method listed twice is a problem.
 compiles the files in memory each time it renders or checks, so no list of methods is written anywhere. In YAML, it
 reads `rpc: {proto: {roots: [proto], option: example.gateway.v1.route}}`.
 
-The same in HOCON, as it stands in `examples/partial/Proxyfile`:
+The same in HOCON, as it stands in `examples/partial/proto-methods/Proxyfile`, whose root `../proto` is read from the
+file's own directory and so names `examples/partial/proto`:
 
 ```hocon
 rpc {
   proto {
-    roots = [proto]
+    roots = [../proto]
     option = example.gateway.v1.route
   }
 }
 ```
 
-[`examples/partial/Proxyfile`](../examples/partial/Proxyfile) holds the whole gateway.
+[`examples/partial/proto-methods/Proxyfile`](../examples/partial/proto-methods/Proxyfile) holds the whole gateway.
 
 The roots hold two files, first `example/gateway/v1/route.proto`, which declares the option:
 

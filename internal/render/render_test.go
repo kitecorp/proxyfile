@@ -27,7 +27,7 @@ var update = flag.Bool("update", false, "rewrite the generated files of examples
 func TestExampleTrees(t *testing.T) {
 	for _, name := range []string{"minimal", "partial", "full"} {
 		t.Run(name, func(t *testing.T) {
-			req := requestFor(t, name, "envoy.yaml")
+			req := requestFor(t, name+"/yaml", "envoy.yaml")
 			files, problems := render(req)
 			if problems != nil {
 				t.Fatalf("render problems = %q, want none", testsupport.ProblemStrings(problems))
@@ -47,11 +47,12 @@ func TestExampleTrees(t *testing.T) {
 	}
 }
 
-// TestExamplesAreCurrent keeps the committed outputs of examples/ equal to what render writes; -update rewrites them.
+// TestExamplesAreCurrent keeps the committed outputs in each folder of examples/ equal to what render writes from the
+// proxyfile beside them; -update rewrites them.
 func TestExamplesAreCurrent(t *testing.T) {
-	for _, name := range []string{"minimal", "partial", "full", "tracing", "grpc"} {
-		t.Run(name, func(t *testing.T) {
-			files, problems := render(requestFor(t, name, filepath.Join("..", "..", "examples", name, "envoy.yaml")))
+	for _, form := range testsupport.ExampleForms {
+		t.Run(form.Dir, func(t *testing.T) {
+			files, problems := render(requestFor(t, form.Dir, filepath.Join(exampleDir(form.Dir), "envoy.yaml")))
 			if problems != nil {
 				t.Fatalf("render problems = %q, want none", testsupport.ProblemStrings(problems))
 			}
@@ -62,7 +63,7 @@ func TestExamplesAreCurrent(t *testing.T) {
 					}
 					continue
 				}
-				if d := committedDifference(t, name, file); d != "" {
+				if d := committedDifference(t, form.Dir, file); d != "" {
 					t.Errorf("%s\n  run the test with -update to write what render writes", d)
 				}
 			}
@@ -70,32 +71,57 @@ func TestExamplesAreCurrent(t *testing.T) {
 	}
 }
 
-// One gateway, whichever way it is written: every file a render of each HOCON file of an example writes equals the
-// committed file byte for byte, and TestExamplesAreCurrent keeps the committed files equal to the render of the YAML
-// example.
+// testsupport.ExampleForms is the list every example test reads, so it names each folder that commits an envoy.yaml,
+// and says Table exactly where the folder commits rpc-table.json; a folder or a table it leaves out is never compared.
+func TestExampleFormsMatchTheFolders(t *testing.T) {
+	root := filepath.Join("..", "..", "examples")
+	outputs, err := filepath.Glob(filepath.Join(root, "*", "*", "envoy.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onDisk []string
+	for _, out := range outputs {
+		dir := filepath.Dir(out)
+		rel, err := filepath.Rel(root, dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, statErr := os.Stat(filepath.Join(dir, "rpc-table.json"))
+		onDisk = append(onDisk, fmt.Sprintf("%s table=%t", filepath.ToSlash(rel), statErr == nil))
+	}
+	// Both lists are sorted as strings, because Glob sorts by path, which can differ from the order of these strings.
+	slices.Sort(onDisk)
+	var listed []string
+	for _, form := range testsupport.ExampleForms {
+		listed = append(listed, fmt.Sprintf("%s table=%t", form.Dir, form.Table))
+	}
+	slices.Sort(listed)
+	if !slices.Equal(listed, onDisk) {
+		t.Errorf("testsupport.ExampleForms = %q, want the folders on disk %q", listed, onDisk)
+	}
+}
+
+// One gateway, whichever way it is written: every file a render of each other form of an example writes equals the
+// file its yaml folder commits, byte for byte, and TestExamplesAreCurrent keeps the yaml folder's files equal to the
+// render of the YAML form.
 func TestBothFormsGiveTheSameFiles(t *testing.T) {
-	cases := []struct {
-		name, file string // the example, and its HOCON file
-		files      int
-	}{{"minimal", "gateway.conf", 1}, {"partial", "gateway.conf", 2}, {"partial", "Proxyfile", 2}, {"full", "gateway.conf", 2},
-		{"tracing", "gateway.conf", 1}, {"grpc", "gateway.conf", 1}}
-	for _, c := range cases {
-		t.Run(c.name+"/"+c.file, func(t *testing.T) {
-			req := requestFor(t, c.name, "envoy.yaml")
-			req.Proxyfile = filepath.Join("..", "..", "examples", c.name, c.file)
-			// The partial example's gateway.conf includes rpc-methods.conf, its Proxyfile reads the .proto files under
-			// proto/, and the full one writes rpc.methods, so none takes the methods file the partial YAML example is
-			// rendered with.
-			req.RPCMethods = ""
+	for _, form := range testsupport.ExampleForms {
+		example, _, _ := strings.Cut(form.Dir, "/")
+		yamlDir := example + "/yaml"
+		if form.Dir == yamlDir {
+			continue
+		}
+		t.Run(form.Dir, func(t *testing.T) {
+			req := requestFor(t, form.Dir, "envoy.yaml")
 			files, problems := render(req)
 			if problems != nil {
 				t.Fatalf("render problems = %q, want none", testsupport.ProblemStrings(problems))
 			}
-			if len(files) != c.files {
-				t.Fatalf("render wrote %d files %q, want %d", len(files), paths(files), c.files)
+			if got, want := len(files), len(outputs(requestFor(t, yamlDir, "envoy.yaml"))); got != want {
+				t.Fatalf("render wrote %d files %q, want %d, as many as %s commits", got, paths(files), want, yamlDir)
 			}
 			for _, file := range files {
-				if d := committedDifference(t, c.name, file); d != "" {
+				if d := committedDifference(t, yamlDir, file); d != "" {
 					t.Errorf("rendered from %s: %s", req.Proxyfile, d)
 				}
 			}
@@ -103,12 +129,12 @@ func TestBothFormsGiveTheSameFiles(t *testing.T) {
 	}
 }
 
-// committedDifference returns "" when file holds the bytes of the file of the same name committed in
-// examples/<example>, and otherwise names the line, counted from 1, where the two first differ, with that line of
-// each, so a failure points at the line to read instead of printing two whole files.
-func committedDifference(t *testing.T, example string, file File) string {
+// committedDifference returns "" when file holds the bytes of the file of the same name committed in the example
+// folder dir, <example>/<form>, and otherwise names the line, counted from 1, where the two first differ, with that
+// line of each, so a failure points at the line to read instead of printing two whole files.
+func committedDifference(t *testing.T, dir string, file File) string {
 	t.Helper()
-	path := filepath.Join("..", "..", "examples", example, filepath.Base(file.Path))
+	path := filepath.Join(exampleDir(dir), filepath.Base(file.Path))
 	committed := testsupport.ReadFile(t, path)
 	if bytes.Equal(file.Bytes, committed) {
 		return ""
@@ -145,7 +171,7 @@ func lineAt(data []byte, start int) string {
 // which no example writes.
 func minimalNaming(t *testing.T, file string) string {
 	t.Helper()
-	example := string(testsupport.ReadFile(t, "../../examples/minimal/gateway.yaml"))
+	example := string(testsupport.ReadFile(t, "../../examples/minimal/yaml/proxyfile.yaml"))
 	if !strings.Contains(example, testsupport.MinimalInlineOrigins) {
 		t.Fatalf("the minimal example holds no %q to replace", testsupport.MinimalInlineOrigins)
 	}
@@ -164,19 +190,20 @@ func TestInputs(t *testing.T) {
 		req  Request
 		want []string // <dir> stands for the test's temporary directory
 	}{
-		{name: "inline origins", req: Request{Proxyfile: "../../examples/minimal/gateway.yaml"},
-			want: []string{"../../examples/minimal/gateway.yaml"}},
+		{name: "inline origins", req: Request{Proxyfile: "../../examples/minimal/yaml/proxyfile.yaml"},
+			want: []string{"../../examples/minimal/yaml/proxyfile.yaml"}},
 		{name: "origins file", req: Request{Proxyfile: filepath.Join(dir, "g.yaml")},
 			want: []string{"<dir>/g.yaml", "<dir>/origins.json"}},
-		{name: "inline methods", req: Request{Proxyfile: "../../examples/full/gateway.yaml"},
-			want: []string{"../../examples/full/gateway.yaml"}},
+		{name: "inline methods", req: Request{Proxyfile: "../../examples/full/yaml/proxyfile.yaml"},
+			want: []string{"../../examples/full/yaml/proxyfile.yaml"}},
 		{name: "methods file",
-			req:  Request{Proxyfile: "../../examples/partial/gateway.yaml", RPCMethods: "../../examples/partial/methods.json"},
-			want: []string{"../../examples/partial/gateway.yaml", "../../examples/partial/methods.json"}},
-		{name: "included file", req: Request{Proxyfile: "../../examples/partial/gateway.conf"},
-			want: []string{"../../examples/partial/gateway.conf", "../../examples/partial/rpc-methods.conf"}},
-		{name: ".proto files", req: Request{Proxyfile: "../../examples/partial/Proxyfile"},
-			want: []string{"../../examples/partial/Proxyfile", "../../examples/partial/proto/example/backend/v1/reports.proto",
+			req:  Request{Proxyfile: "../../examples/partial/yaml/proxyfile.yaml", RPCMethods: "../../examples/partial/methods.json"},
+			want: []string{"../../examples/partial/yaml/proxyfile.yaml", "../../examples/partial/methods.json"}},
+		{name: "included file", req: Request{Proxyfile: "../../examples/partial/hocon/Proxyfile"},
+			want: []string{"../../examples/partial/hocon/Proxyfile", "../../examples/partial/rpc-methods.conf"}},
+		{name: ".proto files", req: Request{Proxyfile: "../../examples/partial/proto-methods/Proxyfile"},
+			want: []string{"../../examples/partial/proto-methods/Proxyfile",
+				"../../examples/partial/proto/example/backend/v1/reports.proto",
 				"../../examples/partial/proto/example/gateway/v1/route.proto"}},
 	}
 	for _, c := range cases {
@@ -242,15 +269,15 @@ func TestRenderProblems(t *testing.T) {
 // methods file gives, either one together with the methods file is refused, and the methods' own rules hold in every
 // form.
 func TestInlineMethods(t *testing.T) {
-	partial := string(testsupport.ReadFile(t, "../../examples/partial/gateway.yaml")) + testsupport.PartialMethods
+	partial := string(testsupport.ReadFile(t, "../../examples/partial/yaml/proxyfile.yaml")) + testsupport.PartialMethods
 	// The minimal example has no rpc entry, so methods written into it are given for no RPC route.
-	minimalMethods := string(testsupport.ReadFile(t, "../../examples/minimal/gateway.yaml")) +
+	minimalMethods := string(testsupport.ReadFile(t, "../../examples/minimal/yaml/proxyfile.yaml")) +
 		"rpc:\n  methods:\n    - {service: example.backend.v1.ReportService, method: ListReports}\n"
 	// The HOCON row writes its own list in place of the partial example's include line. strings.Replace changes nothing
 	// when that line is missing, and the row would then fail on another problem, which does not say why; the guard
 	// does.
-	partialConf := string(testsupport.ReadFile(t, "../../examples/partial/gateway.conf"))
-	const include = `include required("rpc-methods.conf")` + "\n"
+	partialConf := string(testsupport.ReadFile(t, "../../examples/partial/hocon/Proxyfile"))
+	const include = `include required("../rpc-methods.conf")` + "\n"
 	if !strings.Contains(partialConf, include) {
 		t.Fatalf("the partial HOCON example holds no %q to replace", include)
 	}
@@ -261,7 +288,7 @@ func TestInlineMethods(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	partialYAML := string(testsupport.ReadFile(t, "../../examples/partial/gateway.yaml"))
+	partialYAML := string(testsupport.ReadFile(t, "../../examples/partial/yaml/proxyfile.yaml"))
 	partialProto := partialYAML + "rpc:\n  proto: {roots: [" + protoRoot + "], option: example.gateway.v1.route}\n"
 	// The compiler's test tree, whose package o.v1 the mapping example.* does not match, so its methods' problems name
 	// their .proto lines.
@@ -275,10 +302,10 @@ func TestInlineMethods(t *testing.T) {
 	}
 	unmatched := strings.Replace(partialYAML, anyPackage, `"example.*": backend`, 1) +
 		"rpc:\n  proto: {roots: [" + formsRoot + "], option: o.v1.route}\n"
-	// The partial example's Proxyfile with its root written whole, so the row reads the same files from a temporary
-	// directory.
-	partialProxyfile := string(testsupport.ReadFile(t, "../../examples/partial/Proxyfile"))
-	const relativeRoot = "roots = [proto]"
+	// The partial example's proto-methods Proxyfile with its root written whole, so the row reads the same files from a
+	// temporary directory.
+	partialProxyfile := string(testsupport.ReadFile(t, "../../examples/partial/proto-methods/Proxyfile"))
+	const relativeRoot = "roots = [../proto]"
 	if !strings.Contains(partialProxyfile, relativeRoot) {
 		t.Fatalf("the partial Proxyfile holds no %q to replace", relativeRoot)
 	}
@@ -342,7 +369,7 @@ func TestInlineMethods(t *testing.T) {
 				t.Fatalf("render paths = %q, want %q", got, want)
 			}
 			for _, file := range files {
-				if d := committedDifference(t, "partial", file); d != "" {
+				if d := committedDifference(t, "partial/yaml", file); d != "" {
 					t.Error(d)
 				}
 			}
@@ -358,7 +385,7 @@ func TestAuthSwitchLine(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.example, func(t *testing.T) {
-			files, problems := render(requestFor(t, c.example, "envoy.yaml"))
+			files, problems := render(requestFor(t, c.example+"/yaml", "envoy.yaml"))
 			if problems != nil {
 				t.Fatalf("render problems = %q, want none", testsupport.ProblemStrings(problems))
 			}
@@ -743,7 +770,7 @@ envoy.filters.http.cors:
 // early header removal in its order: remove_from_clients, the check's headers, Envoy's auth mark, then the two
 // tracing removals.
 func TestTracingExample(t *testing.T) {
-	files, problems := render(requestFor(t, "tracing", "envoy.yaml"))
+	files, problems := render(requestFor(t, "tracing/yaml", "envoy.yaml"))
 	if problems != nil {
 		t.Fatalf("render problems = %q, want none", testsupport.ProblemStrings(problems))
 	}
@@ -837,25 +864,29 @@ func listAt(t *testing.T, tree any, steps ...any) []any {
 	return list
 }
 
-// requestFor points a request at examples/<name>: with the methods file when the example has methods.json, and with
-// the RPC table when it commits rpc-table.json. The two are tested apart, because an example may write its methods
-// in the proxyfile and still commit a table.
-func requestFor(t *testing.T, name, out string) Request {
+// requestFor points a request at the example folder dir, <example>/<form>: at its proxyfile, with the methods file the
+// form is rendered with, and with the RPC table, beside out, when the folder commits one. The two are given apart,
+// because a form may write its methods in the proxyfile and still commit a table.
+func requestFor(t *testing.T, dir, out string) Request {
 	t.Helper()
-	dir := filepath.Join("..", "..", "examples", name)
-	req := Request{Proxyfile: filepath.Join(dir, "gateway.yaml"), Out: out}
-	if methods := filepath.Join(dir, "methods.json"); exists(methods) {
-		req.RPCMethods = methods
+	i := slices.IndexFunc(testsupport.ExampleForms, func(form testsupport.ExampleForm) bool { return form.Dir == dir })
+	if i < 0 {
+		t.Fatalf("testsupport.ExampleForms names no folder %s", dir)
 	}
-	if exists(filepath.Join(dir, "rpc-table.json")) {
+	form := testsupport.ExampleForms[i]
+	req := Request{Proxyfile: filepath.Join(exampleDir(dir), form.File), Out: out}
+	if form.Methods != "" {
+		req.RPCMethods = filepath.Join(exampleDir(dir), form.Methods)
+	}
+	if form.Table {
 		req.RPCTable = filepath.Join(filepath.Dir(out), "rpc-table.json")
 	}
 	return req
 }
 
-func exists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+// exampleDir is the path of the example folder dir, <example>/<form>, from this package's directory.
+func exampleDir(dir string) string {
+	return filepath.Join("..", "..", "examples", filepath.FromSlash(dir))
 }
 
 // render reads every input and returns every output: Read and Files in one step, as the command line runs them, but

@@ -48,13 +48,41 @@ func WriteFile(t testing.TB, path, text string) {
 	}
 }
 
-// PartialMethods is the rpc.methods block that, appended to examples/partial/gateway.yaml, writes in the proxyfile
-// what examples/partial/methods.json lists, so a render that reads it must give that example's committed files.
+// ExampleForm is one folder under examples/ that holds a proxyfile. Each example writes one gateway in more than one
+// form, each form in a folder of its own, because render and check read a default file only when the folder holds one.
+// The folder also holds the envoy.yaml the proxyfile renders, and rpc-table.json where the example has a table.
+type ExampleForm struct {
+	Dir  string // under examples/, as <example>/<form>
+	File string // the proxyfile in Dir, under a name render and check read when given no file
+	// Methods is the --rpc-methods file the form is rendered with, relative to Dir, or "" when the proxyfile writes
+	// its methods or has no rpc entry.
+	Methods string
+	Table   bool // Dir holds rpc-table.json, the table the form's RPC methods give
+}
+
+// ExampleForms is every folder under examples/ that holds a proxyfile.
+var ExampleForms = []ExampleForm{
+	{Dir: "minimal/yaml", File: "proxyfile.yaml"},
+	{Dir: "minimal/hocon", File: "Proxyfile"},
+	{Dir: "partial/yaml", File: "proxyfile.yaml", Methods: "../methods.json", Table: true},
+	{Dir: "partial/hocon", File: "Proxyfile", Table: true},
+	{Dir: "partial/proto-methods", File: "Proxyfile", Table: true},
+	{Dir: "full/yaml", File: "proxyfile.yaml", Table: true},
+	{Dir: "full/hocon", File: "Proxyfile", Table: true},
+	{Dir: "tracing/yaml", File: "proxyfile.yaml"},
+	{Dir: "tracing/hocon", File: "Proxyfile"},
+	{Dir: "grpc/yaml", File: "proxyfile.yaml"},
+	{Dir: "grpc/hocon", File: "Proxyfile"},
+}
+
+// PartialMethods is the rpc.methods block that, appended to examples/partial/yaml/proxyfile.yaml, writes in the
+// proxyfile what examples/partial/methods.json lists, so a render that reads it must give that example's committed
+// files.
 const PartialMethods = "rpc:\n  methods:\n" +
 	"    - {service: example.backend.v1.ReportService, method: ListReports, action: read, reports: [export, share]}\n"
 
-// MinimalInlineOrigins is the origins block of examples/minimal/gateway.yaml. The tests that need the file form, which
-// no example writes, replace it with "origins: <file>".
+// MinimalInlineOrigins is the origins block of examples/minimal/yaml/proxyfile.yaml. The tests that need the file
+// form, which no example writes, replace it with "origins: <file>".
 const MinimalInlineOrigins = "origins:\n  all: {hosts: [localhost], origins: [\"http://localhost:3000\"]}\n"
 
 // Document is a valid file kept one line per item, so that each test row changes it by line number and the row's

@@ -80,7 +80,7 @@ func TestResolve(t *testing.T) {
 		// want is each route as its path, cluster and name, then each problem; a row expects routes or problems.
 		want []string
 	}{
-		{name: "sorted, clustered, named", example: "../../examples/full/gateway.yaml",
+		{name: "sorted, clustered, named", example: "../../examples/full/yaml/proxyfile.yaml",
 			methods: `[{"service": "example.shop.v1.CartService", "method": "GetCart", "action": "browse"}, {"service": "example.accounts.v1.ProfileService", "method": "GetProfile"}, {"service": "example.shop.v1.CartService", "method": "AddItem", "action": "buy", "reports": ["browse"]}]`,
 			want: []string{
 				"/example.accounts.v1.ProfileService/GetProfile accounts_grpc accounts-rpc",
@@ -120,17 +120,17 @@ func TestResolve(t *testing.T) {
 				`m.json:1:2: the report "a/b,c" of example.shop.v1.C/M contains a comma, the separator of x-gateway-reports`,
 				"m.json:1:74: the method example.shop.v1.C/M is listed twice (first on line 1)",
 			}},
-		{name: "no rpc entry", example: "../../examples/minimal/gateway.yaml", methods: `[]`,
-			want: []string{"../../examples/minimal/gateway.yaml:8:1: RPC methods are given, but the routes have no rpc entry"}},
+		{name: "no rpc entry", example: "../../examples/minimal/yaml/proxyfile.yaml", methods: `[]`,
+			want: []string{"../../examples/minimal/yaml/proxyfile.yaml:8:1: RPC methods are given, but the routes have no rpc entry"}},
 		// Without an rpc entry no method has a target, but the rules of the methods themselves still run, so one run
 		// names every problem.
-		{name: "no rpc entry, the methods still checked", example: "../../examples/minimal/gateway.yaml",
+		{name: "no rpc entry, the methods still checked", example: "../../examples/minimal/yaml/proxyfile.yaml",
 			methods: `[{"service": "a.B", "method": "M", "reports": ["x,y"]}]`,
 			want: []string{
-				"../../examples/minimal/gateway.yaml:8:1: RPC methods are given, but the routes have no rpc entry",
+				"../../examples/minimal/yaml/proxyfile.yaml:8:1: RPC methods are given, but the routes have no rpc entry",
 				`m.json:1:2: the report "x,y" of a.B/M contains a comma, the separator of x-gateway-reports`,
 			}},
-		{name: "methods file keys", example: "../../examples/full/gateway.yaml", methods: `[{"service": "a.B", "methd": "M"}]`,
+		{name: "methods file keys", example: "../../examples/full/yaml/proxyfile.yaml", methods: `[{"service": "a.B", "methd": "M"}]`,
 			want: []string{
 				`m.json:1:2: "method" is required here`,
 				`m.json:1:21: unknown key "methd"; known here: action, method, reports, service`,
@@ -174,7 +174,7 @@ func TestResolve(t *testing.T) {
 // The generator reads every field of a route, so each must arrive: the method's action, reports and position, and
 // the service it goes to. A key left out of the methods file is empty.
 func TestResolveKeepsTheMethod(t *testing.T) {
-	file, problems := read.Proxyfile("../../examples/full/gateway.yaml")
+	file, problems := read.Proxyfile("../../examples/full/yaml/proxyfile.yaml")
 	if problems != nil {
 		t.Fatalf("read.Proxyfile problems = %q, want none", testsupport.ProblemStrings(problems))
 	}

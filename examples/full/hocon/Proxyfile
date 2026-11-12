@@ -1,5 +1,5 @@
 # Every key but services.<name>.address, rpc.proto, envoy.tracing, nginx and haproxy, in HOCON, with invented values. It
-# gives the same envoy.yaml as gateway.yaml beside it.
+# gives the same envoy.yaml as ../yaml/proxyfile.yaml.
 listen = 10000
 admin = 9901
 

@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=../../schema/proxyfile.schema.json
+# yaml-language-server: $schema=../../../schema/proxyfile.schema.json
 # A gateway that sends an X-Ray segment for each sampled request. It has auth and remove_from_clients, so its file
 # shows the order of the early header removal with all three: the two tracing removals come last.
 listen: 8000

@@ -4,16 +4,17 @@ A proxyfile describes one gateway in keys, in YAML or in HOCON. This page holds 
 names, the forms of sizes, times and percentages, the rules that compare keys with each other, the two JSON files of
 1.0, and [which keys a 1.x file moves](#from-1x-to-20).
 
-`examples/full/gateway.yaml` holds every key a proxyfile can have except `services.<name>.address`, `envoy.tracing`,
-`rpc.proto` and the `nginx` and `haproxy` blocks, which take no key in this version, with invented values: `cors`, the
-`origins` by environment and `rpc.methods` are among them. `examples/partial` writes `address` and gives its methods
-three ways: `gateway.yaml` with `--rpc-methods examples/partial/methods.json`, `gateway.conf` through
-`include required("rpc-methods.conf")`, and `Proxyfile` through `rpc.proto` and the `.proto` files under `proto/`.
-`examples/tracing/gateway.yaml` writes `envoy.tracing`, and `examples/grpc/gateway.yaml` turns `envoy.connect_bridge`
-off. Only `listen`, `services`, `origins` and `routes` are required. The rest is left out when you do not need it.
+`examples/full/yaml/proxyfile.yaml` holds every key a proxyfile can have except `services.<name>.address`,
+`envoy.tracing`, `rpc.proto` and the `nginx` and `haproxy` blocks, which take no key in this version, with invented
+values: `cors`, the `origins` by environment and `rpc.methods` are among them. `examples/partial` writes `address` and
+gives its methods three ways, each in a folder of its own: `yaml/proxyfile.yaml` with `--rpc-methods ../methods.json`,
+`hocon/Proxyfile` through `include required("../rpc-methods.conf")`, and `proto-methods/Proxyfile` through `rpc.proto`
+and the `.proto` files under `proto/`. `examples/tracing/yaml/proxyfile.yaml` writes `envoy.tracing`, and
+`examples/grpc/yaml/proxyfile.yaml` turns `envoy.connect_bridge` off. Only `listen`, `services`, `origins` and `routes`
+are required. The rest is left out when you do not need it.
 
 ```yaml
-# yaml-language-server: $schema=../../schema/proxyfile.schema.json
+# yaml-language-server: $schema=../../../schema/proxyfile.schema.json
 # Every key but services.<name>.address, rpc.proto, envoy.tracing, nginx and haproxy, with invented values.
 listen: 10000
 admin: 9901
@@ -108,8 +109,8 @@ HOCON:
 
 Since 1.1 both can be written in the proxyfile: the environments under `origins`, the CORS settings under `cors`, and
 the methods under `rpc.methods`. From 1.3 the methods can also be read from the `.proto` files, with `rpc.proto`. A
-HOCON proxyfile that wants a separate file uses `include`, as `examples/partial/gateway.conf` does for its methods. The
-1.0 way is still accepted in 2.0, with the same rules: `origins: <file>` names a JSON origins file, and
+HOCON proxyfile that wants a separate file uses `include`, as `examples/partial/hocon/Proxyfile` does for its methods.
+The 1.0 way is still accepted in 2.0, with the same rules: `origins: <file>` names a JSON origins file, and
 `--rpc-methods <file>` a JSON methods file. Any two of `rpc.methods`, `rpc.proto` and `--rpc-methods` together are
 refused, because exactly one gives the methods. `cors` in the proxyfile is refused too when `origins` names a file.
 

@@ -89,8 +89,8 @@ envoy {
 ```
 
 [`examples/tracing/`](../examples/tracing/) holds this gateway with `auth` and `remove_from_clients` added, in
-[YAML](../examples/tracing/gateway.yaml) and [HOCON](../examples/tracing/gateway.conf), and the
-[`envoy.yaml`](../examples/tracing/envoy.yaml) it generates.
+[YAML](../examples/tracing/yaml/proxyfile.yaml) and [HOCON](../examples/tracing/hocon/Proxyfile), each beside the
+[`envoy.yaml`](../examples/tracing/yaml/envoy.yaml) it generates.
 
 Envoy traces a request when a whole number it draws from 0 to 99 is below 100 times the rate, computed in floating
 point. 100 times 0.07, 0.14, 0.28, 0.55 and 0.56 comes out a little above the whole number. So `rate: 7%`, `14%`, `28%`,

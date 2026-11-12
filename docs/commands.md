@@ -49,6 +49,6 @@ origins file, when `origins` names one, and of the methods are reported together
 a YAML file gives:
 
 ```
-gateway.yaml:3:1: "listen" is required here
-gateway.yaml:3:1: unknown key "liste"; known here: admin, auth, cors, envoy, haproxy, limits, listen, log, nginx, origins, remove_from_clients, routes, rpc, services, timeouts
+proxyfile.yaml:3:1: "listen" is required here
+proxyfile.yaml:3:1: unknown key "liste"; known here: admin, auth, cors, envoy, haproxy, limits, listen, log, nginx, origins, remove_from_clients, routes, rpc, services, timeouts
 ```

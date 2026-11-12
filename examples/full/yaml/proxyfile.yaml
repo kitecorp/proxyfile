@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=../../schema/proxyfile.schema.json
+# yaml-language-server: $schema=../../../schema/proxyfile.schema.json
 # Every key but services.<name>.address, rpc.proto, envoy.tracing, nginx and haproxy, with invented values.
 listen: 10000
 admin: 9901

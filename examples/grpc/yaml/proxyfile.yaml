@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=../../schema/proxyfile.schema.json
+# yaml-language-server: $schema=../../../schema/proxyfile.schema.json
 # A gateway for gRPC clients alone: envoy.connect_bridge is false, so each RPC route sends a call to the service as it
 # came, with no Connect bridge and no Lua filter.
 listen: 8000

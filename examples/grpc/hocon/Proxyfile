@@ -1,4 +1,4 @@
-# The grpc example in HOCON. It gives the same envoy.yaml as gateway.yaml beside it.
+# The grpc example in HOCON. It gives the same envoy.yaml as ../yaml/proxyfile.yaml.
 listen = 8000
 services {
   orders { grpc = 9000 }
