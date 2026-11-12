@@ -17,8 +17,8 @@ import (
 	"github.com/kitecorp/proxyfile/v2/internal/tree"
 )
 
-const usage = `usage: proxyfile render [<file>] -o <envoy.yaml> [--target envoy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
-       proxyfile check [<file>] -o <envoy.yaml> [--target envoy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+const usage = `usage: proxyfile render [<file>] -o <output> [--target envoy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+       proxyfile check [<file>] -o <output> [--target envoy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
        proxyfile schema
        proxyfile version
 `

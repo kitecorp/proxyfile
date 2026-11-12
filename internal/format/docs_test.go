@@ -209,10 +209,15 @@ func names(fields []Field) []string {
 	return list
 }
 
-var inlineLink = regexp.MustCompile(`\]\(([^)\s]+)\)`)
+var (
+	inlineLink = regexp.MustCompile(`\]\(([^)\s]+)\)`)
+	// The README shows the comparison figure through a <picture>, whose files are named in src and srcset attributes
+	// that no Markdown link holds. A srcset here names one file, so the first path is the whole of it.
+	htmlSource = regexp.MustCompile(`\b(?:src|srcset)="([^"\s]+)"`)
+)
 
-// relativeLinks returns the target of every inline link outside a fenced code block that is not a URL with a scheme;
-// a link to a heading of the same file starts with #.
+// relativeLinks returns the target of every inline link, and of every src and srcset attribute, outside a fenced code
+// block that is not a URL with a scheme; a link to a heading of the same file starts with #.
 func relativeLinks(text string) []string {
 	var links []string
 	fenced := false
@@ -224,7 +229,7 @@ func relativeLinks(text string) []string {
 		if fenced {
 			continue
 		}
-		for _, m := range inlineLink.FindAllStringSubmatch(line, -1) {
+		for _, m := range slices.Concat(inlineLink.FindAllStringSubmatch(line, -1), htmlSource.FindAllStringSubmatch(line, -1)) {
 			if !strings.Contains(m[1], "://") {
 				links = append(links, m[1])
 			}

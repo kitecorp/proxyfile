@@ -5,27 +5,35 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/kitecorp/proxyfile/v2.svg)](https://pkg.go.dev/github.com/kitecorp/proxyfile/v2)
 [![Licence](https://img.shields.io/github/license/kitecorp/proxyfile)](LICENSE)
 
-Generates a proxy's config from a short file. Envoy first.
+**One short file, any proxy.**
 
-A proxyfile is a short file, written in YAML or in HOCON, that describes one gateway: the services behind it, the routes
-to them, an optional external auth check, the browser origins it admits and, for RPC routes, the methods. You write it
-by hand, with a comment beside a value to say why it is there, and the RPC methods can be read from your `.proto` files.
-`proxyfile render` turns it into a complete Envoy configuration, written for Envoy 1.40. The same input always gives the
-same bytes, so you can commit the generated file and let `proxyfile check` fail a build when someone edits it by hand or
-forgets to render.
+You describe your gateway in one short file: the services behind it, the routes to them, who may call what. proxyfile
+writes the complete configuration of the proxy you run from it.
+
+Generators: Envoy today. nginx and HAProxy are next.
 
 ```mermaid
-flowchart LR
-    source["proxyfile, YAML or HOCON:<br/>core keys, envoy block"] --> render["proxyfile render<br/>--target envoy"]
-    protos[".proto files"] -->|rpc.proto| render
-    render --> generated["envoy.yaml<br/>committed"]
-    generated --> check["proxyfile check<br/>in the build: renders again,<br/>refuses a drift"]
-    check --> validate["envoy --mode validate<br/>in the image"]
-    validate --> envoy["Envoy running"]
+flowchart TB
+    source["Your proxyfile<br/>YAML or HOCON"] --> render["proxyfile render"]
+    render --> envoy["The Envoy configuration"]
+    render -. planned .-> nginx["The nginx configuration"]
+    render -. planned .-> haproxy["The HAProxy configuration"]
 ```
 
-proxyfile does not run Envoy: an image build can load the committed file with `envoy --mode validate`, as this
-repository's [`scripts/validate-envoy.sh`](scripts/validate-envoy.sh) does for the examples.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/comparison-envoy-dark.svg">
+  <img src="docs/images/comparison-envoy-light.svg" alt="A 9-line proxyfile beside the 119-line Envoy configuration proxyfile generates from it" width="100%">
+</picture>
+
+This is the [minimal example](examples/minimal/yaml/), every line of both files: the 9 lines you write and the 119
+lines proxyfile writes for Envoy; the nginx and HAProxy figures arrive with their generators.
+
+## Why
+
+A proxyfile is written in YAML or in HOCON. You edit the proxyfile and never the generated file, so each value can carry
+a comment that says why it is there. For RPC routes, proxyfile reads the methods from your `.proto` files, so you do
+not list them by hand. The same input always gives the same bytes, so you commit the generated file. Then
+`proxyfile check` fails the build when someone edits that file by hand or forgets to render.
 
 ## Quick start
 
@@ -105,16 +113,32 @@ go install github.com/kitecorp/proxyfile/v2/cmd/proxyfile@v2.0.0
 ## Commands
 
 ```
-usage: proxyfile render [<file>] -o <envoy.yaml> [--target envoy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
-       proxyfile check [<file>] -o <envoy.yaml> [--target envoy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+usage: proxyfile render [<file>] -o <output> [--target envoy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+       proxyfile check [<file>] -o <output> [--target envoy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
        proxyfile schema
        proxyfile version
 ```
 
-- `render` writes the Envoy configuration, and with `--rpc-table` the RPC table, from the proxyfile.
+- `render` writes the proxy's configuration, and with `--rpc-table` the RPC table, from the proxyfile.
 - `check` renders in memory and fails when the files on disk differ, so a build refuses a hand edit or a missed render.
 - `schema` prints the JSON Schema of the format.
 - `version` prints `proxyfile <version>`.
+
+In a build:
+
+```mermaid
+flowchart LR
+    source["proxyfile<br/>YAML or HOCON"] --> render["proxyfile render"]
+    protos[".proto files"] -->|rpc.proto| render
+    render --> generated["generated configuration<br/>committed"]
+    generated --> check["proxyfile check<br/>in the build: renders again,<br/>fails when the file differs"]
+    check --> validate["the proxy's own check in the image<br/>Envoy: envoy --mode validate"]
+    validate --> running["the proxy running"]
+```
+
+proxyfile does not run the proxy. The Envoy generator writes for Envoy 1.40, and an image build can load the committed
+file with `envoy --mode validate`, as this repository's [`scripts/validate-envoy.sh`](scripts/validate-envoy.sh) does
+for the examples.
 
 [docs/commands.md](docs/commands.md) gives the flags, the file names proxyfile looks for, the exit codes and how a
 problem is printed.
@@ -126,9 +150,9 @@ A proxyfile is written in YAML or in HOCON, with the same keys in both, and both
 reads `Proxyfile`, `proxyfile.conf`, `proxyfile.yaml` or `proxyfile.yml` from the working directory. Only `listen`,
 `services`, `origins` and `routes` are required. [docs/format.md](docs/format.md) holds a file with every key but
 `envoy.tracing`, `services.<name>.address`, `rpc.proto` and the `nginx` and `haproxy` blocks, and the rules across keys,
-[docs/hocon.md](docs/hocon.md) the HOCON form, and [docs/defaults.md](docs/defaults.md) what every gateway gets with no
-key. [docs/portability.md](docs/portability.md) says which keys every proxy can carry and which belong to Envoy alone,
-and [From 1.x to 2.0](docs/format.md#from-1x-to-20) which keys a 1.x file moves.
+[docs/hocon.md](docs/hocon.md) the HOCON form, and [docs/defaults.md](docs/defaults.md) what the Envoy generator
+writes with no key. [docs/portability.md](docs/portability.md) says which keys every proxy can carry and which belong
+to Envoy alone, and [From 1.x to 2.0](docs/format.md#from-1x-to-20) which keys a 1.x file moves.
 
 ## Keys
 

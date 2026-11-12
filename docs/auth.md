@@ -1,7 +1,23 @@
 # `auth`
 
-With `auth` present, the gateway asks the service named by `auth.ask` about each request, in HTTP mode, so the auth
-service needs no Envoy-specific type.
+`auth` is not an auth service. It makes the proxy ask a service of yours "may this request pass?" before it forwards
+the request, and copy the identity headers your service answers onto the request. Your service decides, and the proxy
+acts on the answer. Envoy and nginx have this built in, as Envoy's `ext_authz` and nginx's `auth_request`, and HAProxy
+has it through an add-on ([Portability](portability.md)).
+
+```yaml
+services:
+  accounts: {http: 7070}   # your service that answers the question
+auth:
+  ask: accounts /check     # the service and the path the proxy asks about each request
+  timeout: 2s              # how long the proxy waits for the answer
+  enabled: true            # true runs the check; false turns it off for every request
+  when_unavailable: deny   # deny refuses a request the check could not answer; allow lets it through
+  accept: [x-user-id]      # the headers of the answer copied onto the request, such as who the user is
+```
+
+The check is a plain HTTP request to your service, so your service needs nothing made for one proxy. With the envoy
+target it is Envoy's `ext_authz` in HTTP mode. How the check works:
 
 - The check gets a request to the path of `ask`, never the client's path or query, because paths can carry links and
   tokens. The headers it gets are the ones `send` names and the route's question below. HTTP mode adds the client's

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "A proxyfile: one gateway, the services behind it and the routes to them, from which proxyfile writes an Envoy configuration.",
+  "description": "A proxyfile: one gateway, the services behind it and the routes to them, from which proxyfile writes the proxy's configuration.",
   "properties": {
     "admin": {
       "description": "The port of the admin listener, on 127.0.0.1; no admin listener when not written.",
