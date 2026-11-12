@@ -1,6 +1,7 @@
 # Defaults
 
-Everything the format has no key for is the same in every gateway proxyfile writes.
+Everything the format has no key for is the same in every configuration the Envoy generator writes, and this page says
+what that is.
 
 - **One public listener** on `0.0.0.0`, so a container runtime can publish the port. Who may reach it is the network's
   rule, not the gateway's. Each service gets one cluster for each port it declares, named `<service>_http` and

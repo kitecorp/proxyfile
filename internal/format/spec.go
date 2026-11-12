@@ -153,7 +153,7 @@ var (
 // Proxyfile describes the file proxyfile reads: every key, its kind and its rule. The meaning rules that need more
 // than one key, such as a route naming a declared service, belong to the reader.
 var Proxyfile = Field{
-	Doc:   "A proxyfile: one gateway, the services behind it and the routes to them, from which proxyfile writes an Envoy configuration.",
+	Doc:   "A proxyfile: one gateway, the services behind it and the routes to them, from which proxyfile writes the proxy's configuration.",
 	Kind:  Map,
 	Moved: map[string]string{"namespace": "envoy.namespace", "tracing": "envoy.tracing"},
 	Fields: []Field{
@@ -171,10 +171,10 @@ var Proxyfile = Field{
 		}},
 		{Name: "timeouts", Doc: "How long a request, an idle request and an idle connection to a service may last.", Kind: Map, Fields: []Field{
 			withRule(timeOrNone("request", "The longest a whole request may take."),
-				"Without it a route has Envoy's default of 15 seconds, counted from the end of the request. `none` removes the limit."),
+				"Without it, the Envoy configuration keeps Envoy's default of 15 seconds, counted from the end of the request. `none` removes the limit."),
 			timeOrNone("idle", "The longest a request may go without sending or receiving data."),
 			withRule(timeOrNone("upstream_idle", "The longest a connection to a service is kept open with no request on it."),
-				"Envoy's default is 1 hour."),
+				"Without it, the Envoy configuration keeps Envoy's default of 1 hour."),
 		}},
 		{Name: "services", Doc: "The services behind the gateway, on the same host, by name.", Kind: Dict, Required: true, Rule: "At least one service.",
 			Key: &Field{Name: "service name", Kind: Text, Pattern: serviceNamePattern, Expect: serviceNameExpect},
@@ -182,7 +182,7 @@ var Proxyfile = Field{
 				{Name: "host_header", Doc: "The Host header a request carries when a route sends it to this service.",
 					Kind: Text, Pattern: `^[A-Za-z0-9.:\[\]-]+$`, Expect: "a host, with an optional port", Rule: "Without it a request keeps the client's Host."},
 				{Name: "address", Doc: "The service's IP address; 127.0.0.1 when not written.", Kind: Text, Pattern: `^[^\t\n\f\r ]+$`, Expect: "an IP address",
-					Rule: "Not a name: Envoy looks up no name for a static cluster."},
+					Rule: "Not a name: the Envoy generator writes a static cluster, and Envoy looks up no name for one."},
 			})}},
 		{Name: "auth", Doc: "The external check every request goes through before it reaches a service.", Kind: Map, Rule: "Without `auth` there is no check.", Fields: []Field{
 			{Name: "ask", Doc: "The service and the path the gateway asks.", Kind: Text, Required: true,

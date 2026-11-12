@@ -1,15 +1,15 @@
 # Commands
 
-`proxyfile render` reads a proxyfile and writes Envoy's configuration, `proxyfile check` compares what it would write
-with the files on disk, `proxyfile schema` prints the JSON Schema of the format and `proxyfile version` prints the
-version. The [README](../README.md#commands) holds the usage text.
+`proxyfile render` reads a proxyfile and writes the proxy's configuration, `proxyfile check` compares what it would
+write with the files on disk, `proxyfile schema` prints the JSON Schema of the format and `proxyfile version` prints
+the version. The [README](../README.md#commands) holds the usage text.
 
 With no file, proxyfile reads `Proxyfile`, `proxyfile.conf`, `proxyfile.yaml` or `proxyfile.yml` from the working
 directory, and exactly one of them must exist.
 
 | Command | What it does |
 |---|---|
-| `render` | Reads the proxyfile, the files it includes, the origins file when it names one and the RPC methods, which come from one place: its `rpc.methods`, the `.proto` files its `rpc.proto` names, or, with `--rpc-methods`, the methods file. Writes the Envoy configuration to the `-o` path, and with `--rpc-table` the RPC table too, which needs one of the three. It writes every output only when the whole input is free of problems. |
+| `render` | Reads the proxyfile, the files it includes, the origins file when it names one and the RPC methods, which come from one place: its `rpc.methods`, the `.proto` files its `rpc.proto` names, or, with `--rpc-methods`, the methods file. Writes the proxy's configuration to the `-o` path, and with `--rpc-table` the RPC table too, which needs one of the three. It writes every output only when the whole input is free of problems. |
 | `check` | Renders in memory and compares the bytes with the files on disk. It writes nothing. A missing output file differs. |
 | `schema` | Prints the JSON Schema of the proxyfile format on standard output. |
 | `version` | Prints `proxyfile <version>`. |

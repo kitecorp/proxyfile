@@ -8,7 +8,7 @@ must compare with an auth service's own idle timeout.
 | Key | Meaning | Rule | Class |
 |---|---|---|---|
 | `timeouts` | How long a request, an idle request and an idle connection to a service may last. | A mapping. | core |
-| `timeouts.request` | The longest a whole request may take. | A time such as 125s, or none. Without it a route has Envoy's default of 15 seconds, counted from the end of the request. `none` removes the limit. | core |
+| `timeouts.request` | The longest a whole request may take. | A time such as 125s, or none. Without it, the Envoy configuration keeps Envoy's default of 15 seconds, counted from the end of the request. `none` removes the limit. | core |
 | `timeouts.idle` | The longest a request may go without sending or receiving data. | A time such as 125s, or none. | core |
-| `timeouts.upstream_idle` | The longest a connection to a service is kept open with no request on it. | A time such as 125s, or none. Envoy's default is 1 hour. | core |
+| `timeouts.upstream_idle` | The longest a connection to a service is kept open with no request on it. | A time such as 125s, or none. Without it, the Envoy configuration keeps Envoy's default of 1 hour. | core |
 <!-- /keys -->

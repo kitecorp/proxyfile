@@ -1,4 +1,4 @@
-// Command proxyfile writes an Envoy configuration from a proxyfile.
+// Command proxyfile writes a proxy's configuration from a proxyfile.
 package main
 
 import (
