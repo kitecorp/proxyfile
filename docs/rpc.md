@@ -3,6 +3,9 @@
 `rpc` gives the RPC methods the gateway routes, written as a list in `rpc.methods` or read from `.proto` files with
 `rpc.proto`, and the rpc entry of [routes](routes.md) sends them to the services.
 
+A `rate_limit` on the rpc entry is one limit for every method the entry routes: all of them take their tokens from one
+bucket ([Rate limits](routes.md#rate-limits)).
+
 <!-- keys: rpc -->
 | Key | Meaning | Rule | Class |
 |---|---|---|---|

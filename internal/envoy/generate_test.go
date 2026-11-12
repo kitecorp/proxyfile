@@ -20,7 +20,7 @@ func TestInputTextComesOutAsWritten(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			app := model.Service{Name: "app", Address: model.Text{Value: "127.0.0.1"},
+			app := model.Service{Name: "app", Addresses: []model.Text{{Value: "127.0.0.1"}},
 				Ports: []model.ServicePort{{Protocol: model.HTTP, Number: 3000}}}
 			in := Input{
 				Gateway: &model.Gateway{Envoy: model.Envoy{Namespace: "proxyfile"}, Listen: model.Port{Number: 8000}, Services: []model.Service{app},

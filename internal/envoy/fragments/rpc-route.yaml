@@ -1,6 +1,7 @@
 # One route per RPC method, listed in rpc.methods or in the --rpc-methods file, matched on the exact path a call carries
 # (/<package>.<Service>/<Method>), asking the auth check the method's action and reports through the x-gateway- headers
-# its own header_mutation entry adds; its metadata keeps the action for the auth-unavailable log line alone. With
+# its own header_mutation entry adds; its metadata keeps the action for the auth-unavailable log line, and with a limit
+# on the rpc entry the entry's bucket, under the rate-limit namespace (filter-local-ratelimit.yaml). With
 # envoy.connect_bridge, each turns on the bridge, which turns the call into gRPC before the router, and the Lua filter
 # that sets Connect's current status on the bridge's errors: a FilterConfig entry turns on, for its route, a filter the
 # listener's list writes as disabled (Envoy 1.40.2, http_filters.rst, "Disabled flag based route filter chain"). Without
@@ -10,8 +11,11 @@
 {
   name: {{q .Name}},
   match: {path: {{q .Path}}},
-{{- if .Auth}}
-  metadata: {filter_metadata: { {{- q .Namespace}}: {action: {{q .Action}}}}},
+{{- if or .Auth .RateLimit}}
+  metadata: {filter_metadata: { {{- if .Auth}}{{q .Namespace}}: {action: {{q .Action}}}{{end}}
+{{- if and .Auth .RateLimit}}, {{end}}
+{{- with .RateLimit}}{{q .Namespace}}: { {{- .By}}: {{q .ID}}}{{end -}}
+  }},
 {{- end}}
 {{- $question := and .Auth (or .Action .Reports)}}
 {{- if or $question .Bridge}}

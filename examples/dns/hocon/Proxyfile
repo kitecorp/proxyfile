@@ -1,0 +1,14 @@
+# The dns example in HOCON. It gives the same envoy.yaml as ../yaml/proxyfile.yaml.
+listen = 8000
+services {
+  catalog { http = 8080, address = catalog.internal.example, balance = hash, hash { header = x-session-id } }
+  search { http = 8090, address = search.internal.example, balance = hash, hash { client = true } }
+}
+dns { resolver = "10.0.0.2:53" }
+origins {
+  all { hosts = [localhost], origins = ["http://localhost:3000"] }
+}
+routes = [
+  { name = search, prefix = /search, to = search }
+  { name = catalog, prefix = /, to = catalog }
+]

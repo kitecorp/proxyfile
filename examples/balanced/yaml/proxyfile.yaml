@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=../../../schema/proxyfile.schema.json
+# Several backends for each service: shop prefers the backend with fewer requests open, orders picks one at random,
+# and every backend is checked, so one that fails its checks gets no request until it passes.
+listen: 8000
+services:
+  shop:
+    http: 8080
+    addresses: ["10.0.1.11", "10.0.1.12", "10.0.1.13"]
+    balance: least_requests
+    health: {path: /healthz}
+  orders:
+    grpc: 9000
+    addresses: ["10.0.2.21", "10.0.2.22"]
+    balance: random
+    health: {grpc: true, interval: 10s, timeout: 1s, healthy: 1, unhealthy: 2}
+origins:
+  all: {hosts: [localhost], origins: ["http://localhost:3000"]}
+routes:
+  - rpc: {to: {"*": orders}}
+  - {name: shop, prefix: /, to: shop}
+rpc:
+  methods:
+    - {service: example.orders.v1.OrderService, method: GetOrder}

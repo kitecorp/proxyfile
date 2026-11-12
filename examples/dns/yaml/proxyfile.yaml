@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=../../../schema/proxyfile.schema.json
+# Services found by DNS name: each name is looked up again every 5 seconds, and every address it gives is a backend.
+# catalog sends each x-session-id value to the same backend and search each client address; the names are asked of
+# the name server in dns.resolver.
+listen: 8000
+services:
+  catalog: {http: 8080, address: catalog.internal.example, balance: hash, hash: {header: x-session-id}}
+  search: {http: 8090, address: search.internal.example, balance: hash, hash: {client: true}}
+dns:
+  resolver: "10.0.0.2:53"
+origins:
+  all: {hosts: [localhost], origins: ["http://localhost:3000"]}
+routes:
+  - {name: search, prefix: /search, to: search}
+  - {name: catalog, prefix: /, to: catalog}

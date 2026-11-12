@@ -1,0 +1,21 @@
+# The limited example in HOCON. It gives the same envoy.yaml as ../yaml/proxyfile.yaml. This file writes no tls, so
+# client_address is forwarded: the per-client limit counts the address a proxy in front of the gateway puts in
+# X-Forwarded-For. A gateway that faces clients directly writes client_address: connection.
+listen = 8000
+services {
+  shop { http = 8080, grpc = 8081 }
+}
+origins {
+  all { hosts = [localhost], origins = ["http://localhost:3000"] }
+}
+routes = [
+  { rpc { to { "*" = shop }, rate_limit { requests = 100, per = 1s, by = all } } }
+  { name = login, path = /login, method = POST, to = shop, rate_limit { requests = 5, per = 1m, burst = 5 } }
+  { name = shop, prefix = /, to = shop }
+]
+rpc {
+  methods = [
+    { service = "example.shop.v1.CartService", method = AddItem }
+    { service = "example.shop.v1.CartService", method = GetCart }
+  ]
+}

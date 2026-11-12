@@ -1,6 +1,7 @@
 package read
 
 import (
+	"cmp"
 	"fmt"
 	"regexp"
 	"slices"
@@ -39,8 +40,45 @@ func meaning(g *model.Gateway) []model.Problem {
 		if len(service.Ports) == 0 {
 			r.Add(service.Pos, "service %q declares no port", service.Name)
 		}
+		r.hash(service)
+		r.health(service)
 	}
 	return r.Sorted()
+}
+
+// health refuses a check with nothing to check, a check of a port the service does not have, and a timeout no shorter
+// than the interval. The defaults count: a written interval of 1s is refused against the default timeout of 2s, and
+// the message then points at the interval, the one of the two that was written.
+func (r *rules) health(service model.Service) {
+	h := service.Health
+	if h == nil {
+		return
+	}
+	if h.Path == nil && h.GRPC == nil {
+		r.Add(h.Pos, "service %q: health needs path or grpc", service.Name)
+	}
+	if _, ok := service.Port(model.HTTP); h.Path != nil && !ok {
+		r.Add(h.Path.Pos, "service %q: health.path needs an http port", service.Name)
+	}
+	if _, ok := service.Port(model.GRPC); h.GRPC != nil && !ok {
+		r.Add(h.GRPC.Pos, "service %q: health.grpc needs a grpc port", service.Name)
+	}
+	if h.Timeout.Millis >= h.Interval.Millis {
+		r.Add(cmp.Or(h.Timeout.Pos, h.Interval.Pos), "service %q: health.timeout %s must be shorter than health.interval %s",
+			service.Name, model.FormatSeconds(h.Timeout.Millis), model.FormatSeconds(h.Interval.Millis))
+	}
+}
+
+// hash refuses balance hash without hash, which would leave the hash policy empty, and hash beside any other balance,
+// which no proxy would read.
+func (r *rules) hash(service model.Service) {
+	hashing := service.Balance.Value == "hash"
+	switch {
+	case hashing && service.Hash == nil:
+		r.Add(service.Balance.Pos, "service %q: balance hash needs hash", service.Name)
+	case !hashing && service.Hash != nil:
+		r.Add(service.Hash.Pos, "service %q: hash is written, but balance is not hash", service.Name)
+	}
 }
 
 func (r *rules) routes() {

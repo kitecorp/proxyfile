@@ -15,7 +15,8 @@ envoy:
 ## `envoy.namespace`
 
 The namespace of the gateway's own metadata: the metadata of each route the auth check applies to, and the flag the
-auth-unavailable log line reads. It is `proxyfile` when not written. [Defaults](defaults.md#fixed-names) lists the names
+auth-unavailable log line reads. It is `proxyfile` when not written. A limited route's bucket is under
+`<namespace>.rate_limit` ([Rate limits](routes.md#rate-limits)). [Defaults](defaults.md#fixed-names) lists the names
 that never follow it.
 
 ## `envoy.heap`
@@ -103,7 +104,7 @@ a client can have every request it sends traced, and X-Ray bills for each trace 
 
 `path_in_url` is false by default, for the reason the request log holds no path: paths can carry links and tokens. A
 segment still holds the URL's scheme and host, the method and the user agent. As `client_ip` it holds the whole
-`X-Forwarded-For` header as it came, or the connection's address when there is none. It holds the status and the
+`X-Forwarded-For` header, as it came with `client_address: forwarded`, or the connection's address when there is none. It holds the status and the
 response size. For a request whose content type is `application/grpc` or `application/grpc+<x>`, it holds the whole path
 in the `grpc.path` annotation, and no setting removes that. With `path_in_url: true` the URL keeps the first 256
 characters of the path, query included. An environment tag is read by Envoy once, when it starts, never by proxyfile, so
@@ -119,8 +120,8 @@ What is written with the key:
   generated it.
 - `x-envoy-downstream-service-cluster` and `x-envoy-downstream-service-node`, removed from clients after every other
   early removal, each unless an entry before it covers it: a `remove_from_clients` entry or an `auth.accept` name, the
-  rule the question headers follow. Envoy strips them only from an edge request, and with `use_remote_address: false`
-  (see [Defaults](defaults.md)) no request is one.
+  rule the question headers follow. Envoy strips them only from an edge request, and with `client_address: forwarded`
+  (`use_remote_address: false`, see [Defaults](defaults.md)) no request is one.
 - None of Envoy's own sampling shares, so the rules decide.
 
 With no agent listening, a segment is dropped and the request is served as before. Without the key, none of this is

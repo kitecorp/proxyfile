@@ -1,0 +1,16 @@
+# The tls example in HOCON. It gives the same envoy.yaml as ../yaml/proxyfile.yaml.
+listen = 8443
+tls {
+  certificate = "/etc/gateway/tls/certificate.pem"
+  key = "/etc/gateway/tls/key.pem"
+  clients { ca = "/etc/gateway/tls/clients-ca.pem" }
+}
+services {
+  app { http = 3000 }
+}
+origins {
+  all { hosts = [api.example.com], origins = ["https://app.example.com"] }
+}
+routes = [
+  { name = app, prefix = /, to = app }
+]

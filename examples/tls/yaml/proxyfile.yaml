@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=../../../schema/proxyfile.schema.json
+# A gateway that serves HTTPS and asks every client for a certificate signed by the CA in clients-ca.pem. It writes no
+# client_address, so the client's address is the peer of the connection, as in every file with tls. The three files
+# live on the proxy's host; scripts/validate-envoy.sh makes throwaway ones at these paths to validate the output.
+listen: 8443
+tls:
+  certificate: /etc/gateway/tls/certificate.pem
+  key: /etc/gateway/tls/key.pem
+  clients: {ca: /etc/gateway/tls/clients-ca.pem}
+services:
+  app: {http: 3000}
+origins:
+  all: {hosts: [api.example.com], origins: ["https://app.example.com"]}
+routes:
+  - {name: app, prefix: /, to: app}

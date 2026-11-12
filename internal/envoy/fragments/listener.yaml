@@ -9,15 +9,21 @@ filter_chains:
     typed_config:
       "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
       stat_prefix: public
-      # A proxy stands in front: X-Forwarded-For passes as it came and X-Forwarded-Proto is kept when present. With
-      # xff_num_trusted_hops at 0, Envoy takes the last X-Forwarded-For entry, the address the proxy in front
-      # appended, as the client's address. Without use_remote_address, conn_manager_utility.cc takes the address from
-      # the X-Forwarded-For detection, which appends nothing (skip_xff_append defaults to true, xff.cc), and sets
-      # X-Forwarded-Proto only when the request has none.
-      use_remote_address: false
-      # Every response carries the x-request-id the request log writes as request_id (the client's own when it sent
-      # one), so a caller can quote the id of a failed call. Envoy replaces a client's x-request-id only on an edge
-      # request, which needs use_remote_address (conn_manager_utility.cc, request_id/uuid/config.cc).
+      # client_address. With forwarded (false), a proxy stands in front: X-Forwarded-For passes as it came and
+      # X-Forwarded-Proto is kept when present. With xff_num_trusted_hops at 0, Envoy takes the last X-Forwarded-For
+      # entry, the address the proxy in front appended, as the client's address. Without use_remote_address,
+      # conn_manager_utility.cc takes the address from the X-Forwarded-For detection, which appends nothing
+      # (skip_xff_append defaults to true, xff.cc), and sets X-Forwarded-Proto only when the request has none. With
+      # connection (true), Envoy takes the peer of the connection as the client's address, appends it to
+      # X-Forwarded-For, sets X-Forwarded-Proto from the connection, and on a request it counts as external replaces
+      # the client's x-request-id and removes its x-envoy- headers (Envoy's HTTP header manipulation page,
+      # configuration/http/http_conn_man/headers). Measured on Envoy 1.40.2: with true a client's own X-Forwarded-For
+      # does not change its address; with false it does.
+      use_remote_address: {{.RemoteAddress}}
+      # Every response carries the x-request-id the request log writes as request_id, so a caller can quote the id of
+      # a failed call. It is the client's own when it sent one, unless use_remote_address is true and the request is
+      # external: Envoy replaces a client's x-request-id only on an edge request (conn_manager_utility.cc,
+      # request_id/uuid/config.cc).
       always_set_request_id_in_response: true
 {{- if .Tracing}}
       # With tracing, Envoy's default request id extension writes its trace decision into the 13th hex digit of
@@ -71,6 +77,33 @@ filter_chains:
               - header_filter:
                   header: {name: origin, present_match: true}
           body: {inline_string: "Invalid CORS request"}
+{{- if .RateLimit}}
+{{- if .Auth}}
+        # The first mapper that matches wins, so a refusal the auth check itself answered is left as the check wrote
+        # it. ext_authz marks its answers with the UAEX flag, and this mapper, which changes nothing, matches them
+        # before the one below could give a 429 from the check to a Connect call the rate limit's body (measured on
+        # Envoy 1.40.2).
+        - filter: {response_flag_filter: {flags: [UAEX]}}
+{{- end}}
+        # A Connect client reads Envoy's plain 429 to a request over a rate limit as unavailable, so a 429 to a request
+        # that carries connect-protocol-version gets the Connect error resource_exhausted instead. The Connect-gRPC bridge
+        # removes that header, which is why the rate limit filter runs before it. Measured on Envoy 1.40.2: a Connect
+        # call gets this answer, a mapper on the RL response flag never matches, and the check's own answers, the CORS
+        # refusal and the 502 of an unreachable service stay as they were. Not measured: a Connect GET call carries no
+        # such header and keeps the plain 429, and a Connect stream reads its error from the body of a 200 answer, so it
+        # reads either 429 as unavailable (the Connect protocol).
+        - filter:
+            and_filter:
+              filters:
+              - status_code_filter:
+                  comparison: {op: EQ, value: {default_value: 429, runtime_key: gateway.local_reply.rate_limited_status}}
+              - header_filter:
+                  header: {name: connect-protocol-version, present_match: true}
+          body: {inline_string: '{"code":"resource_exhausted","message":"local_rate_limited"}'}
+          body_format_override:
+            text_format_source: {inline_string: "%LOCAL_REPLY_BODY%"}
+            content_type: application/json
+{{- end}}
       access_log: $access_log
 {{- if or .Removed .Auth .Downstream}}
       # These headers are removed before routing and before every filter, so no route, filter or service sees a
@@ -118,3 +151,7 @@ filter_chains:
         # port.
         ignore_port_in_host_matching: true
         virtual_hosts: $virtual_hosts
+{{- if .TLS}}
+  # With tls the listener serves HTTPS on the same port (transport-socket-tls.yaml).
+  transport_socket: $transport_socket
+{{- end}}

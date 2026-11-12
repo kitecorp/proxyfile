@@ -50,5 +50,5 @@ a YAML file gives:
 
 ```
 proxyfile.yaml:3:1: "listen" is required here
-proxyfile.yaml:3:1: unknown key "liste"; known here: admin, auth, cors, envoy, haproxy, limits, listen, log, nginx, origins, remove_from_clients, routes, rpc, services, timeouts
+proxyfile.yaml:3:1: unknown key "liste"; known here: admin, auth, client_address, cors, dns, envoy, haproxy, limits, listen, log, nginx, origins, remove_from_clients, routes, rpc, services, timeouts, tls
 ```

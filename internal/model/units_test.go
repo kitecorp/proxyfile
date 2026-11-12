@@ -2,6 +2,7 @@ package model
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -118,6 +119,49 @@ func TestFormatSeconds(t *testing.T) {
 	for _, c := range cases {
 		if got := FormatSeconds(c.millis); got != c.want {
 			t.Errorf("FormatSeconds(%d) = %q, want %q", c.millis, got, c.want)
+		}
+	}
+}
+
+// A DNS name is an RFC 1123 host name: labels of letters, digits and - that neither start nor end with -, at most 63
+// characters each and 253 in all, with no trailing dot and a last label that is not all digits (section 2.1), so a
+// mistyped IPv4 address is neither an address nor a name.
+func TestIsDNSName(t *testing.T) {
+	label61 := strings.Repeat("a", 61)
+	cases := []struct {
+		text string
+		want bool
+	}{
+		{"catalog", true}, {"catalog.internal.example", true}, {"1st.example", true}, {"a-b.example", true},
+		{strings.Repeat("a", 63) + ".example", true}, {strings.Repeat("a", 64) + ".example", false},
+		{strings.Repeat(label61+".", 4) + "abcde", true}, {strings.Repeat(label61+".", 4) + "abcdef", false},
+		{"localhost:3000", false}, {"10.0.0.256", false}, {"-a.example", false}, {"a-.example", false},
+		{"a..example", false}, {"", false}, {"catalog.example.", false}, {"x_y.example", false},
+	}
+	for _, c := range cases {
+		if got := IsDNSName(c.text); got != c.want {
+			t.Errorf("IsDNSName(%q) = %t, want %t", c.text, got, c.want)
+		}
+	}
+}
+
+// A resolver is an IP address with an optional port, 53 when not written; IPv6 takes brackets with a port.
+func TestParseResolver(t *testing.T) {
+	cases := []struct {
+		text, address string
+		port          int64
+		ok            bool
+	}{
+		{"10.0.0.2:53", "10.0.0.2", 53, true}, {"10.0.0.2", "10.0.0.2", 53, true},
+		{"[fd00::53]:5353", "fd00::53", 5353, true}, {"fd00::53", "fd00::53", 53, true},
+		{"10.0.0.2:0", "", 0, false}, {"10.0.0.2:65536", "", 0, false}, {"10.0.0.256", "", 0, false},
+		{"ns.example", "", 0, false}, {"ns.example:53", "", 0, false},
+		{"fe80::1%eth0", "", 0, false}, {"[fe80::1%eth0]:53", "", 0, false},
+	}
+	for _, c := range cases {
+		address, port, ok := ParseResolver(c.text)
+		if address != c.address || port != c.port || ok != c.ok {
+			t.Errorf("ParseResolver(%q) = %q, %d, %t, want %q, %d, %t", c.text, address, port, ok, c.address, c.port, c.ok)
 		}
 	}
 }

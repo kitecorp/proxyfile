@@ -6,10 +6,13 @@ package model
 type Gateway struct {
 	Listen            Port
 	Admin             *Port
+	TLS               *TLS          // nil when not written: the public listener serves plain HTTP
+	ClientAddress     ClientAddress // when not written, ClientConnection with TLS and ClientForwarded without
 	Limits            Limits
 	Timeouts          Timeouts
 	Services          []Service // written order
 	ServicesPos       Pos       // the `services` key
+	Resolver          *Resolver // nil when not written
 	Auth              *Auth
 	RemoveFromClients []Header
 	Origins           Text    // the origins file as written, absolute or relative to the proxyfile's directory; "" when the proxyfile writes the origins
@@ -26,6 +29,23 @@ type Envoy struct {
 	Tracing       *Tracing // nil when not written
 	ConnectBridge bool     // true when not written
 }
+
+// TLS is the public listener's certificate and key, and the CA a client's certificate must chain to when tls.clients
+// is written. Each is an absolute path to a PEM file on the proxy's host.
+type TLS struct {
+	Certificate, Key string
+	ClientsCA        string // "" without tls.clients: no client certificate is asked for
+}
+
+// ClientAddress says which address counts as the client's.
+type ClientAddress string
+
+const (
+	// ClientForwarded is the last address a proxy in front appended to X-Forwarded-For.
+	ClientForwarded ClientAddress = "forwarded"
+	// ClientConnection is the peer of the TCP connection.
+	ClientConnection ClientAddress = "connection"
+)
 
 type Port struct {
 	Number int64
@@ -74,11 +94,40 @@ const (
 )
 
 type Service struct {
-	Name       string
-	Pos        Pos  // the service's name
-	Address    Text // "127.0.0.1" when not written
+	Name string
+	Pos  Pos // the service's name
+	// Addresses are the backends: address, or 127.0.0.1 when neither address nor addresses is written, as one item,
+	// or each of addresses in written order.
+	Addresses  []Text
+	DNS        bool // Addresses holds one DNS name, which the proxy looks up while it runs
+	Balance    Text // "round_robin", without a position, when not written
+	Hash       *Hash
+	Health     *Health // nil when not written: every backend stays in the pool
 	HostHeader string
 	Ports      []ServicePort // written order
+}
+
+// Hash is what balance hash hashes: exactly one of Header and Client is set.
+type Hash struct {
+	Header string
+	Client bool // the client's address
+	Pos    Pos  // the hash key
+}
+
+// Health is the service's active checks. Path and GRPC are nil when not written; GRPC keeps the true for its position,
+// as Route.AuthOff keeps off. Interval, Timeout, Healthy and Unhealthy are 5s, 2s, 2 and 3, without a position, when
+// not written.
+type Health struct {
+	Path, GRPC         *Text
+	Interval, Timeout  Time
+	Healthy, Unhealthy int64
+	Pos                Pos // the health key
+}
+
+// Resolver is the name server dns.resolver names.
+type Resolver struct {
+	Address string
+	Port    int64 // 53 when not written
 }
 
 type ServicePort struct {
@@ -129,22 +178,33 @@ const (
 
 // Route is one entry of `routes`: the `- rpc:` entry when RPC is set, else a plain route.
 type Route struct {
-	Pos     Pos
-	RPC     *RPC // the `- rpc:` entry; the other fields are empty then
-	Name    Text
-	Match   MatchKind
-	Value   Text // the prefix, path or pattern
-	Method  string
-	To      Text
-	Rewrite *Text
-	AuthOff *Text // the `auth: off` value, kept for its position
-	Retries int64
+	Pos       Pos
+	RPC       *RPC // the `- rpc:` entry; the other fields are empty then
+	Name      Text
+	Match     MatchKind
+	Value     Text // the prefix, path or pattern
+	Method    string
+	To        Text
+	Rewrite   *Text
+	AuthOff   *Text // the `auth: off` value, kept for its position
+	Retries   int64
+	RateLimit *RateLimit // nil when not written: the route is never limited
 }
 
 type RPC struct {
-	Retries int64
-	Targets []RPCTarget // written order
-	ToPos   Pos         // the `to` key
+	Retries   int64
+	RateLimit *RateLimit  // nil when not written; one limit for every RPC route of the entry
+	Targets   []RPCTarget // written order
+	ToPos     Pos         // the `to` key
+}
+
+// RateLimit is a token bucket: it holds at most Requests + Burst tokens and refills at Requests tokens per Per, and
+// each request takes one. Burst is 0 and ByClient true when not written; ByClient gives each client address a bucket
+// of its own, and false counts every client together.
+type RateLimit struct {
+	Requests, Burst int64
+	Per             Time
+	ByClient        bool
 }
 
 type RPCTarget struct {

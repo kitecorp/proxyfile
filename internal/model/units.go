@@ -91,6 +91,44 @@ func ParseAgent(text string) (address string, port int64, ok bool) {
 	return addrPort.Addr().String(), int64(addrPort.Port()), true
 }
 
+// dnsLabel is one label of an RFC 1123 host name: letters, digits and -, at most 63 characters, neither starting nor
+// ending with - (RFC 1123 section 2.1, which lets a label start with a digit, and RFC 1035 section 2.3.4).
+var dnsLabel = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
+
+// IsDNSName says whether text is an RFC 1123 host name, without a trailing dot and at most 253 characters. A name
+// whose last label is all digits is refused, because RFC 1123 section 2.1 says a host name never has the dotted
+// decimal form: a mistyped IPv4 address such as 10.0.0.256 is then neither an address nor a name, and is refused
+// instead of being looked up.
+func IsDNSName(text string) bool {
+	if len(text) > 253 {
+		return false
+	}
+	labels := strings.Split(text, ".")
+	for _, label := range labels {
+		if !dnsLabel.MatchString(label) {
+			return false
+		}
+	}
+	return strings.Trim(labels[len(labels)-1], "0123456789") != ""
+}
+
+// ParseResolver returns the IP address and the port of a name server written as an address with an optional port,
+// 53 when not written. An IPv6 address with a port takes brackets, as netip.ParseAddrPort reads it. Port 0 is
+// refused: no name server answers there. A zone (fe80::1%eth0) is refused: Envoy 1.40.2 aborts on one in a resolver's
+// address when it loads the file (measured).
+func ParseResolver(text string) (address string, port int64, ok bool) {
+	if addrPort, err := netip.ParseAddrPort(text); err == nil {
+		if addrPort.Port() == 0 || addrPort.Addr().Zone() != "" {
+			return "", 0, false
+		}
+		return addrPort.Addr().String(), int64(addrPort.Port()), true
+	}
+	if addr, err := netip.ParseAddr(text); err == nil && addr.Zone() == "" {
+		return addr.String(), 53, true
+	}
+	return "", 0, false
+}
+
 // ParseSize and ParseTime share scale so that one place refuses an int64
 // overflow, both in the digits and in their product with the unit's factor.
 func scale(digits string, factor int64) (int64, bool) {

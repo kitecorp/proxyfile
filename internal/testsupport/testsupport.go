@@ -73,6 +73,14 @@ var ExampleForms = []ExampleForm{
 	{Dir: "tracing/hocon", File: "Proxyfile"},
 	{Dir: "grpc/yaml", File: "proxyfile.yaml"},
 	{Dir: "grpc/hocon", File: "Proxyfile"},
+	{Dir: "balanced/yaml", File: "proxyfile.yaml"},
+	{Dir: "balanced/hocon", File: "Proxyfile"},
+	{Dir: "dns/yaml", File: "proxyfile.yaml"},
+	{Dir: "dns/hocon", File: "Proxyfile"},
+	{Dir: "tls/yaml", File: "proxyfile.yaml"},
+	{Dir: "tls/hocon", File: "Proxyfile"},
+	{Dir: "limited/yaml", File: "proxyfile.yaml"},
+	{Dir: "limited/hocon", File: "Proxyfile"},
 }
 
 // PartialMethods is the rpc.methods block that, appended to examples/partial/yaml/proxyfile.yaml, writes in the
