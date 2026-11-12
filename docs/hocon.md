@@ -21,16 +21,18 @@ routes = [
 ]
 ```
 
-[`examples/full/gateway.conf`](../examples/full/gateway.conf) writes every key but `services.<name>.address`,
-`envoy.tracing`, `rpc.proto` and the `nginx` and `haproxy` blocks, and sits beside
-[`examples/full/gateway.yaml`](../examples/full/gateway.yaml), which gives the same file.
-[`examples/tracing/gateway.conf`](../examples/tracing/gateway.conf) writes `envoy.tracing` and sits beside its YAML
-twin, [`examples/tracing/gateway.yaml`](../examples/tracing/gateway.yaml).
-[`examples/grpc/gateway.conf`](../examples/grpc/gateway.conf) turns `envoy.connect_bridge` off and sits beside
-[`examples/grpc/gateway.yaml`](../examples/grpc/gateway.yaml).
-[`examples/partial/gateway.conf`](../examples/partial/gateway.conf) pulls its methods in with
-`include required("rpc-methods.conf")`: a plain `include` is skipped when the file is missing, and `required` refuses it
-by name.
+Each example writes its HOCON form as `hocon/Proxyfile`, in a folder of its own beside `yaml/`, because `render` and
+`check` given no file refuse a folder that holds two of the names they read.
+[`examples/full/hocon/Proxyfile`](../examples/full/hocon/Proxyfile) writes every key but `services.<name>.address`,
+`envoy.tracing`, `rpc.proto` and the `nginx` and `haproxy` blocks, and gives the same file as
+[`examples/full/yaml/proxyfile.yaml`](../examples/full/yaml/proxyfile.yaml).
+[`examples/tracing/hocon/Proxyfile`](../examples/tracing/hocon/Proxyfile) writes `envoy.tracing`, as its YAML twin,
+[`examples/tracing/yaml/proxyfile.yaml`](../examples/tracing/yaml/proxyfile.yaml), does.
+[`examples/grpc/hocon/Proxyfile`](../examples/grpc/hocon/Proxyfile) turns `envoy.connect_bridge` off, as
+[`examples/grpc/yaml/proxyfile.yaml`](../examples/grpc/yaml/proxyfile.yaml) does.
+[`examples/partial/hocon/Proxyfile`](../examples/partial/hocon/Proxyfile) pulls its methods in with
+`include required("../rpc-methods.conf")`: a plain `include` is skipped when the file is missing, and `required` refuses
+it by name.
 
 The rules of the form:
 
@@ -62,7 +64,7 @@ The rules of the form:
   `listen = ${HOME}` is a problem. The key a substitution reads is a key of the format like any other, so a
   substitution copies one proxyfile value into another, such as `accept = ${auth.send}`. A key of your own, such as
   `port = 3000` for `http = ${port}`, is refused as an unknown key:
-  `gateway.conf: port: unknown key "port"; known here: admin, auth, cors, ...`.
+  `Proxyfile: port: unknown key "port"; known here: admin, auth, cors, ...`.
 - **The order you write is kept.** The generated file lists the services, their ports and the environments as written.
   When an object is written twice, the merged object lists the keys of the later one first.
 - **An empty file is an empty object**, so the problems name each required key.
@@ -70,23 +72,23 @@ The rules of the form:
 What a problem looks like:
 
 - A syntax error is `<file>:<line>:<column>: <message>`, with a column, which a YAML syntax error does not have, for
-  example `gateway.conf:3:1: unexpected EOF, expected '}'`.
+  example `Proxyfile:3:1: unexpected EOF, expected '}'`.
 - Any later problem is `<file>: <key path>: <message>`, because the HOCON reader keeps no line for a value, for example
-  `gateway.conf: services.app.http: "http" must be a whole number from 1 to 65535, not quoted or block text`. The key
+  `Proxyfile: services.app.http: "http" must be a whole number from 1 to 65535, not quoted or block text`. The key
   path joins the keys from the top with dots (`services.app.http`), writes an array item as its index from 0 in square
   brackets (`routes[1].to`), and quotes a key that holds anything but letters, digits, `-` and `_`
   (`routes[1].rpc.to."example.shop.*"`). A problem at the top of the file, such as a missing required key, has no key
-  path: `gateway.conf: "listen" is required here`.
+  path: `Proxyfile: "listen" is required here`.
 - A message that names another place says `at <key path>` where the YAML form says `on line 7`, for example
-  `gateway.conf: routes[1].name: route "app" is declared twice (the first is at routes[0].name)`.
+  `Proxyfile: routes[1].name: route "app" is declared twice (the first is at routes[0].name)`.
 - A file that cannot be read is `<file>: the file cannot be read: <reason>`, the same text in both forms. An included
   file is the exception, below.
 - A problem inside an included file is reported against the file you gave. A syntax error there reads
   `<file>: parse error at line <n>, col <m>: <message>`, for example
-  `gateway.conf: parse error at line 3, col 1: unexpected EOF, expected '}'`. It has no `:<line>:<column>:` after the
+  `Proxyfile: parse error at line 3, col 1: unexpected EOF, expected '}'`. It has no `:<line>:<column>:` after the
   file, and the line and column are the included file's, because the HOCON library does not say which file it was. A
   later problem names the key path the included file wrote, for example
-  `gateway.conf: rpc.methods[0]: the report "x,y" of a.v1.S/M contains a comma, the separator of x-gateway-reports`. A
+  `Proxyfile: rpc.methods[0]: the report "x,y" of a.v1.S/M contains a comma, the separator of x-gateway-reports`. A
   missing `include required(...)` reads `<included file>: cannot read include file: <reason>`.
 - The refusal of `include file(...)` names the file that holds the statement, with its line and column, also when
   that is an included file, for example

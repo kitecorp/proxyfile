@@ -1,0 +1,5 @@
+[
+  {"service": "example.accounts.v1.ProfileService", "method": "GetProfile", "action": "", "reports": [], "cluster": "accounts_grpc"},
+  {"service": "example.shop.v1.CartService", "method": "AddItem", "action": "buy", "reports": ["browse"], "cluster": "shop_grpc"},
+  {"service": "example.shop.v1.CartService", "method": "GetCart", "action": "browse", "reports": [], "cluster": "shop_grpc"}
+]

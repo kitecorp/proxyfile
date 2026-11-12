@@ -15,6 +15,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/kitecorp/proxyfile/v2/internal/testsupport"
+	"github.com/kitecorp/proxyfile/v2/internal/tree"
 )
 
 var update = flag.Bool("update", false, "rewrite schema/proxyfile.schema.json, and the key tables of README.md and docs/")
@@ -44,16 +45,27 @@ func TestSchemaIsCurrent(t *testing.T) {
 // is refused for the key or the value the row changes.
 func TestSchemaAcceptsTheExamples(t *testing.T) {
 	schema := compiledSchema(t)
+	// Every example folder. The schema describes the YAML form, so a HOCON proxyfile is checked as the tree the
+	// program reads from it, which holds the values its YAML twin writes.
+	for _, form := range testsupport.ExampleForms {
+		t.Run(form.Dir, func(t *testing.T) {
+			path := "../../examples/" + form.Dir + "/" + form.File
+			var inst any
+			if strings.HasSuffix(form.File, ".yaml") {
+				inst = instance(t, string(testsupport.ReadFile(t, path)))
+			} else {
+				inst = hoconInstance(t, path)
+			}
+			if got := validationErrors(t, schema, inst); got != nil {
+				t.Errorf("Validate errors = %q, want none", got)
+			}
+		})
+	}
 	cases := []struct {
-		name, file, extra string
+		name, file, extra string   // file is the example whose YAML form the row changes
 		from, to          string   // replaced once in the example before extra is appended
 		want              []string // the innermost validation errors; none when the schema accepts the file
 	}{
-		{name: "minimal", file: "minimal"},
-		{name: "partial", file: "partial"},
-		{name: "full", file: "full"},
-		{name: "tracing", file: "tracing"},
-		{name: "grpc", file: "grpc"},
 		// The checker refuses it too (TestCheck, "tag with env and header"); oneOf admits a tag with exactly one of the
 		// two.
 		{name: "tag with env and header", file: "tracing", from: "request_id: {header: x-request-id}",
@@ -80,7 +92,7 @@ func TestSchemaAcceptsTheExamples(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			data, err := os.ReadFile("../../examples/" + c.file + "/gateway.yaml")
+			data, err := os.ReadFile("../../examples/" + c.file + "/yaml/proxyfile.yaml")
 			if err != nil {
 				t.Fatalf("ReadFile: %v", err)
 			}
@@ -91,15 +103,7 @@ func TestSchemaAcceptsTheExamples(t *testing.T) {
 				}
 				document = strings.Replace(document, c.from, c.to, 1)
 			}
-			var got []string
-			if err := schema.Validate(instance(t, document+c.extra)); err != nil {
-				var invalid *jsonschema.ValidationError
-				if !errors.As(err, &invalid) {
-					t.Fatalf("Validate: %v", err)
-				}
-				got = innermost(invalid)
-			}
-			if !slices.Equal(got, c.want) {
+			if got := validationErrors(t, schema, instance(t, document+c.extra)); !slices.Equal(got, c.want) {
 				t.Errorf("Validate errors = %q, want %q", got, c.want)
 			}
 		})
@@ -205,6 +209,48 @@ func instance(t *testing.T, document string) any {
 	if err := yaml.Unmarshal([]byte(document), &value); err != nil {
 		t.Fatalf("yaml.Unmarshal: %v", err)
 	}
+	return jsonInstance(t, value)
+}
+
+// hoconInstance returns the HOCON proxyfile at path as the JSON value an editor would check, from the tree the program
+// reads it into, and ends the test when the program cannot read it.
+func hoconInstance(t *testing.T, path string) any {
+	t.Helper()
+	root, _, problems := tree.FromHOCON(path)
+	if problems != nil {
+		t.Fatalf("FromHOCON problems = %q, want none", testsupport.ProblemStrings(problems))
+	}
+	return jsonInstance(t, jsonValue(root))
+}
+
+// jsonValue returns the value a node stands for: a number or a boolean as its JSON text, a string as text, and a
+// scalar that is neither as null.
+func jsonValue(n *tree.Node) any {
+	switch {
+	case n.Kind == tree.Map:
+		object := map[string]any{}
+		for _, entry := range n.Entries {
+			object[entry.Key] = jsonValue(entry.Value)
+		}
+		return object
+	case n.Kind == tree.List:
+		list := []any{}
+		for _, item := range n.Items {
+			list = append(list, jsonValue(item))
+		}
+		return list
+	case n.NumberOrBool:
+		return json.RawMessage(n.Text)
+	case n.Quoted:
+		return n.Text
+	default:
+		return nil
+	}
+}
+
+// jsonInstance returns value as the validator reads a JSON document, so a YAML file and a HOCON one are checked alike.
+func jsonInstance(t *testing.T, value any) any {
+	t.Helper()
 	data, err := json.Marshal(value)
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
@@ -214,6 +260,20 @@ func instance(t *testing.T, document string) any {
 		t.Fatalf("UnmarshalJSON: %v", err)
 	}
 	return inst
+}
+
+// validationErrors returns the innermost errors of validating inst against schema, or nil when the schema accepts it.
+func validationErrors(t *testing.T, schema *jsonschema.Schema, inst any) []string {
+	t.Helper()
+	err := schema.Validate(inst)
+	if err == nil {
+		return nil
+	}
+	var invalid *jsonschema.ValidationError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("Validate: %v", err)
+	}
+	return innermost(invalid)
 }
 
 // innermost returns the errors at the bottom of err's tree, each naming a value and the rule it breaks. The error at

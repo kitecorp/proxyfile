@@ -29,8 +29,8 @@ repository's [`scripts/validate-envoy.sh`](scripts/validate-envoy.sh) does for t
 
 ## Quick start
 
-The smallest proxyfile, [`examples/minimal/gateway.yaml`](examples/minimal/gateway.yaml): one service, one route, and
-the browser origins it admits.
+The smallest proxyfile, [`examples/minimal/yaml/proxyfile.yaml`](examples/minimal/yaml/proxyfile.yaml): one service,
+one route, and the browser origins it admits.
 
 ```yaml
 listen: 8000
@@ -42,7 +42,7 @@ routes:
   - {name: app, prefix: /, to: app}
 ```
 
-The same file in HOCON, [`examples/minimal/gateway.conf`](examples/minimal/gateway.conf):
+The same file in HOCON, [`examples/minimal/hocon/Proxyfile`](examples/minimal/hocon/Proxyfile):
 
 ```hocon
 listen = 8000
@@ -69,11 +69,13 @@ proxyfile render --target haproxy -o haproxy.cfg  # refused in 2.0: no generator
 ```
 
 The `envoy.yaml` it writes has the listener on 8000, a cluster for `app` on 3000, the route and the CORS filter for the
-origin; the committed one is [`examples/minimal/envoy.yaml`](examples/minimal/envoy.yaml). nginx and HAProxy are the
-targets the format reserves ([`docs/portability.md`](docs/portability.md) says which keys each will take); their
-generators are [issue 25](https://github.com/kitecorp/proxyfile/issues/25) and
+origin; the committed one is [`examples/minimal/yaml/envoy.yaml`](examples/minimal/yaml/envoy.yaml). nginx and HAProxy
+are the targets the format reserves ([`docs/portability.md`](docs/portability.md) says which keys each will take);
+their generators are [issue 25](https://github.com/kitecorp/proxyfile/issues/25) and
 [issue 26](https://github.com/kitecorp/proxyfile/issues/26). The other directories under [`examples/`](examples/) add
-an auth check, RPC routes read from `.proto` files, tracing and nearly every key.
+an auth check, RPC routes read from `.proto` files, tracing and nearly every key. Each example keeps each form in a
+folder of its own, under the names above and beside the files it renders, so `render` and `check` find the proxyfile
+in any of them with no file given.
 
 ## Install
 

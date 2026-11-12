@@ -9,7 +9,7 @@ use the YAML language server, such as VS Code with the YAML extension:
 ```
 
 In a JetBrains IDE, open Settings, Languages & Frameworks, Schemas and DTDs, JSON Schema Mappings. Add a mapping with the
-schema URL above and a file pattern that matches your YAML proxyfiles, such as `gateway.yaml`.
+schema URL above and a file pattern that matches your YAML proxyfiles, such as `proxyfile.yaml`.
 
 `proxyfile schema` prints the same schema, and each release carries it as `proxyfile.schema.json`.
 

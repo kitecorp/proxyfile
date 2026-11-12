@@ -272,7 +272,7 @@ func runChecks(t *testing.T, checks []check) {
 
 func readExample(t *testing.T, name string) *File {
 	t.Helper()
-	file, problems := Proxyfile("../../examples/" + name + "/gateway.yaml")
+	file, problems := Proxyfile("../../examples/" + name + "/yaml/proxyfile.yaml")
 	if problems != nil {
 		t.Fatalf("problems = %q, want none", testsupport.ProblemStrings(problems))
 	}
@@ -405,10 +405,10 @@ func TestReadFullExample(t *testing.T) {
 		}},
 		{"targets", targets(g), []string{"example.shop.* shop shop", "* accounts accounts-rpc"}},
 		{"log", fmt.Sprint(g.Log.StatusFrom, g.Log.SamplePercent), "400 1"},
-		{"services key", g.ServicesPos, model.Pos{File: "../../examples/full/gateway.yaml", Line: 12, Column: 1}},
-		{"routes key", g.RoutesPos, model.Pos{File: "../../examples/full/gateway.yaml", Line: 42, Column: 1}},
+		{"services key", g.ServicesPos, model.Pos{File: "../../examples/full/yaml/proxyfile.yaml", Line: 12, Column: 1}},
+		{"routes key", g.RoutesPos, model.Pos{File: "../../examples/full/yaml/proxyfile.yaml", Line: 42, Column: 1}},
 		{"methods", len(file.Methods), 3},
-		{"methods key", *file.MethodsKey, model.Pos{File: "../../examples/full/gateway.yaml", Line: 52, Column: 3}},
+		{"methods key", *file.MethodsKey, model.Pos{File: "../../examples/full/yaml/proxyfile.yaml", Line: 52, Column: 3}},
 	})
 }
 
@@ -518,8 +518,8 @@ func TestReadTracing(t *testing.T) {
 			document: bHOCON + "envoy { tracing { provider { xray { segment = s } }, tags { zone { env = ZONE }, area { header = x-area } } } }\n",
 			want: &model.Tracing{XRay: model.XRay{Address: "127.0.0.1", Port: 2000, Segment: "s"},
 				Tags: []model.Tag{{Name: "zone", Env: "ZONE"}, {Name: "area", Header: "x-area"}}}},
-		{name: "every key, YAML", file: "../../examples/tracing/gateway.yaml", want: every},
-		{name: "every key, HOCON", file: "../../examples/tracing/gateway.conf", want: every},
+		{name: "every key, YAML", file: "../../examples/tracing/yaml/proxyfile.yaml", want: every},
+		{name: "every key, HOCON", file: "../../examples/tracing/hocon/Proxyfile", want: every},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

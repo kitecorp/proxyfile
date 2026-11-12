@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=../../schema/proxyfile.schema.json
+# yaml-language-server: $schema=../../../schema/proxyfile.schema.json
 # The other side of each optional key: no admin listener, the default namespace, a check that is off and denies
 # when it cannot be asked, the heap budget alone, one timeout, addresses that are not the default.
 listen: 8000

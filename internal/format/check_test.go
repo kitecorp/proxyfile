@@ -59,9 +59,9 @@ func runCheckCases(t *testing.T, cases []checkCase) {
 
 func TestCheck(t *testing.T) {
 	runCheckCases(t, []checkCase{
-		{name: "minimal example", spec: Proxyfile, file: "../../examples/minimal/gateway.yaml"},
-		{name: "partial example", spec: Proxyfile, file: "../../examples/partial/gateway.yaml"},
-		{name: "full example", spec: Proxyfile, file: "../../examples/full/gateway.yaml"},
+		{name: "minimal example", spec: Proxyfile, file: "../../examples/minimal/yaml/proxyfile.yaml"},
+		{name: "partial example", spec: Proxyfile, file: "../../examples/partial/yaml/proxyfile.yaml"},
+		{name: "full example", spec: Proxyfile, file: "../../examples/full/yaml/proxyfile.yaml"},
 		{name: "unknown key", spec: Proxyfile, document: m.Replaced(1, 1, "liste: 8000"), want: []string{
 			`g.yaml:1:1: "listen" is required here`,
 			`g.yaml:1:1: unknown key "liste"; known here: admin, auth, cors, envoy, haproxy, limits, listen, log, nginx, origins, remove_from_clients, routes, rpc, services, timeouts`,
@@ -180,8 +180,8 @@ func TestCheck(t *testing.T) {
 				`g.yaml:7:37: "option" must be an option's full name such as example.gateway.v1.route`,
 				`g.yaml:7:47: unknown key "root"; known here: option, roots`,
 			}},
-		{name: "tracing example", spec: Proxyfile, file: "../../examples/tracing/gateway.yaml"},
-		{name: "grpc example", spec: Proxyfile, file: "../../examples/grpc/gateway.yaml"},
+		{name: "tracing example", spec: Proxyfile, file: "../../examples/tracing/yaml/proxyfile.yaml"},
+		{name: "grpc example", spec: Proxyfile, file: "../../examples/grpc/yaml/proxyfile.yaml"},
 		{name: "tracing, the fewest keys", spec: Proxyfile, document: m.Inserted(7, "envoy: {tracing: {provider: {xray: {segment: example-gateway}}}}")},
 		{name: "tracing without provider", spec: Proxyfile, document: m.Inserted(7, "envoy: {tracing: {path_in_url: true}}"),
 			want: []string{`g.yaml:7:18: "provider" is required here`}},

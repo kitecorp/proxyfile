@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=../../schema/proxyfile.schema.json
+# yaml-language-server: $schema=../../../schema/proxyfile.schema.json
 # The smallest proxyfile: one service, one route, and the browser origins it admits.
 listen: 8000
 services:
