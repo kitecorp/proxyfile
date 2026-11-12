@@ -29,8 +29,8 @@ repository's [`scripts/validate-envoy.sh`](scripts/validate-envoy.sh) does for t
 
 ## Quick start
 
-The smallest proxyfile, [`examples/minimal/gateway.yaml`](examples/minimal/gateway.yaml): one service, one route, and
-the browser origins it admits.
+The smallest proxyfile, [`examples/minimal/proxyfile.yaml`](examples/minimal/proxyfile.yaml): one service, one route,
+and the browser origins it admits.
 
 ```yaml
 listen: 8000
@@ -42,18 +42,45 @@ routes:
   - {name: app, prefix: /, to: app}
 ```
 
-Save it as `gateway.yaml` and [install proxyfile](#install). Then render it, commit what comes out, and let the build
-refuse a hand edit or a missed render:
+Save it as `proxyfile.yaml` (the name `render` and `check` read when no file is given) and [install proxyfile](#install).
+Then render it, commit what comes out, and let the build refuse a hand edit or a missed render:
 
 ```sh
-proxyfile render gateway.yaml -o envoy.yaml   # writes the complete Envoy configuration
-proxyfile check gateway.yaml -o envoy.yaml    # in the build: renders again, fails when envoy.yaml differs
+proxyfile render -o envoy.yaml   # writes the complete Envoy configuration (default target: envoy)
+proxyfile check -o envoy.yaml    # in the build: renders again, fails when envoy.yaml differs
 ```
 
-The `envoy.yaml` it writes has the listener on 8000, a cluster for `app` on 3000, the route and the CORS filter for the
-origin; the committed one is [`examples/minimal/envoy.yaml`](examples/minimal/envoy.yaml). The same file in HOCON is
-[`examples/minimal/gateway.conf`](examples/minimal/gateway.conf), and the other directories under
-[`examples/`](examples/) add an auth check, RPC routes read from `.proto` files, tracing and nearly every key.
+The same file in HOCON form, [`examples/minimal/Proxyfile`](examples/minimal/Proxyfile):
+
+```
+listen = 8000
+services {
+  app { http = 3000 }
+}
+origins {
+  all { hosts = [localhost], origins = ["http://localhost:3000"] }
+}
+routes = [
+  { name = app, prefix = /, to = app }
+]
+```
+
+Save it as `Proxyfile` (also read by `render` and `check` when no file argument is given). Rendering either file writes
+the same committed [`examples/minimal/envoy.yaml`](examples/minimal/envoy.yaml) byte for byte.
+
+Only Envoy has a generator today:
+
+```sh
+proxyfile render --target nginx -o nginx.yaml
+# proxyfile render: --target nginx: no generator for nginx in this version; see docs/portability.md
+
+proxyfile render --target haproxy -o haproxy.yaml
+# proxyfile render: --target haproxy: no generator for haproxy in this version; see docs/portability.md
+```
+
+The committed `envoy.yaml` has the listener on 8000, a cluster for `app` on 3000, the route and the CORS filter for the
+origin; the other directories under [`examples/`](examples/) add an auth check, RPC routes read from `.proto` files,
+tracing and nearly every key.
 
 ## Install
 
