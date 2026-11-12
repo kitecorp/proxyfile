@@ -42,18 +42,38 @@ routes:
   - {name: app, prefix: /, to: app}
 ```
 
-Save it as `gateway.yaml` and [install proxyfile](#install). Then render it, commit what comes out, and let the build
+The same file in HOCON, [`examples/minimal/gateway.conf`](examples/minimal/gateway.conf):
+
+```hocon
+listen = 8000
+services {
+  app { http = 3000 }
+}
+origins {
+  all { hosts = [localhost], origins = ["http://localhost:3000"] }
+}
+routes = [
+  { name = app, prefix = /, to = app }
+]
+```
+
+Save it as `proxyfile.yaml`, or the HOCON form as `Proxyfile` (`render` and `check` read either name when given no
+file), and [install proxyfile](#install). Then render it for your proxy, commit what comes out, and let the build
 refuse a hand edit or a missed render:
 
 ```sh
-proxyfile render gateway.yaml -o envoy.yaml   # writes the complete Envoy configuration
-proxyfile check gateway.yaml -o envoy.yaml    # in the build: renders again, fails when envoy.yaml differs
+proxyfile render -o envoy.yaml                    # the default target, envoy: a complete Envoy configuration
+proxyfile check -o envoy.yaml                     # in the build: renders again, fails when envoy.yaml differs
+proxyfile render --target nginx -o nginx.conf     # refused in 2.0: no generator for nginx in this version
+proxyfile render --target haproxy -o haproxy.cfg  # refused in 2.0: no generator for haproxy in this version
 ```
 
 The `envoy.yaml` it writes has the listener on 8000, a cluster for `app` on 3000, the route and the CORS filter for the
-origin; the committed one is [`examples/minimal/envoy.yaml`](examples/minimal/envoy.yaml). The same file in HOCON is
-[`examples/minimal/gateway.conf`](examples/minimal/gateway.conf), and the other directories under
-[`examples/`](examples/) add an auth check, RPC routes read from `.proto` files, tracing and nearly every key.
+origin; the committed one is [`examples/minimal/envoy.yaml`](examples/minimal/envoy.yaml). nginx and HAProxy are the
+targets the format reserves ([`docs/portability.md`](docs/portability.md) says which keys each will take); their
+generators are [issue 25](https://github.com/kitecorp/proxyfile/issues/25) and
+[issue 26](https://github.com/kitecorp/proxyfile/issues/26). The other directories under [`examples/`](examples/) add
+an auth check, RPC routes read from `.proto` files, tracing and nearly every key.
 
 ## Install
 
