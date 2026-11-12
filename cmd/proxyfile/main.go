@@ -16,7 +16,7 @@ func main() {
 }
 
 // programVersion is the release build's version, else the module version the go command recorded in the program
-// (go install github.com/kitecorp/proxyfile/v2/cmd/proxyfile@v2.0.0 records v2.0.0), else (devel).
+// (go install github.com/kitecorp/proxyfile/v2/cmd/proxyfile@v2.1.0 records v2.1.0), else (devel).
 func programVersion() string {
 	if version != "" {
 		return version

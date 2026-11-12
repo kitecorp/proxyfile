@@ -5,7 +5,7 @@ HOCON proxyfile, see [Editor support](#editor-support) below. Put this line firs
 use the YAML language server, such as VS Code with the YAML extension:
 
 ```yaml
-# yaml-language-server: $schema=https://raw.githubusercontent.com/kitecorp/proxyfile/v2.0.0/schema/proxyfile.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kitecorp/proxyfile/v2.1.0/schema/proxyfile.schema.json
 ```
 
 In a JetBrains IDE, open Settings, Languages & Frameworks, Schemas and DTDs, JSON Schema Mappings. Add a mapping with the

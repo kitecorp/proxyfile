@@ -17,14 +17,18 @@ import (
 // decoder fills the model from a tree format.Check accepted, so every key it finds has the kind and the form the
 // description asks for, and a key it does not find was not written. What the check cannot see is left to it: a
 // service's address that is neither an IP address nor a DNS name, address and addresses written together, addresses
-// with fewer than two items, an item of addresses that is not an IP address or is written twice, hash.client or
-// health.grpc written false, a dns.resolver that is not an IP address with an optional port, a size or a time that
-// matches its pattern but does not fit in an int64 (ParseSize and ParseTime both refuse one; 9999999999999h is a time
-// of that kind), a size or a time above the largest value Envoy accepts in the field it is written to, which Envoy
-// refuses when it loads the file, a tracing agent that matches its pattern but is not an IPv4 address and a port from 1
-// to 65535 (300.1.2.3:2000 is one), and a rate limit whose per is below 1s or whose requests and burst together are
-// above a uint32. A pattern cannot say how large a number with a unit may be; the whole numbers' limits are each
-// field's Max in the description, which the check applies.
+// with fewer than two items, an item of addresses that is not an IP address or is written twice, a health interval
+// below 1s, tracing written both at the top and at envoy.tracing, a dns.resolver that is not an IP address with an
+// optional port, a size or a time that matches its pattern but does not fit in an int64 (ParseSize and ParseTime both
+// refuse one; 9999999999999h is a time of that kind), a size or a time above the largest value Envoy accepts in the
+// field it is written to, which Envoy refuses when it loads the file, a tracing agent that matches its pattern but is
+// not an IPv4 address and a port from 1 to 65535 (300.1.2.3:2000 is one), an otel endpoint that is not an IP address or
+// a DNS name, and a port from 1 to 65535, a rate limit whose per is below 1s or whose requests and burst together are
+// above a uint32, an auth that writes neither ask nor jwt, a key of the check written without ask or missing beside
+// it, a jwt keys URL that is not https to an IP address or a DNS name, a jwt ca beside a keys file, an empty jwt
+// audiences list, a jwt claims header that an entry of send or accept covers, and a header carrying the token that is
+// cookie, a claims header or one a remove_from_clients entry covers. A pattern cannot say how large a number with a
+// unit may be; the whole numbers' limits are each field's Max in the description, which the check applies.
 type decoder struct {
 	model.Problems
 }
@@ -62,13 +66,22 @@ func decode(root *tree.Node) (*model.Gateway, []model.Problem) {
 		ServicesPos:       root.Entry("services").KeyPos,
 		Resolver:          d.resolver(root),
 		Auth:              d.auth(root),
+		JWT:               d.jwt(root),
 		RemoveFromClients: d.headers(root.Get("remove_from_clients")),
 		Origins:           textAt(root.Get("origins")),
 		Routes:            d.routes(root.Get("routes")),
 		RoutesPos:         root.Entry("routes").KeyPos,
 		Log:               logSettings(root.Entry("log")),
+		Tracing:           d.tracing(cmp.Or(root.Get("tracing"), root.Get("envoy").Get("tracing"))),
 		Envoy:             d.envoy(root),
 	}
+	// envoy.tracing is the old place of tracing and holds the same keys. A file that writes both would have one of them
+	// left unread, so it is refused.
+	if old := root.Get("envoy").Entry("tracing"); old != nil && root.Get("tracing") != nil {
+		d.Add(old.KeyPos, "write tracing or envoy.tracing, not both")
+	}
+	d.claims(g.Auth, root.Get("auth").Get("jwt").Get("claims"))
+	d.tokenHeader(g, root.Get("auth").Get("jwt"))
 	if problems := d.Sorted(); problems != nil {
 		return nil, problems
 	}
@@ -118,7 +131,6 @@ func (d *decoder) envoy(root *tree.Node) model.Envoy {
 	return model.Envoy{
 		Namespace:     cmp.Or(n.GetText("namespace"), "proxyfile"),
 		Heap:          d.size(root, "envoy", "heap"),
-		Tracing:       d.tracing(n.Get("tracing")),
 		ConnectBridge: n.GetText("connect_bridge") != "false",
 	}
 }
@@ -152,9 +164,6 @@ func (d *decoder) services(n *tree.Node) []model.Service {
 		}
 		if hash := entry.Value.Entry("hash"); hash != nil {
 			service.Hash = &model.Hash{Header: hash.Value.GetText("header"), Client: hash.Value.Get("client") != nil, Pos: hash.KeyPos}
-			if client := hash.Value.Get("client"); client != nil && client.Text != "true" {
-				d.Add(client.Pos, "%q must be true", "client")
-			}
 		}
 		service.Health = d.health(entry.Value.Entry("health"))
 		services = append(services, service)
@@ -179,10 +188,11 @@ func (d *decoder) health(entry *tree.Entry) *model.Health {
 		Unhealthy: 3,
 		Pos:       entry.KeyPos,
 	}
-	if health.GRPC != nil && health.GRPC.Value != "true" {
-		d.Add(health.GRPC.Pos, "%q must be true", "grpc")
-	}
+	// An interval below a second is refused, so a mistyped 2ms cannot send hundreds of checks a second to each backend.
 	if interval := d.timeOf(n.Get("interval"), "health.interval", format.Health.Child("interval").Expect); interval != nil {
+		if interval.Millis < 1000 {
+			d.Add(interval.Pos, "health.interval must be at least 1s")
+		}
 		health.Interval = *interval
 	}
 	if timeout := d.timeOf(n.Get("timeout"), "health.timeout", format.Health.Child("timeout").Expect); timeout != nil {
@@ -272,27 +282,143 @@ func (d *decoder) resolver(root *tree.Node) *model.Resolver {
 	return &model.Resolver{Address: address, Port: port}
 }
 
+// auth reads the check, nil when ask is not written: auth.jwt alone asks no service. auth writes ask, jwt or both, and
+// the keys that set the check are required with ask and refused without it, in the check's own words where it would
+// say them itself.
 func (d *decoder) auth(root *tree.Node) *model.Auth {
 	n := root.Get("auth")
 	if n == nil {
 		return nil
 	}
 	ask := n.Get("ask")
+	if ask == nil {
+		if n.Get("jwt") == nil {
+			d.Add(n.Pos, "auth needs ask or jwt")
+		}
+		for _, key := range format.CheckKeys {
+			if entry := n.Entry(key); entry != nil {
+				d.Add(entry.KeyPos, "auth: %s is written, but ask is not", key)
+			}
+		}
+		return nil
+	}
+	for _, key := range format.CheckRequired {
+		if n.Get(key) == nil {
+			d.Add(n.Pos, "%q is required here", key)
+		}
+	}
 	// The check's pattern for ask is one service name, one space and a path.
 	service, path, _ := strings.Cut(ask.Text, " ")
 	auth := &model.Auth{
 		Service:        model.Text{Value: service, Pos: ask.Pos},
 		Path:           path,
-		Enabled:        n.Get("enabled").Text == "true",
-		Allow:          n.Get("when_unavailable").Text == "allow",
+		Enabled:        n.GetText("enabled") == "true",
+		Allow:          n.GetText("when_unavailable") == "allow",
 		OnlyWithHeader: n.GetText("only_with_header"),
 		Send:           d.headers(n.Get("send")),
 		Accept:         d.headers(n.Get("accept")),
+		SendRequest:    n.GetText("send_request") == "true",
 	}
 	if timeout := d.time(root, "auth", "timeout"); timeout != nil {
 		auth.Timeout = *timeout
 	}
 	return auth
+}
+
+// systemCA is the CA bundle a keys URL's certificate must chain to when auth.jwt.ca is not written: the one bundle in
+// Envoy's own image (measured on Envoy 1.40.2), at the path Debian, Ubuntu and Alpine give theirs.
+const systemCA = "/etc/ssl/certs/ca-certificates.crt"
+
+// jwt reads auth.jwt, nil when not written, with the defaults the description's Docs name: the authorization header,
+// and with a keys URL the system CA bundle and port 443. The check has made keys an absolute path or a text starting
+// with https://, and audiences a list or any.
+func (d *decoder) jwt(root *tree.Node) *model.JWT {
+	n := root.Get("auth").Get("jwt")
+	if n == nil {
+		return nil
+	}
+	jwt := &model.JWT{
+		Issuer:   n.GetText("issuer"),
+		Header:   cmp.Or(n.GetText("header"), "authorization"),
+		Optional: n.GetText("optional") == "true",
+	}
+	// An empty list would accept no audience at all, so every token would be refused; any says every audience.
+	if audiences := n.Get("audiences"); audiences.Kind == tree.List {
+		if len(audiences.Items) == 0 {
+			d.Add(audiences.Pos, "auth.jwt: audiences needs one audience or more; any accepts every audience")
+		}
+		for _, item := range audiences.Items {
+			jwt.Audiences = append(jwt.Audiences, item.Text)
+		}
+	}
+	keys := n.Get("keys")
+	if strings.HasPrefix(keys.Text, "/") {
+		jwt.File = keys.Text
+		// The bundle checks the keys URL's certificate, so beside a file it would check nothing.
+		if ca := n.Entry("ca"); ca != nil {
+			d.Add(ca.KeyPos, "auth.jwt: ca is written, but keys is not a URL")
+		}
+	} else {
+		host, port, dns, ok := model.ParseKeysURL(keys.Text)
+		if !ok {
+			d.Add(keys.Pos, `"keys" must be an https URL of an IP address or a DNS name, with no user part, and with a port from 1 to 65535 when it writes one`)
+		}
+		jwt.URL, jwt.Host, jwt.Port, jwt.DNS, jwt.CA = keys.Text, host, port, dns, cmp.Or(n.GetText("ca"), systemCA)
+	}
+	// Ranged rather than looked up, because the headers are set in the order the claims were written in.
+	if claims := n.Get("claims"); claims != nil {
+		for _, entry := range claims.Entries {
+			jwt.Claims = append(jwt.Claims, model.Claim{Header: entry.Key, Name: entry.Value.Text})
+		}
+	}
+	return jwt
+}
+
+// claims refuses a claims header that an entry of send or accept covers. The token filter sets a claims header before
+// the check runs, and the early header removal takes a client's copy, so a header send names would reach the check
+// as the claim, never as the client's; and the check's answer to a header accept names would replace the verified
+// claim. Without ask, send and accept are refused already, so the rule needs the check.
+func (d *decoder) claims(check *model.Auth, claims *tree.Node) {
+	if check == nil || claims == nil {
+		return
+	}
+	for _, entry := range claims.Entries {
+		header := model.Header{Name: entry.Key}
+		for _, list := range []struct {
+			key     string
+			entries []model.Header
+		}{{"send", check.Send}, {"accept", check.Accept}} {
+			if slices.ContainsFunc(list.entries, func(e model.Header) bool { return e.Covers(header) }) {
+				d.Add(entry.KeyPos, "auth.jwt.claims: %q is a header %s names", entry.Key, list.key)
+			}
+		}
+	}
+}
+
+// tokenHeader refuses a file in which no request can carry a token. The early header removal takes every claims header
+// and every remove_from_clients entry from the client's request before the token filter reads it, so the header that
+// carries the token can be neither. cookie is refused too: the filter reads a header other than authorization whole,
+// as the bare token, and a Cookie header holds name=value pairs.
+func (d *decoder) tokenHeader(g *model.Gateway, jwt *tree.Node) {
+	if g.JWT == nil {
+		return
+	}
+	header := model.Header{Name: g.JWT.Header}
+	if written := jwt.Get("header"); written != nil && written.Text == "cookie" {
+		d.Add(written.Pos, "auth.jwt: header cannot be cookie; a token inside a cookie is not read")
+	}
+	if claims := jwt.Get("claims"); claims != nil {
+		for _, entry := range claims.Entries {
+			if entry.Key == header.Name {
+				d.Add(entry.KeyPos, "auth.jwt.claims: %q is the header that carries the token", entry.Key)
+			}
+		}
+	}
+	for _, entry := range g.RemoveFromClients {
+		if entry.Covers(header) {
+			d.Add(entry.Pos, "remove_from_clients: this entry removes %q, the header that carries the token of auth.jwt", header.Name)
+		}
+	}
 }
 
 func (d *decoder) routes(n *tree.Node) []model.Route {
@@ -379,25 +505,19 @@ func percent(n *tree.Node) int {
 	return value
 }
 
-// tracing fills the defaults the description's Docs name. The check let through only the xray provider, so it is
-// read without asking which provider was written.
+// tracing fills the defaults the description's Docs name. The check let through a provider with exactly one key, xray
+// or otel (envoy.tracing takes xray alone), so the model holds the one written.
 func (d *decoder) tracing(n *tree.Node) *model.Tracing {
 	if n == nil {
 		return nil
 	}
-	xray := n.Get("provider").Get("xray")
-	tracing := &model.Tracing{
-		XRay:      model.XRay{Address: "127.0.0.1", Port: 2000, Segment: xray.GetText("segment"), Sample: sample(xray.Get("sample"))},
-		PathInURL: n.GetText("path_in_url") == "true",
+	tracing := &model.Tracing{PathInURL: n.GetText("path_in_url") == "true"}
+	if otel := n.Get("provider").Get("otel"); otel != nil {
+		tracing.OTel = d.otel(otel)
+	} else {
+		tracing.XRay = d.xray(n.Get("provider").Get("xray"))
 	}
-	if agent := xray.Get("agent"); agent != nil {
-		address, port, ok := model.ParseAgent(agent.Text)
-		if !ok {
-			d.Add(agent.Pos, "%q must be %s", "agent", format.AgentExpect)
-		}
-		tracing.XRay.Address, tracing.XRay.Port = address, port
-	}
-	// Ranged rather than looked up, because the segment's tags follow the order they were written in.
+	// Ranged rather than looked up, because the span's tags follow the order they were written in.
 	if tags := n.Get("tags"); tags != nil {
 		for _, entry := range tags.Entries {
 			tracing.Tags = append(tracing.Tags, model.Tag{
@@ -409,6 +529,34 @@ func (d *decoder) tracing(n *tree.Node) *model.Tracing {
 		}
 	}
 	return tracing
+}
+
+// xray sends the segments to 127.0.0.1:2000 when agent is not written.
+func (d *decoder) xray(n *tree.Node) *model.XRay {
+	xray := &model.XRay{Address: "127.0.0.1", Port: 2000, Segment: n.GetText("segment"), Sample: sample(n.Get("sample"))}
+	if agent := n.Get("agent"); agent != nil {
+		address, port, ok := model.ParseAgent(agent.Text)
+		if !ok {
+			d.Add(agent.Pos, "%q must be %s", "agent", format.AgentExpect)
+		}
+		xray.Address, xray.Port = address, port
+	}
+	return xray
+}
+
+// otel traces 5% of the requests when sample.rate is not written.
+func (d *decoder) otel(n *tree.Node) *model.OTel {
+	otel := &model.OTel{Service: n.GetText("service"), RatePercent: 5}
+	endpoint := n.Get("endpoint")
+	host, port, dns, ok := model.ParseEndpoint(endpoint.Text)
+	if !ok {
+		d.Add(endpoint.Pos, "%q must be %s", "endpoint", format.EndpointExpect)
+	}
+	otel.Host, otel.Port, otel.DNS = host, port, dns
+	if rate := n.Get("sample").Get("rate"); rate != nil {
+		otel.RatePercent = percent(rate)
+	}
+	return otel
 }
 
 // sample is nil when sample is not written, so the generator writes no manifest and Envoy's own rule applies.

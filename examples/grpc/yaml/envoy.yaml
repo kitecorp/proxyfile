@@ -12,8 +12,9 @@ static_resources:
           use_remote_address: false
           always_set_request_id_in_response: true
           server_header_transformation: PASS_THROUGH
-          normalize_path: false
-          merge_slashes: false
+          normalize_path: true
+          merge_slashes: true
+          path_with_escaped_slashes_action: UNESCAPE_AND_FORWARD
           upgrade_configs: [{upgrade_type: websocket}]
           local_reply_config:
             mappers:
@@ -102,6 +103,9 @@ static_resources:
                   allow_origin_string_match: []
                   forward_not_matching_preflights: false
               routes:
+              - name: "refused:dot-segment-with-parameter"
+                match: {safe_regex: {regex: ".*/\\.\\.?;.*"}}
+                direct_response: {status: 400}
               - {name: "orders-rpc", match: {path: "/example.orders.v1.OrderService/GetOrder"}, route: {cluster: "orders_grpc"}}
               - {name: "orders-rpc", match: {path: "/example.orders.v1.OrderService/ListOrders"}, route: {cluster: "orders_grpc"}}
   clusters:

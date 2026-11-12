@@ -24,8 +24,9 @@ static_resources:
           use_remote_address: false
           always_set_request_id_in_response: true
           server_header_transformation: PASS_THROUGH
-          normalize_path: false
-          merge_slashes: false
+          normalize_path: true
+          merge_slashes: true
+          path_with_escaped_slashes_action: UNESCAPE_AND_FORWARD
           upgrade_configs: [{upgrade_type: websocket}]
           local_reply_config:
             mappers:
@@ -40,6 +41,13 @@ static_resources:
                   - header_filter:
                       header: {name: origin, present_match: true}
               body: {inline_string: "Invalid CORS request"}
+            - filter:
+                and_filter:
+                  filters:
+                  - response_flag_filter: {flags: [UAEX]}
+                  - status_code_filter: {comparison: {op: GE, value: {default_value: 200}}}
+                  - status_code_filter: {comparison: {op: LE, value: {default_value: 299}}}
+              status_code: 403
           access_log:
           - name: envoy.access_loggers.stdout
             filter:
@@ -221,6 +229,9 @@ static_resources:
                   - {exact: "https://app.example.net", ignore_case: true}
                   forward_not_matching_preflights: false
               routes:
+              - name: "refused:dot-segment-with-parameter"
+                match: {safe_regex: {regex: ".*/\\.\\.?;.*"}}
+                direct_response: {status: 400}
               - {name: "backend-rpc", match: {path: "/example.backend.v1.ReportService/ListReports"}, metadata: {filter_metadata: {"proxyfile": {action: "read"}}}, typed_per_filter_config: {envoy.filters.http.header_mutation: {"@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutationPerRoute, mutations: {request_mutations: [{append: {header: {key: x-gateway-action, value: "read"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}, {append: {header: {key: x-gateway-reports, value: "export,share"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}]}}, envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}, envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}}, route: {cluster: "backend_grpc", timeout: 30s}}
               - name: "login"
                 match: {path: "/login", headers: [{name: ":method", string_match: {exact: "POST"}}]}

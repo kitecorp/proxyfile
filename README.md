@@ -22,10 +22,10 @@ flowchart TB
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/comparison-envoy-dark.svg">
-  <img src="docs/images/comparison-envoy-light.svg" alt="A 9-line proxyfile beside the 119-line Envoy configuration proxyfile generates from it" width="100%">
+  <img src="docs/images/comparison-envoy-light.svg" alt="A 9-line proxyfile beside the 123-line Envoy configuration proxyfile generates from it" width="100%">
 </picture>
 
-This is the [minimal example](examples/minimal/yaml/), every line of both files: the 9 lines you write and the 119
+This is the [minimal example](examples/minimal/yaml/), every line of both files: the 9 lines you write and the 123
 lines proxyfile writes for Envoy; the nginx and HAProxy figures arrive with their generators.
 
 ## Why
@@ -72,8 +72,8 @@ refuse a hand edit or a missed render:
 ```sh
 proxyfile render -o envoy.yaml                    # the default target, envoy: a complete Envoy configuration
 proxyfile check -o envoy.yaml                     # in the build: renders again, fails when envoy.yaml differs
-proxyfile render --target nginx -o nginx.conf     # refused in 2.0: no generator for nginx in this version
-proxyfile render --target haproxy -o haproxy.cfg  # refused in 2.0: no generator for haproxy in this version
+proxyfile render --target nginx -o nginx.conf     # refused: no generator for nginx in this version
+proxyfile render --target haproxy -o haproxy.cfg  # refused: no generator for haproxy in this version
 ```
 
 The `envoy.yaml` it writes has the listener on 8000, a cluster for `app` on 3000, the route and the CORS filter for the
@@ -81,9 +81,9 @@ origin; the committed one is [`examples/minimal/yaml/envoy.yaml`](examples/minim
 are the targets the format reserves ([`docs/portability.md`](docs/portability.md) says which keys each will take);
 their generators are [issue 25](https://github.com/kitecorp/proxyfile/issues/25) and
 [issue 26](https://github.com/kitecorp/proxyfile/issues/26). The other directories under [`examples/`](examples/) add
-an auth check, RPC routes read from `.proto` files, tracing, several backends, health checks, TLS, rate limits and
-nearly every key. Each example keeps each form in a folder of its own, under the names above and beside the files it
-renders, so `render` and `check` find the proxyfile in any of them with no file given.
+an auth check, a token verified at the proxy, RPC routes read from `.proto` files, tracing, several backends, health
+checks, TLS, rate limits and nearly every key. Each example keeps each form in a folder of its own, under the names
+above and beside the files it renders, so `render` and `check` find the proxyfile in any of them with no file given.
 
 ## Install
 
@@ -92,8 +92,8 @@ The release has `proxyfile-linux-amd64`, `proxyfile-linux-arm64`, `proxyfile-dar
 `proxyfile-darwin-arm64`, with `checksums.txt` and `proxyfile.schema.json` beside them.
 
 ```sh
-curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v2.0.0/proxyfile-linux-amd64
-curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v2.0.0/checksums.txt
+curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v2.1.0/proxyfile-linux-amd64
+curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v2.1.0/checksums.txt
 shasum -a 256 -c --ignore-missing checksums.txt
 install -m 0755 proxyfile-linux-amd64 /usr/local/bin/proxyfile
 ```
@@ -101,13 +101,13 @@ install -m 0755 proxyfile-linux-amd64 /usr/local/bin/proxyfile
 In a Dockerfile, copy the program out of the image. The image holds `/proxyfile` and nothing else.
 
 ```dockerfile
-COPY --from=ghcr.io/kitecorp/proxyfile:2.0.0 /proxyfile /usr/local/bin/proxyfile
+COPY --from=ghcr.io/kitecorp/proxyfile:2.1.0 /proxyfile /usr/local/bin/proxyfile
 ```
 
 With Go installed (the Go version `go.mod` names or newer):
 
 ```sh
-go install github.com/kitecorp/proxyfile/v2/cmd/proxyfile@v2.0.0
+go install github.com/kitecorp/proxyfile/v2/cmd/proxyfile@v2.1.0
 ```
 
 ## Commands
@@ -149,11 +149,11 @@ A proxyfile is written in YAML or in HOCON, with the same keys in both, and both
 `Proxyfile` or ending in `.conf` is HOCON, and one ending in `.yaml` or `.yml` is YAML. With no file named, proxyfile
 reads `Proxyfile`, `proxyfile.conf`, `proxyfile.yaml` or `proxyfile.yml` from the working directory. Only `listen`,
 `services`, `origins` and `routes` are required. [docs/format.md](docs/format.md) holds a file with every key but
-`envoy.tracing`, `services.<name>.address`, `rpc.proto`, the `nginx` and `haproxy` blocks and the keys of 2.1
-(`services.<name>.addresses`, `.balance`, `.hash`, `.health`, `dns`, `tls`, `client_address` and `rate_limit`), and
-the rules across keys, [docs/hocon.md](docs/hocon.md) the HOCON form, and [docs/defaults.md](docs/defaults.md) what
-the Envoy generator writes with no key. [docs/portability.md](docs/portability.md) says which keys every proxy can carry and which belong
-to Envoy alone, and [From 1.x to 2.0](docs/format.md#from-1x-to-20) which keys a 1.x file moves.
+`rpc.proto`, `envoy.tracing`, the `xray` provider, `hash.client` and the `nginx` and `haproxy` blocks, and the rules
+across keys, [docs/hocon.md](docs/hocon.md) the HOCON form, and [docs/defaults.md](docs/defaults.md) what the Envoy
+generator writes with no key. [docs/portability.md](docs/portability.md) says which keys every proxy can carry and
+which belong to Envoy alone, [From 1.x to 2.0](docs/format.md#from-1x-to-20) which keys a 1.x file moves, and
+[From 2.0 to 2.1](docs/format.md#from-20-to-21) what 2.1 changes for a 2.0 file.
 
 ## Keys
 
@@ -168,15 +168,16 @@ whose block holds it ([docs/portability.md](docs/portability.md)).
 - [`limits`](docs/limits.md) (core): Limits on connections and request headers.
 - [`timeouts`](docs/timeouts.md) (core): How long a request, an idle request and an idle connection to a service may last.
 - [`services`](docs/services.md) (core): The services behind the gateway, by name.
-- [`dns`](docs/services.md) (core): The name lookups of the services whose address is a DNS name.
-- [`auth`](docs/auth.md) (core): The external check every request goes through before it reaches a service.
+- [`dns`](docs/services.md) (core): The name lookups of every DNS name the gateway reaches: a service's address, the tracing endpoint and the keys URL's host.
+- [`auth`](docs/auth.md) (core): The checks every request goes through before it reaches a service: a service of yours asked about each request, a signed token the proxy verifies, or both.
 - [`remove_from_clients`](docs/listener.md) (core): Headers removed from every client request before routing and before any filter; a name ending in \* is a prefix.
 - [`cors`](docs/cors.md) (core): The CORS settings every environment shares.
 - [`origins`](docs/origins.md) (core): The browser origins each environment admits, by environment name; or, as in 1.0, the name of an origins file, relative to this file.
 - [`routes`](docs/routes.md) (core): The routes, tried in the order written; the rpc entry marks where the RPC routes go.
 - [`rpc`](docs/rpc.md) (core): The RPC methods the gateway routes; the routes' rpc entry maps them to services.
 - [`log`](docs/log.md) (core): Which requests the request log writes.
-- [`envoy`](docs/envoy.md) (envoy): The settings only the Envoy generator reads: the namespace of the gateway's metadata, its heap budget, X-Ray tracing and the Connect bridge.
+- [`tracing`](docs/tracing.md) (core): A trace span for each sampled request, sent to AWS X-Ray or to an OpenTelemetry collector.
+- [`envoy`](docs/envoy.md) (envoy): The settings only the Envoy generator reads: the namespace of the gateway's metadata, its heap budget, the old place of tracing and the Connect bridge.
 - [`nginx`](docs/portability.md) (nginx): The settings only nginx will read; this version has no nginx generator, so it takes no key.
 - [`haproxy`](docs/portability.md) (haproxy): The settings only HAProxy will read; this version has no HAProxy generator, so it takes no key.
 

@@ -29,7 +29,9 @@ filter_chains:
       # With tracing, Envoy's default request id extension writes its trace decision into the 13th hex digit of
       # x-request-id, a client's own id included (uuid.proto lines 26 to 29). The X-Ray tracer ignores that decision
       # (xray_tracer_impl.cc line 79), so pack_trace_reason: false costs the trace nothing and keeps the id as the
-      # client sent it or Envoy generated it. The request log's sample reads the id's first eight hex digits, which the
+      # client sent it or Envoy generated it. The OpenTelemetry tracer follows the decision, and sample.rate was
+      # measured with this setting on Envoy 1.40.2: 100% traced 100 of 100 requests, 0% none, and 5% traced 7, a
+      # random draw. The request log's sample reads the id's first eight hex digits, which the
       # setting does not touch: the access log's runtime filter reads the id as a number through the stream id provider
       # (access_log_impl.cc lines 141 to 151), and that number never reads the setting (request_id/uuid/config.cc lines
       # 61 to 77; the setting stops the writes, lines 41 and 103 to 107, and the trace reason read from the id, lines 83
@@ -49,11 +51,18 @@ filter_chains:
       max_request_headers_kb: {{.KiB}}
       common_http_protocol_options: {max_headers_count: {{.Count}}}
 {{- end}}
-      # Envoy neither normalizes a path nor merges its slashes, so the service's own path rules decide what a path
-      # means. normalize_path is written out because, when it is absent, a runtime value may change its default
-      # (http_connection_manager.proto).
-      normalize_path: false
-      merge_slashes: false
+      # Every file normalises the request's path before anything reads it: dot segments are resolved, repeated slashes
+      # merged and escaped slashes unescaped, so the route, a rate limit, the token, the check and the service all read
+      # the path the service receives. Without these three settings /open/../private/report.txt,
+      # /open/%2e%2e/private/report.txt and /open/..%2fprivate/report.txt took a route with prefix /open/ and auth off
+      # and reached the service with no token and no check; with them each is answered 401 and reaches no service
+      # (measured on Envoy 1.40.2). A ; parameter on a name and the case of letters are kept as sent, a ; parameter on a
+      # dot segment written with dots is dropped with the segment resolved, and a backslash or %5C is read as /
+      # (measured on Envoy 1.40.2). A dot segment with a ; parameter that is still in the path is refused by the first
+      # route of every virtual host (route-refused.yaml).
+      normalize_path: true
+      merge_slashes: true
+      path_with_escaped_slashes_action: UNESCAPE_AND_FORWARD
       # WebSocket is the one upgrade passed on. Envoy answers any other Upgrade to a route with 403 and an empty body
       # before any http filter sees the request; one no route takes goes through the filters like any request
       # (conn_manager_impl.cc, which refuses the upgrade only when a route matched).
@@ -77,12 +86,26 @@ filter_chains:
               - header_filter:
                   header: {name: origin, present_match: true}
           body: {inline_string: "Invalid CORS request"}
+{{- if .Auth}}
+        # ext_authz in HTTP mode lets a request through only on 200 and has no setting to widen it: a check's other
+        # 2xx refuses the request, and without this mapper the client receives that 2xx, a success for a request that
+        # never reached the service. ext_authz marks its answers with the UAEX flag, so a 2xx it passes on is
+        # answered 403 with the check's body (measured on Envoy 1.40.2: a check's 202 and 204 give 403, and its 200
+        # and 401 stay as they were).
+        - filter:
+            and_filter:
+              filters:
+              - response_flag_filter: {flags: [UAEX]}
+              - status_code_filter: {comparison: {op: GE, value: {default_value: 200}}}
+              - status_code_filter: {comparison: {op: LE, value: {default_value: 299}}}
+          status_code: 403
+{{- end}}
 {{- if .RateLimit}}
 {{- if .Auth}}
-        # The first mapper that matches wins, so a refusal the auth check itself answered is left as the check wrote
-        # it. ext_authz marks its answers with the UAEX flag, and this mapper, which changes nothing, matches them
-        # before the one below could give a 429 from the check to a Connect call the rate limit's body (measured on
-        # Envoy 1.40.2).
+        # The first mapper that matches wins. This one changes nothing and matches every other answer of the auth
+        # check (ext_authz marks them UAEX), so a refusal the check wrote stays as it wrote it. It comes after the 2xx
+        # mapper above, so a check's other 2xx still becomes 403, and before the Connect answer below, so a 429 the
+        # check answers to a Connect call keeps the check's body, not the rate limit's (measured on Envoy 1.40.2).
         - filter: {response_flag_filter: {flags: [UAEX]}}
 {{- end}}
         # A Connect client reads Envoy's plain 429 to a request over a rate limit as unavailable, so a 429 to a request
@@ -107,14 +130,15 @@ filter_chains:
       access_log: $access_log
 {{- if or .Removed .Auth .Downstream}}
       # These headers are removed before routing and before every filter, so no route, filter or service sees a
-      # client's copy, in this order: the names in remove_from_clients; with auth, the question headers
-      # x-gateway-action and x-gateway-reports and each accept name, each unless an entry before it already covers it
-      # (an exact entry equal to it, or a prefix entry it starts with); with auth, Envoy's mark
-      # x-envoy-auth-failure-mode-allowed; and with tracing, x-envoy-downstream-service-cluster and
-      # x-envoy-downstream-service-node, each unless an entry before it covers it (downstreamRemoved in generate.go).
-      # The question headers and the accept headers are removed whether or not
-      # remove_from_clients lists them, because a client must not be able to forge what the gateway asks the check or
-      # what the check says (removedFromClients in generate.go builds the list). Envoy 1.40.2,
+      # client's copy, in this order: the names in remove_from_clients; with auth.ask, the question headers
+      # x-gateway-action and x-gateway-reports and each accept name; with auth.jwt, each claims header; each of these
+      # unless an entry before it already covers it (an exact entry equal to it, or a prefix entry it starts with); with
+      # auth.ask, Envoy's mark x-envoy-auth-failure-mode-allowed; with tracing, x-envoy-downstream-service-cluster and
+      # x-envoy-downstream-service-node; and with otel, x-envoy-decorator-operation, which would rename the span; each
+      # of the last three unless an entry before it covers it (downstreamRemoved in generate.go).
+      # The question headers, the accept headers and the claims headers are removed whether or not
+      # remove_from_clients lists them, because a client must not be able to forge what the gateway asks the check,
+      # what the check says or what the token says (removedFromClients in generate.go builds the list). Envoy 1.40.2,
       # http_connection_manager.proto: early_header_mutation_extensions "will be called before any routing, tracing, or
       # any filter processing"; the extension's mutations are config.common.mutation_rules.v3.HeaderMutation (remove,
       # remove_on_match). The extension is left out when there is nothing to remove, because it needs at least one

@@ -29,6 +29,7 @@ func TestReference(t *testing.T) {
 			{Name: "level", Doc: "How much is logged.", Kind: Enum, Values: []string{"low", "mid", "high"}},
 			{Name: "auth", Doc: "off skips the check.", Kind: Enum, Values: []string{"off"}},
 			{Name: "on", Doc: "true turns it on.", Kind: Bool},
+			{Name: "only", Doc: "true keeps it on.", Kind: True},
 			{Name: "note", Doc: "Any text.", Kind: Text},
 		}}, want: tableHead +
 			"| `listen` | The port. | Required. A whole number from 1 to 65535. Not the same as `admin`. | core |\n" +
@@ -36,6 +37,7 @@ func TestReference(t *testing.T) {
 			"| `level` | How much is logged. | `low`, `mid` or `high`. | core |\n" +
 			"| `auth` | off skips the check. | `off`. | core |\n" +
 			"| `on` | true turns it on. | `true` or `false`. | core |\n" +
+			"| `only` | true keeps it on. | `true`. | core |\n" +
 			"| `note` | Any text. | Text. | core |\n"},
 		// The description's plain text is escaped, so a * or an _ in a Doc or an Expect is shown, not read as
 		// emphasis, and a | does not end the cell.

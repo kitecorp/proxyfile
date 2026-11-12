@@ -1,8 +1,14 @@
-# Every key but services.<name>.address, rpc.proto, envoy.tracing, nginx and haproxy, in HOCON, with invented values;
-# the keys of 2.1 (services.<name>.addresses, .balance, .hash, .health, dns, tls, client_address, rate_limit) are not
-# in it yet. It gives the same envoy.yaml as ../yaml/proxyfile.yaml.
+# Every key but rpc.proto, envoy.tracing, the xray provider, hash.client, nginx and haproxy, in HOCON, with invented
+# values. It gives the same envoy.yaml as ../yaml/proxyfile.yaml.
 listen = 10000
 admin = 9901
+
+tls {
+  certificate = /etc/gateway/tls/certificate.pem
+  key = /etc/gateway/tls/key.pem
+  clients { ca = /etc/gateway/tls/clients-ca.pem }
+}
+client_address = connection
 
 limits {
   connections = 4096
@@ -16,9 +22,18 @@ timeouts {
 }
 
 services {
-  shop { http = 8080, grpc = 8081 }
+  shop {
+    http = 8080
+    grpc = 8081
+    addresses = ["10.0.1.11", "10.0.1.12"]
+    balance = least_requests
+    health { path = /healthz, grpc = true, interval = 10s, timeout = 1s, healthy = 2, unhealthy = 3 }
+  }
   accounts { grpc = 7070, http = 7070, host_header = "127.0.0.1:7070" }  // grpc first: the clusters keep this order
+  catalog { http = 8090, address = catalog.internal.example, balance = hash, hash { header = x-session-id } }
 }
+
+dns { resolver = "10.0.0.2:53" }
 
 auth {
   ask = "accounts /auth/check"
@@ -28,6 +43,16 @@ auth {
   only_with_header = authorization
   send = [authorization, x-country]
   accept = ["x-user-*", "x-tier-*"]
+  send_request = true
+  jwt {
+    issuer = "https://login.example.com"
+    audiences = [api.example.com, admin.example.com]
+    keys = "https://login.example.com/.well-known/jwks.json"
+    ca = /etc/gateway/jwt/ca.pem
+    header = x-access-token
+    optional = true
+    claims { x-subject = sub, x-roles = realm.roles }
+  }
 }
 
 remove_from_clients = [
@@ -67,6 +92,7 @@ routes = [
   {
     rpc {
       retries = 1
+      rate_limit { requests = 100, per = 1s, by = all }
       to {
         "example.shop.*" { service = shop, name = shop }
         "*" = accounts
@@ -77,6 +103,7 @@ routes = [
     name = accounts-webhooks, path = /api/webhooks, method = POST, to = accounts
     rewrite = /hooks/payments, auth = off
   }
+  { name = catalog, prefix = /catalog/, to = catalog, rate_limit { requests = 20, per = 1s, burst = 10, by = client } }
   { name = shop, prefix = /, to = shop, retries = 1 }
 ]
 
@@ -89,6 +116,21 @@ rpc {
 }
 
 log { status_from = 400, sample = 1% }
+
+tracing {
+  provider {
+    otel {
+      endpoint = "10.0.3.40:4317"
+      service = example-gateway
+      sample { rate = 10% }
+    }
+  }
+  tags {
+    environment { env = APP_ENVIRONMENT, default = local }
+    request_id { header = x-request-id }
+  }
+  path_in_url = true
+}
 
 envoy {
   namespace = example.gateway

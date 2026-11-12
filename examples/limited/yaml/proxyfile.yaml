@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=../../../schema/proxyfile.schema.json
 # Rate limits: the RPC methods of the rpc entry share one limit of 100 calls a second for every client together, and
 # login admits each client address 5 requests a minute, with 5 more after a quiet spell. The last route has no limit,
-# so a path only it matches, such as //login, is never limited (docs/routes.md).
+# so a path only it matches, such as /login/, is never limited (docs/routes.md).
 # This file writes no tls, so client_address is forwarded: the per-client limit counts the address a proxy in front
 # of the gateway puts in X-Forwarded-For. A gateway that faces clients directly writes client_address: connection.
 listen: 8000

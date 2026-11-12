@@ -43,8 +43,9 @@ type Source struct {
 }
 
 // Methods returns each method of the compiled services that carries the option, sorted by path, and every .proto
-// file it read; or the problems of the first step that finds any. The steps are those of design section 5, "RPC
-// methods from the protobuf sources", in its order.
+// file it read; or the problems of the first step that finds any. The steps, in order: find the .proto files under the
+// roots, parse them, choose the files that declare a service, name every import that is not found, compile, and read
+// the methods that carry the option.
 func Methods(s Source) ([]rpc.Method, []string, []model.Problem) {
 	sources, read, problems := find(s.Roots)
 	if problems != nil {
@@ -79,7 +80,7 @@ func (s *source) file(name string) string {
 // find reads every root: each file whose name ends in .proto, at any depth, is a source under its import path, its
 // path under the root written with /, which is how fs.WalkDir names it. The walk goes through os.DirFS because a root
 // may itself be a symbolic link to a directory, which filepath.WalkDir would not walk into; below the root, fs.WalkDir
-// walks into no link to a directory (design section 5, step 1).
+// walks into no link to a directory.
 func find(roots []Root) (map[string]*source, []string, []model.Problem) {
 	found := map[string]*source{}
 	var read []string
@@ -331,8 +332,7 @@ type route struct {
 
 // valueIn returns the option's message in a method's options, or nil when the method does not carry it. protocompile
 // keeps the option as a known field when descriptor.proto is its built-in copy, and as unknown bytes when a root
-// brings its own copy (design section 11, call 32, measured); reading the bytes again with the compiled files as the
-// resolver reads both.
+// brings its own copy; reading the bytes again with the compiled files as the resolver reads both.
 func (r route) valueIn(options proto.Message, types linker.Resolver) (protoreflect.Message, error) {
 	data, err := proto.Marshal(options)
 	if err != nil {

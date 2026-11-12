@@ -123,7 +123,8 @@ func (r *rules) route(route *model.Route, earlier []*model.Route) {
 	if i := slices.IndexFunc(earlier, sameMatch); i >= 0 {
 		r.Add(route.Pos, "route %q matches what route %q %s matches", name, earlier[i].Name.Value, earlier[i].Pos.Where())
 	}
-	if route.AuthOff != nil && r.g.Auth == nil {
+	// auth: off turns off the check and the token check, so it needs one of them: ask or jwt.
+	if route.AuthOff != nil && r.g.Auth == nil && r.g.JWT == nil {
 		r.Add(route.AuthOff.Pos, "route %q turns auth off, but no auth is declared", name)
 	}
 	if route.Match != model.Pattern {

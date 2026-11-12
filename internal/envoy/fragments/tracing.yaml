@@ -1,21 +1,28 @@
-# The connection manager's tracing: an X-Ray segment for each sampled request (Envoy 1.40.2,
-# http_connection_manager.proto lines 174 to 213).
-#
-# Envoy's three sampling shares (client_sampling, random_sampling, overall_sampling) stay at their default of 100%,
-# because the X-Ray tracer ignores Envoy's own decision (xray_tracer_impl.cc line 79) and follows a request's Sampled
-# flag, otherwise the manifest (lines 83 to 104).
+# The connection manager's tracing: a span for each sampled request, sent to X-Ray or to an OpenTelemetry collector
+# (Envoy 1.40.2, http_connection_manager.proto lines 174 to 213).
 #
 # max_path_tag_length: 0 keeps the URL's scheme and host and cuts the path with its query (utility.cc lines 1079 to
 # 1084); without it Envoy keeps 256 characters of the path (http_connection_manager.proto lines 203 to 206).
 #
-# The agent is always written, because the tracer refuses an endpoint that is not UDP, which an unset one is, its
-# protocol being TCP, 0 (xray/config.cc lines 35 to 37; api/envoy/config/core/v3/address.proto lines 57 to 58).
-#
 # An environment tag is read once, when Envoy starts (custom_tag_impl.cc lines 61 to 62), and a tag with an empty
 # value is not set (lines 40 to 45).
 #
-# Without sample there is no manifest, and Envoy's own rule applies: the first request each second and then 5%
-# (localized_sampling.cc lines 13 to 16 and 90 to 94).
+# X-Ray. Envoy's three sampling shares (client_sampling, random_sampling, overall_sampling) stay at their default of
+# 100%, because the X-Ray tracer ignores Envoy's own decision (xray_tracer_impl.cc line 79) and follows a request's
+# Sampled flag, otherwise the manifest (lines 83 to 104). The agent is always written, because the tracer refuses an
+# endpoint that is not UDP, which an unset one is, its protocol being TCP, 0 (xray/config.cc lines 35 to 37;
+# api/envoy/config/core/v3/address.proto lines 57 to 58). Without sample there is no manifest, and Envoy's own rule
+# applies: the first request each second and then 5% (localized_sampling.cc lines 13 to 16 and 90 to 94).
+#
+# OpenTelemetry. The tracer follows Envoy's own decision, unless a request's traceparent says it is not sampled, so
+# random_sampling is sample.rate; client_sampling is 0, because with Envoy's default of 100% a client's
+# x-client-trace-id forces a trace at every rate (both measured on Envoy 1.40.2). overall_sampling stays at its default
+# of 100%. The spans go over gRPC to the collector's cluster, which generate.go adds after the services'
+# (extraCluster).
+{{- with .OTel}}
+client_sampling: {value: 0}
+random_sampling: {value: {{.RatePercent}}}
+{{- end}}
 {{- if not .PathInURL}}
 max_path_tag_length: 0
 {{- end}}
@@ -31,6 +38,15 @@ custom_tags:
 {{- end}}
 {{- end}}
 provider:
+{{- with .OTel}}
+  name: envoy.tracers.opentelemetry
+  typed_config:
+    "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+    grpc_service:
+      envoy_grpc: {cluster_name: {{q $.Cluster}}}
+    service_name: {{q .Service}}
+{{- end}}
+{{- with .XRay}}
   name: envoy.tracers.xray
   typed_config:
     "@type": type.googleapis.com/envoy.config.trace.v3.XRayConfig
@@ -39,4 +55,5 @@ provider:
 {{- if .Sample}}
     sampling_rule_manifest:
       inline_string: $manifest
+{{- end}}
 {{- end}}

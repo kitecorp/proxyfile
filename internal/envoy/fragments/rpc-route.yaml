@@ -5,7 +5,10 @@
 # envoy.connect_bridge, each turns on the bridge, which turns the call into gRPC before the router, and the Lua filter
 # that sets Connect's current status on the bridge's errors: a FilterConfig entry turns on, for its route, a filter the
 # listener's list writes as disabled (Envoy 1.40.2, http_filters.rst, "Disabled flag based route filter chain"). Without
-# the bridge a route with no question carries no typed_per_filter_config at all.
+# the bridge a route with no question carries no typed_per_filter_config at all. With OpenTelemetry the decorator names
+# the route's span after the route, where Envoy's own name is ingress (measured on Envoy 1.40.2). propagate: false keeps
+# the name out of the answer: with Envoy's default of true every response carries the route's name in
+# x-envoy-decorator-operation (measured on Envoy 1.40.2). With X-Ray or no tracing a route carries none.
 #
 # Written in flow style, so the generated file holds each RPC route on one line.
 {
@@ -16,6 +19,9 @@
 {{- if and .Auth .RateLimit}}, {{end}}
 {{- with .RateLimit}}{{q .Namespace}}: { {{- .By}}: {{q .ID}}}{{end -}}
   }},
+{{- end}}
+{{- with .Decorator}}
+  decorator: {operation: {{q .}}, propagate: false},
 {{- end}}
 {{- $question := and .Auth (or .Action .Reports)}}
 {{- if or $question .Bridge}}

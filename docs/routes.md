@@ -5,8 +5,14 @@
 How routes are matched:
 
 - The routes are tried in the order written, and the first that matches wins. Every environment gets the same list. Put
-  a `prefix: /` route last, because it matches every path.
+  a `prefix: /` route last, because it matches every path. The generated file's first route, before every route written
+  here, answers `400` to a path that still holds `/.;` or `/..;` after normalisation.
 - Write exactly one of `prefix`, `path` and `pattern` on each route.
+- A route matches the request's path after the proxy normalises it: dot segments resolved, repeated slashes merged,
+  `%2F` and a backslash read as `/`, and an escaped letter written out (`%61` as `a`). The service receives that path:
+  `/a/../b` as `/b`, `//a` as `/a`, `/files/a%2Fb` and `/files/a\b` as `/files/a/b`. A `;` parameter on a name and the
+  case of letters are kept as sent: `/admin;x=1` and `/ADMIN` reach the service unchanged. Measured on Envoy 1.40.2.
+  [A route with `auth: off`](auth.md#a-route-with-auth-off) says why the proxy does it.
 - Two routes with the same kind of match, the same text and the same `method` are a problem, because the later one is
   never reached.
 - A retry happens only when the request never reached the service (Envoy's `connect-failure` and
@@ -44,7 +50,7 @@ pattern matches is a problem.
 | `routes[].method` | Matches only requests with this HTTP method. | An HTTP method in capitals, such as POST. | core |
 | `routes[].to` | The service the route goes to. | Required. Lower-case letters, digits and -, starting with a letter. A declared service with an `http` port. | core |
 | `routes[].rewrite` | Replaces the matched prefix or path before the request goes to the service. | A path starting with /. Not allowed with `pattern`. | core |
-| `routes[].auth` | off sends the route's requests to the service without the check. | `off`. Needs an `auth` key. | core |
+| `routes[].auth` | off sends the route's requests to the service without auth's checks: no service is asked and no token is verified. | `off`. Needs an `auth` key. | core |
 | `routes[].retries` | How many times a request that never reached the service is tried again. | A whole number from 0 to 4294967295. | core |
 | `routes[].rate_limit` | How many requests the route admits in a period; a request over the limit is answered 429 and never reaches the service. | A mapping. One limit for the route's copy in every environment. | core |
 | `routes[].rate_limit.requests` | Requests admitted per period. | Required. A whole number from 1 to 4294967295. | core |
@@ -73,12 +79,13 @@ seconds.
   route; when more addresses than that use the route, the one not seen for longest loses its bucket and starts again
   with a full one. An address is counted whole, so an IPv6 client that changes its address inside its own prefix gets a
   new bucket each time. `by: all` counts every client together.
-- A limit counts the requests its route matches, and only those. The gateway matches a path as the client sent it: it
-  merges no slashes, resolves no dot segments and keeps the case. So when another route sends the same service a path
-  the service reads as the limited one, a client over its limit sends that path instead. Measured on Envoy 1.40.2 with
-  `examples/limited`: after `POST /login` was answered `429`, `POST //login`, `/login/` and `/LOGIN` each took the
-  `shop` route and reached the service, and a service that merges slashes answered `//login` as `/login`. Give the
-  route that takes the rest a limit too, or make the service refuse the other spellings.
+- A limit counts the requests its route matches, and only those. The route is matched on the normalised path, which
+  merges slashes and resolves dot segments but keeps the case, a slash at the end and a `;` parameter. So when another
+  route sends the same service a path the service reads as the limited one, a client over its limit sends that path
+  instead. Measured on Envoy 1.40.2 with `examples/limited`: after `POST /login` was answered `429`, `POST //login`,
+  `/x/../login` and `/%2Flogin` were answered `429` too, and `/login/`, `/LOGIN` and `/login;x=1` each took the `shop`
+  route and reached the service. Give the route that takes the rest a limit too, or make the service refuse the other
+  spellings.
 - A gRPC call over the limit gets `grpc-status` 8, `RESOURCE_EXHAUSTED`, which gRPC clients do not retry by default. A
   Connect call gets the Connect error `resource_exhausted`. A Connect GET call carries no `connect-protocol-version`
   header and gets the plain `429`, and a Connect stream reads either answer as `unavailable`. Any other request gets
@@ -94,7 +101,7 @@ routes:
 
 Here every RPC method together admits 100 calls a second. Each client may send 10 login requests at once, then one
 every 12 seconds, the rate of 5 a minute. The `shop` route has no limit, so a path only it matches is never limited,
-`//login` included.
+`/login/` included.
 
 [`examples/limited`](../examples/limited/) writes a limit on a route and on the rpc entry in
 [YAML](../examples/limited/yaml/proxyfile.yaml) and [HOCON](../examples/limited/hocon/Proxyfile), each beside the

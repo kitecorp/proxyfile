@@ -23,12 +23,14 @@ routes = [
 
 Each example writes its HOCON form as `hocon/Proxyfile`, in a folder of its own beside `yaml/`, because `render` and
 `check` given no file refuse a folder that holds two of the names they read.
-[`examples/full/hocon/Proxyfile`](../examples/full/hocon/Proxyfile) writes every key but `services.<name>.address`,
-`envoy.tracing`, `rpc.proto`, the `nginx` and `haproxy` blocks and the keys of 2.1 (`services.<name>.addresses`,
-`.balance`, `.hash`, `.health`, `dns`, `tls`, `client_address` and `rate_limit`), and gives the same file as
+[`examples/full/hocon/Proxyfile`](../examples/full/hocon/Proxyfile) writes every key but `rpc.proto`, `envoy.tracing`,
+the `xray` provider, `hash.client` and the `nginx` and `haproxy` blocks ([The format](format.md) names the example that
+writes each), and gives the same file as
 [`examples/full/yaml/proxyfile.yaml`](../examples/full/yaml/proxyfile.yaml).
-[`examples/tracing/hocon/Proxyfile`](../examples/tracing/hocon/Proxyfile) writes `envoy.tracing`, as its YAML twin,
-[`examples/tracing/yaml/proxyfile.yaml`](../examples/tracing/yaml/proxyfile.yaml), does.
+[`examples/tracing/hocon/Proxyfile`](../examples/tracing/hocon/Proxyfile) writes `tracing`, as its YAML twin,
+[`examples/tracing/yaml/proxyfile.yaml`](../examples/tracing/yaml/proxyfile.yaml), does, and
+[`examples/tracing/envoy-tracing/proxyfile.yaml`](../examples/tracing/envoy-tracing/proxyfile.yaml) writes the same at
+`envoy.tracing` and gives the same `envoy.yaml`.
 [`examples/grpc/hocon/Proxyfile`](../examples/grpc/hocon/Proxyfile) turns `envoy.connect_bridge` off, as
 [`examples/grpc/yaml/proxyfile.yaml`](../examples/grpc/yaml/proxyfile.yaml) does.
 [`examples/partial/hocon/Proxyfile`](../examples/partial/hocon/Proxyfile) pulls its methods in with

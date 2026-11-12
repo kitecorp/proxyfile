@@ -76,7 +76,7 @@ func (c *checker) value(f Field, n *tree.Node, subject string) {
 				c.value(*f.Item, item, itemSubject(item, subject))
 			}
 		}
-	case Text, Int, Bool, Enum:
+	case Text, Int, Bool, True, Enum:
 		if c.kind(n, tree.Scalar, subject, "a single value") {
 			c.scalar(f, n, subject)
 		}
@@ -188,6 +188,10 @@ func (c *checker) scalar(f Field, n *tree.Node, subject string) {
 		if n.Quoted || (n.Text != "true" && n.Text != "false") {
 			c.Add(n.Pos, "%s must be true or false%s", subject, quotedNote(n))
 		}
+	case True:
+		if n.Quoted || n.Text != "true" {
+			c.Add(n.Pos, "%s must be true%s", subject, quotedNote(n))
+		}
 	case Enum:
 		if !slices.Contains(f.Values, n.Text) {
 			c.Add(n.Pos, "%s must be one of: %s", subject, strings.Join(f.Values, ", "))
@@ -224,19 +228,27 @@ func wholeNumberIn(text string, lowest, highest int64) bool {
 
 // choose picks the choice that fits n: for a mapping, the Map choice whose Select key it has, else the Map or Dict
 // choice without Select, as a Dict's keys are the writer's and none can select it; for a single value, the Text
-// choice. It returns nil when no choice fits n's kind.
+// choice; for a list, the List choice. It returns nil when no choice fits n's kind, and a mapping that has the Select
+// key of two choices fits none, so it gets the Either's message instead of one choice's unknown key.
 func choose(choices []Field, n *tree.Node) *Field {
-	var fallback *Field
+	var selected, fallback *Field
 	for i := range choices {
 		choice := &choices[i]
 		switch {
 		case n.Kind == tree.Map && choice.Kind == Map && choice.Select != "":
 			if n.Get(choice.Select) != nil {
-				return choice
+				if selected != nil {
+					return nil
+				}
+				selected = choice
 			}
-		case n.Kind == tree.Map && (choice.Kind == Map || choice.Kind == Dict), n.Kind == tree.Scalar && choice.Kind == Text:
+		case n.Kind == tree.Map && (choice.Kind == Map || choice.Kind == Dict), n.Kind == tree.Scalar && choice.Kind == Text,
+			n.Kind == tree.List && choice.Kind == List:
 			fallback = choice
 		}
+	}
+	if selected != nil {
+		return selected
 	}
 	return fallback
 }
