@@ -102,6 +102,8 @@ func form(f Field) string {
 		return fmt.Sprintf("a whole number from %d to %d", f.Min, f.Max)
 	case Bool:
 		return "`true` or `false`"
+	case True:
+		return "`true`"
 	case Enum:
 		return codes(f.Values, "or")
 	case Either:

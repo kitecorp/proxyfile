@@ -1,0 +1,63 @@
+# The token filter: the proxy verifies a signed token (a JWT) on each request itself, its signature against the keys,
+# its issuer, its audience and its expiry. It has one provider, jwt, and one rule that requires it on every path
+# (Envoy 1.40.2, api/envoy/extensions/filters/http/jwt_authn/v3/config.proto). A token that fails is answered 401, or
+# 403 when its audience is not accepted, and the request reaches neither the check nor a service, unless its route
+# writes auth: off, which turns the filter off (route.yaml). Measured on Envoy 1.40.2.
+#
+# bypass_cors_preflight is not written: the CORS filter before this one answers every preflight, and the flag would be
+# the one way past the token.
+name: envoy.filters.http.jwt_authn
+typed_config:
+  "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
+  providers:
+    jwt:
+      issuer: {{q .JWT.Issuer}}
+      # audiences: any writes no audiences, and Envoy then checks no aud claim.
+{{- with .JWT.Audiences}}
+      audiences: [{{range $i, $audience := .}}{{if $i}}, {{end}}{{q $audience}}{{end}}]
+{{- end}}
+      # A token with no expiry would be valid for ever, so one without an exp claim is refused.
+      require_expiration: true
+{{- with .JWT.File}}
+      local_jwks: {filename: {{q .}}}
+{{- else}}
+      # The keys are fetched from the URL through the jwks cluster and kept for 10 minutes, Envoy's default
+      # cache_duration (config.proto, lines 412 to 413). While they cannot be fetched every token is refused, and the
+      # next request fetches them again (measured on Envoy 1.40.2). The fetch needs a timeout
+      # (api/envoy/config/core/v3/http_uri.proto, lines 52 to 57). A fetch that cannot connect, is reset or is answered
+      # 5xx is tried once more (config.proto, lines 436 to 465; source/extensions/filters/http/jwt_authn/jwks_cache.cc,
+      # lines 111 to 113): the keys host is one backend for each of its addresses, with no health check, so when one
+      # address does not take the connection the second try goes to the other. Measured on Envoy 1.40.2 with a name
+      # that has an address of each kind and a server on one: without the retry 9 of 15 requests with a valid token
+      # were answered 401, with it none.
+      remote_jwks:
+        http_uri: {uri: {{q .JWT.URL}}, cluster: {{.JWT.Cluster}}, timeout: 2s}
+        retry_policy: {num_retries: 1}
+{{- end}}
+      # The token stays on the request after it passes, so the check, when send names its header, and the service
+      # still receive it.
+      forward: true
+      # from_headers is always written: without it Envoy also reads a token from the access_token query parameter
+      # (Envoy 1.40.2, api/envoy/extensions/filters/http/jwt_authn/v3/config.proto, line 210), which RFC 6750 section
+      # 5.3 advises against, because browser histories and server logs keep URLs. With it a token in the query is not
+      # read, and the request counts as one with no token (measured on Envoy 1.40.2). The authorization header carries
+      # the token after "Bearer " written exactly so, any other header the bare token; a token after bearer in lower
+      # case is not read either (measured on Envoy 1.40.2).
+      from_headers: [{name: {{q .JWT.Header}}{{if .JWT.Bearer}}, value_prefix: "Bearer "{{end}}}]
+{{- with .JWT.Claims}}
+      # Each claim is set on the request in its header; a claim that is not text arrives as the base64 of its JSON
+      # (measured on Envoy 1.40.2). The early header removal takes a client's own copy first (listener.yaml).
+      claim_to_headers: [{{range $i, $claim := .}}{{if $i}}, {{end}}{header_name: {{q $claim.Header}}, claim_name: {{q $claim.Name}}}{{end}}]
+{{- end}}
+  rules:
+  - match: {prefix: "/"}
+{{- if .JWT.Optional}}
+    # With optional a request with no token passes unverified, and one with a token that fails is still refused. A
+    # token the filter does not read counts as no token, so the request passes with it still on, and the service must
+    # not trust it (measured on Envoy 1.40.2).
+    requires:
+      requires_any:
+        requirements: [{provider_name: jwt}, {allow_missing: {}}]
+{{- else}}
+    requires: {provider_name: jwt}
+{{- end}}

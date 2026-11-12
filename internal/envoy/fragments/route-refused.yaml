@@ -1,0 +1,9 @@
+# The first route of every virtual host refuses a path that still holds a dot segment with a ; parameter once the
+# listener has normalised it. Envoy resolves ..; when the dots are written as dots, and writes %2e%2e; out as ..;
+# without resolving it. A server that drops the parameter and then resolves the dots reads another path than the one
+# the route was picked by: /open/%2e%2e;/private/report.txt took a route with prefix /open/ and auth off, and Tomcat
+# 11.0.27 answered it with /private/report.txt (measured on Envoy 1.40.2). The route is not auth off, so the token
+# filter and the check still run before its 400.
+name: "refused:dot-segment-with-parameter"
+match: {safe_regex: {regex: ".*/\\.\\.?;.*"}}
+direct_response: {status: 400}

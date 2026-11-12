@@ -1,11 +1,16 @@
 # One plain route. Envoy tries a virtual host's routes in the order written and uses the first that matches (Envoy
 # 1.40.2, route_components.proto, VirtualHost.routes).
 #
-# With auth on, a plain route asks the check for authentication alone: it adds no x-gateway- header, and its empty
-# action is for the auth-unavailable log line. auth: off turns ext_authz off for this route alone
-# (ext_authz.proto, ExtAuthzPerRoute.disabled), and such a route carries no action. A limited route also carries its
-# bucket under the rate-limit namespace (filter-local-ratelimit.yaml), so a route with auth off and a limit carries its
-# bucket alone, and a route with neither carries no metadata.
+# With auth.ask, a plain route asks the check for authentication alone: it adds no x-gateway- header, and its empty
+# action is for the auth-unavailable log line. auth: off turns off, for this route alone, each of the two filters the
+# gateway has: the token filter with auth.jwt (jwt_authn/v3/config.proto, PerRouteConfig.disabled) and ext_authz with
+# auth.ask (ext_authz.proto, ExtAuthzPerRoute.disabled), and such a route carries no action. A filter the gateway does
+# not have takes no entry. A limited route also carries its bucket under the rate-limit namespace
+# (filter-local-ratelimit.yaml), so a route with auth off and a limit carries its bucket alone, and a route with neither
+# carries no metadata. With OpenTelemetry the decorator names the route's span after the route, where Envoy's own name
+# is ingress (measured on Envoy 1.40.2). propagate: false keeps the name out of the answer: with Envoy's default of true
+# every response carries the route's name in x-envoy-decorator-operation (measured on Envoy 1.40.2). With X-Ray or no
+# tracing a route carries none.
 name: {{q .Name}}
 match: {
 {{- if eq .Match "prefix"}}prefix: {{q .Value}}
@@ -20,10 +25,20 @@ metadata: {filter_metadata: { {{- if .Metadata}}{{q .Namespace}}: {action: ""}{{
 {{- with .RateLimit}}{{q .Namespace}}: { {{- .By}}: {{q .ID}}}{{end -}}
 }}
 {{- end}}
+{{- with .Decorator}}
+decorator: {operation: {{q .}}, propagate: false}
+{{- end}}
 route: $action
 {{- if .AuthOff}}
 typed_per_filter_config:
+{{- if .JWT}}
+  envoy.filters.http.jwt_authn:
+    "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+    disabled: true
+{{- end}}
+{{- if .Check}}
   envoy.filters.http.ext_authz:
     "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
     disabled: true
+{{- end}}
 {{- end}}

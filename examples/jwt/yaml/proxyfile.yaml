@@ -1,0 +1,20 @@
+# yaml-language-server: $schema=../../../schema/proxyfile.schema.json
+# A gateway that verifies a signed token on each request itself, with no auth service of its own: the keys are a file
+# on the proxy's host, the token's subject and roles reach the service as headers, and the sign-in route takes no token.
+listen: 8000
+services:
+  app: {http: 3000}
+  identity: {http: 4000}
+auth:
+  jwt:
+    issuer: https://login.example.com
+    audiences: [api.example.com]
+    keys: /etc/gateway/jwt/jwks.json
+    claims:
+      x-user-id: sub
+      x-user-roles: realm.roles
+origins:
+  all: {hosts: [localhost], origins: ["http://localhost:3000"]}
+routes:
+  - {name: sign-in, prefix: /login/, to: identity, auth: off}
+  - {name: app, prefix: /, to: app}

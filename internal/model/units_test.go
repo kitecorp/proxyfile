@@ -165,3 +165,46 @@ func TestParseResolver(t *testing.T) {
 		}
 	}
 }
+
+// An endpoint is an IP address or a DNS name, and a port from 1 to 65535 that is always written; IPv6 takes brackets
+// and no zone, and dns says the host is a name the proxy looks up.
+func TestParseEndpoint(t *testing.T) {
+	cases := []struct {
+		text, host string
+		port       int64
+		dns, ok    bool
+	}{
+		{"127.0.0.1:4317", "127.0.0.1", 4317, false, true}, {"[fd00::40]:4317", "fd00::40", 4317, false, true},
+		{"otel-collector:4317", "otel-collector", 4317, true, true}, {"collector", "", 0, false, false},
+		{"fd00::40:4317", "", 0, false, false}, {"127.0.0.1:0", "", 0, false, false}, {"127.0.0.1:65536", "", 0, false, false},
+		{"10.0.0.256:4317", "", 0, false, false}, {"[fe80::1%eth0]:4317", "", 0, false, false},
+	}
+	for _, c := range cases {
+		host, port, dns, ok := ParseEndpoint(c.text)
+		if host != c.host || port != c.port || dns != c.dns || ok != c.ok {
+			t.Errorf("ParseEndpoint(%q) = %q, %d, %t, %t, want %q, %d, %t, %t", c.text, host, port, dns, ok, c.host, c.port, c.dns, c.ok)
+		}
+	}
+}
+
+// A keys URL is https, with no user part, and its host an IP address (IPv6 in brackets, no zone) or a DNS name; its
+// port is 443 when not written, and dns says the host is a name the proxy looks up.
+func TestParseKeysURL(t *testing.T) {
+	cases := []struct {
+		text, host string
+		port       int64
+		dns, ok    bool
+	}{
+		{"https://login.example.com/.well-known/jwks.json", "login.example.com", 443, true, true},
+		{"https://10.0.3.50:8443/jwks.json", "10.0.3.50", 8443, false, true}, {"https://[fd00::50]/jwks.json", "fd00::50", 443, false, true},
+		{"https://", "", 0, false, false}, {"https://user@login.example.com/k", "", 0, false, false},
+		{"https://login.example.com:0/k", "", 0, false, false}, {"https://10.0.0.256/k", "", 0, false, false},
+		{"http://login.example.com/k", "", 0, false, false},
+	}
+	for _, c := range cases {
+		host, port, dns, ok := ParseKeysURL(c.text)
+		if host != c.host || port != c.port || dns != c.dns || ok != c.ok {
+			t.Errorf("ParseKeysURL(%q) = %q, %d, %t, %t, want %q, %d, %t, %t", c.text, host, port, dns, ok, c.host, c.port, c.dns, c.ok)
+		}
+	}
+}

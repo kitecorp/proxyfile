@@ -1,5 +1,7 @@
 package model
 
+import "strings"
+
 // Gateway is one proxyfile after reading: every default filled in and every rule checked. Each value a rule or a
 // later stage may name in a problem keeps the position it was written at; a default that was not written has no
 // position, and nothing refuses a default.
@@ -13,21 +15,22 @@ type Gateway struct {
 	Services          []Service // written order
 	ServicesPos       Pos       // the `services` key
 	Resolver          *Resolver // nil when not written
-	Auth              *Auth
+	Auth              *Auth     // the check, auth.ask; nil when ask is not written
+	JWT               *JWT      // auth.jwt; nil when not written
 	RemoveFromClients []Header
 	Origins           Text    // the origins file as written, absolute or relative to the proxyfile's directory; "" when the proxyfile writes the origins
 	Routes            []Route // written order
 	RoutesPos         Pos     // the `routes` key
 	Log               *Log
+	Tracing           *Tracing // nil when neither tracing nor envoy.tracing is written
 	Envoy             Envoy
 }
 
 // Envoy is the envoy block: what only the Envoy generator reads.
 type Envoy struct {
-	Namespace     string   // "proxyfile" when not written
-	Heap          *Size    // nil when not written
-	Tracing       *Tracing // nil when not written
-	ConnectBridge bool     // true when not written
+	Namespace     string // "proxyfile" when not written
+	Heap          *Size  // nil when not written
+	ConnectBridge bool   // true when not written
 }
 
 // TLS is the public listener's certificate and key, and the CA a client's certificate must chain to when tls.clients
@@ -160,12 +163,45 @@ type Auth struct {
 	Allow          bool // when_unavailable: allow
 	OnlyWithHeader string
 	Send, Accept   []Header
+	SendRequest    bool // send_request: true, which tells the check the request's path, method, scheme and host
+}
+
+// JWT is auth.jwt: the proxy verifies a signed token on each request itself.
+type JWT struct {
+	Issuer    string
+	Audiences []string // nil for any, which accepts every audience
+	// File or URL is set: the keys, as a JSON Web Key Set, in a file on the proxy's host or at an https URL.
+	File, URL string
+	// Host, Port and DNS describe the URL's host, "" and 0 with a file: an IP address (an IPv6 one without brackets) or a
+	// DNS name, which the proxy looks up while it runs; Port is 443 when the URL writes none.
+	Host     string
+	Port     int64
+	DNS      bool
+	CA       string  // the CA bundle the URL's certificate must chain to: /etc/ssl/certs/ca-certificates.crt when not written, "" with a file
+	Header   string  // the header that carries the token; authorization when not written
+	Optional bool    // a request with no token goes through unverified
+	Claims   []Claim // written order
+}
+
+// Claim is one entry of auth.jwt.claims: the token's claim Name, copied into the request header Header.
+type Claim struct {
+	Header, Name string
 }
 
 type Header struct {
 	Name   string // without the trailing * of a prefix
 	Prefix bool   // written with a trailing *
 	Pos    Pos
+}
+
+// Covers reports whether the entry h names every header other names: an exact entry covers the one name equal to it,
+// and a prefix entry every name and prefix that starts with it. The early header removal adds no header an entry before
+// it covers, and the reader refuses a claims header an entry of send or accept covers.
+func (h Header) Covers(other Header) bool {
+	if h.Prefix {
+		return strings.HasPrefix(other.Name, h.Name)
+	}
+	return !other.Prefix && h.Name == other.Name
 }
 
 type MatchKind string
@@ -220,14 +256,26 @@ type Log struct {
 	Pos           Pos // the `log` key
 }
 
-// Tracing is the envoy.tracing key: an X-Ray segment for each sampled request.
+// Tracing is the tracing key, or envoy.tracing, its old place, which holds the same keys: a trace span for each
+// sampled request.
 type Tracing struct {
-	XRay      XRay
+	// XRay and OTel are the provider written: exactly one is set, and envoy.tracing takes XRay alone.
+	XRay      *XRay
+	OTel      *OTel
 	Tags      []Tag // written order
 	PathInURL bool
 }
 
-// XRay is envoy.tracing.provider.xray, the one provider of 1.2.
+// OTel is tracing.provider.otel: an OpenTelemetry span for each sampled request, sent as OTLP over gRPC to a collector.
+type OTel struct {
+	Host        string // the collector's IP address, an IPv6 one without brackets, or its DNS name
+	Port        int64
+	DNS         bool   // Host is a DNS name, which the proxy looks up while it runs
+	Service     string // the service.name the spans carry
+	RatePercent int    // 5 when sample.rate is not written
+}
+
+// XRay is tracing.provider.xray: an X-Ray segment for each sampled request, sent to an agent over UDP.
 type XRay struct {
 	Address string // the agent's IPv4 address; 127.0.0.1 when not written
 	Port    int64  // the agent's UDP port; 2000 when not written

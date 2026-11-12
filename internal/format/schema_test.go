@@ -70,7 +70,7 @@ func TestSchemaAcceptsTheExamples(t *testing.T) {
 		// two.
 		{name: "tag with env and header", file: "tracing", from: "request_id: {header: x-request-id}",
 			to:   "request_id: {header: x-request-id, env: A}",
-			want: []string{`at '/envoy/tracing/tags/request_id': 'oneOf' failed, subschemas 0, 1 matched`}},
+			want: []string{`at '/tracing/tags/request_id': 'oneOf' failed, subschemas 0, 1 matched`}},
 		{name: "rpc.proto", file: "partial", extra: "rpc:\n  proto: {roots: [proto], option: example.gateway.v1.route}\n"},
 		// The checker refuses it too (TestCheck, "rpc with methods and proto").
 		{name: "rpc with methods and proto", file: "full", from: "\nrpc:\n", to: "\nrpc:\n  proto: {roots: [proto], option: o.v1.route}\n",
@@ -85,10 +85,21 @@ func TestSchemaAcceptsTheExamples(t *testing.T) {
 		// The checker refuses it too (TestCheck, "plain number as text"). oneOf reports why each choice refused the item:
 		// the first two lines are the rpc entry's choice, the last the route's.
 		{name: "plain number as text", file: "full", from: "name: shop,", to: "name: 404,", want: []string{
-			`at '/routes/3': additional properties 'name', 'prefix', 'retries', 'to' not allowed`,
-			`at '/routes/3': missing property 'rpc'`,
-			`at '/routes/3/name': got number, want string`,
+			`at '/routes/4': additional properties 'name', 'prefix', 'retries', 'to' not allowed`,
+			`at '/routes/4': missing property 'rpc'`,
+			`at '/routes/4/name': got number, want string`,
 		}},
+		// The checker refuses it too (TestCheck, "hash client false").
+		{name: "a key that takes only true", file: "balanced", from: "grpc: true", to: "grpc: false",
+			want: []string{`at '/services/orders/health/grpc': value must be true`}},
+		// The reader refuses the next three too (TestReadProblems, "ask without its three keys", "the check's keys
+		// without ask" and "auth with neither ask nor jwt"): auth takes ask, jwt or both, and the check's keys go with ask.
+		{name: "ask without timeout", file: "tracing", from: "  timeout: 1s\n", to: "",
+			want: []string{`at '/auth': properties 'timeout' required, if 'ask' exists`}},
+		{name: "timeout without ask", file: "jwt", from: "auth:\n  jwt:", to: "auth:\n  timeout: 1s\n  jwt:",
+			want: []string{`at '/auth': properties 'ask' required, if 'timeout' exists`}},
+		{name: "auth with no key", file: "minimal", extra: "auth: {}\n",
+			want: []string{`at '/auth': missing property 'ask'`, `at '/auth': missing property 'jwt'`}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -129,6 +140,7 @@ func TestSchemaKinds(t *testing.T) {
 			want: `{` + schemaKey + `,"minimum":0,"title":"proxyfile","type":"integer"}`},
 		{name: "bool", spec: Field{Kind: Bool},
 			want: `{` + schemaKey + `,"title":"proxyfile","type":"boolean"}`},
+		{name: "true only", spec: Field{Kind: True}, want: `{` + schemaKey + `,"const":true,"title":"proxyfile"}`},
 		{name: "enum", spec: Field{Kind: Enum, Values: []string{"allow", "deny"}},
 			want: `{` + schemaKey + `,"enum":["allow","deny"],"title":"proxyfile"}`},
 		{name: "list", spec: Field{Kind: List, Item: &Field{Kind: Text, Pattern: `^/`}},
@@ -143,6 +155,13 @@ func TestSchemaKinds(t *testing.T) {
 			want: `{` + schemaKey + `,"additionalProperties":false,"oneOf":[{"required":["prefix"]},{"required":["path"]}],` +
 				`"properties":{"name":{"type":"string"},"path":{"type":"string"},"prefix":{"type":"string"}},` +
 				`"required":["name"],"title":"proxyfile","type":"object"}`},
+		{name: "map with one or more of two keys, and keys that need another", spec: Field{Kind: Map,
+			AtLeastOneOf: []string{"ask", "jwt"}, Needs: map[string][]string{"ask": {"timeout"}, "timeout": {"ask"}},
+			Fields: []Field{{Name: "ask", Kind: Text}, {Name: "jwt", Kind: Bool}, {Name: "timeout", Kind: Text}}},
+			want: `{` + schemaKey + `,"additionalProperties":false,"anyOf":[{"required":["ask"]},{"required":["jwt"]}],` +
+				`"dependentRequired":{"ask":["timeout"],"timeout":["ask"]},` +
+				`"properties":{"ask":{"type":"string"},"jwt":{"type":"boolean"},"timeout":{"type":"string"}},` +
+				`"title":"proxyfile","type":"object"}`},
 		{name: "map with no required key", spec: Field{Kind: Map, Fields: []Field{{Name: "admin", Kind: Bool}}},
 			want: `{` + schemaKey + `,"additionalProperties":false,"properties":{"admin":{"type":"boolean"}},` +
 				`"title":"proxyfile","type":"object"}`},

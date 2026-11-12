@@ -54,11 +54,13 @@ func schemaOf(f Field) (map[string]any, error) {
 			s["required"] = required
 		}
 		if len(f.OneOf) > 0 {
-			branches := make([]any, len(f.OneOf))
-			for i, key := range f.OneOf {
-				branches[i] = map[string]any{"required": []string{key}}
-			}
-			s["oneOf"] = branches
+			s["oneOf"] = requiredEach(f.OneOf)
+		}
+		if len(f.AtLeastOneOf) > 0 {
+			s["anyOf"] = requiredEach(f.AtLeastOneOf)
+		}
+		if len(f.Needs) > 0 {
+			s["dependentRequired"] = f.Needs
 		}
 	case Dict:
 		value, err := schemaOf(*f.Item)
@@ -88,6 +90,8 @@ func schemaOf(f Field) (map[string]any, error) {
 		}
 	case Bool:
 		s["type"] = "boolean"
+	case True:
+		s["const"] = true
 	case Enum:
 		s["enum"] = f.Values
 	case Either:
@@ -103,4 +107,14 @@ func schemaOf(f Field) (map[string]any, error) {
 		return nil, fmt.Errorf("the key %q has kind %d, which has no JSON Schema form", f.Name, f.Kind)
 	}
 	return s, nil
+}
+
+// requiredEach returns one schema for each key, each requiring that key: as oneOf, exactly one of the keys is written,
+// and as anyOf, one or more.
+func requiredEach(keys []string) []any {
+	branches := make([]any, len(keys))
+	for i, key := range keys {
+		branches[i] = map[string]any{"required": []string{key}}
+	}
+	return branches
 }

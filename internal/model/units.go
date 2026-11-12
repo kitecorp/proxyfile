@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"net/netip"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -127,6 +128,56 @@ func ParseResolver(text string) (address string, port int64, ok bool) {
 		return addr.String(), 53, true
 	}
 	return "", 0, false
+}
+
+// ParseEndpoint returns the host and the port of an endpoint written as host:port, where the host is an IP address or a
+// DNS name; dns is true for a name, which the proxy looks up while it runs. An IPv6 address takes brackets, as
+// netip.ParseAddrPort reads it, and host holds it without them. The port is always written, from 1 to 65535: no
+// collector listens on port 0. A zone is refused, as ParseResolver refuses one.
+func ParseEndpoint(text string) (host string, port int64, dns bool, ok bool) {
+	if addrPort, err := netip.ParseAddrPort(text); err == nil {
+		if addrPort.Port() == 0 || addrPort.Addr().Zone() != "" {
+			return "", 0, false, false
+		}
+		return addrPort.Addr().String(), int64(addrPort.Port()), false, true
+	}
+	// A DNS name holds no colon, so the first colon ends it; a second one leaves the port unreadable.
+	name, digits, found := strings.Cut(text, ":")
+	number, err := strconv.ParseUint(digits, 10, 16)
+	if !found || !IsDNSName(name) || err != nil || number == 0 {
+		return "", 0, false, false
+	}
+	return name, int64(number), true, true
+}
+
+// ParseKeysURL returns the host and the port of an auth.jwt.keys URL: https, with no user part, and a host that is an IP
+// address or a DNS name; dns is true for a name, which the proxy looks up while it runs. An IPv6 address takes
+// brackets, which net/url requires, and host holds it without them. The port is 443 when not written, and otherwise
+// from 1 to 65535. A zone is refused, as ParseResolver refuses one.
+func ParseKeysURL(text string) (host string, port int64, dns bool, ok bool) {
+	u, err := url.Parse(text)
+	if err != nil || u.Scheme != "https" || u.User != nil {
+		return "", 0, false, false
+	}
+	port = 443
+	if digits := u.Port(); digits != "" {
+		number, err := strconv.ParseUint(digits, 10, 16)
+		if err != nil || number == 0 {
+			return "", 0, false, false
+		}
+		port = int64(number)
+	}
+	host = u.Hostname()
+	if addr, err := netip.ParseAddr(host); err == nil {
+		if addr.Zone() != "" {
+			return "", 0, false, false
+		}
+		return addr.String(), port, false, true
+	}
+	if !IsDNSName(host) {
+		return "", 0, false, false
+	}
+	return host, port, true, true
 }
 
 // ParseSize and ParseTime share scale so that one place refuses an int64

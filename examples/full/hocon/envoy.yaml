@@ -28,13 +28,33 @@ static_resources:
         typed_config:
           "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
           stat_prefix: public
-          use_remote_address: false
+          use_remote_address: true
           always_set_request_id_in_response: true
+          request_id_extension:
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.request_id.uuid.v3.UuidRequestIdConfig
+              pack_trace_reason: false
+          tracing:
+            client_sampling: {value: 0}
+            random_sampling: {value: 10}
+            custom_tags:
+            - tag: "environment"
+              environment: {name: "APP_ENVIRONMENT", default_value: "local"}
+            - tag: "request_id"
+              request_header: {name: "x-request-id"}
+            provider:
+              name: envoy.tracers.opentelemetry
+              typed_config:
+                "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+                grpc_service:
+                  envoy_grpc: {cluster_name: "otel_collector"}
+                service_name: "example-gateway"
           server_header_transformation: PASS_THROUGH
           max_request_headers_kb: 96
           common_http_protocol_options: {max_headers_count: 150}
-          normalize_path: false
-          merge_slashes: false
+          normalize_path: true
+          merge_slashes: true
+          path_with_escaped_slashes_action: UNESCAPE_AND_FORWARD
           upgrade_configs: [{upgrade_type: websocket}]
           local_reply_config:
             mappers:
@@ -49,6 +69,25 @@ static_resources:
                   - header_filter:
                       header: {name: origin, present_match: true}
               body: {inline_string: "Invalid CORS request"}
+            - filter:
+                and_filter:
+                  filters:
+                  - response_flag_filter: {flags: [UAEX]}
+                  - status_code_filter: {comparison: {op: GE, value: {default_value: 200}}}
+                  - status_code_filter: {comparison: {op: LE, value: {default_value: 299}}}
+              status_code: 403
+            - filter: {response_flag_filter: {flags: [UAEX]}}
+            - filter:
+                and_filter:
+                  filters:
+                  - status_code_filter:
+                      comparison: {op: EQ, value: {default_value: 429, runtime_key: gateway.local_reply.rate_limited_status}}
+                  - header_filter:
+                      header: {name: connect-protocol-version, present_match: true}
+              body: {inline_string: '{"code":"resource_exhausted","message":"local_rate_limited"}'}
+              body_format_override:
+                text_format_source: {inline_string: "%LOCAL_REPLY_BODY%"}
+                content_type: application/json
           access_log:
           - name: envoy.access_loggers.stdout
             filter:
@@ -119,7 +158,12 @@ static_resources:
               - remove_on_match: {key_matcher: {prefix: "x-client-"}}
               - remove_on_match: {key_matcher: {prefix: "x-tier-"}}
               - remove_on_match: {key_matcher: {prefix: "x-gateway-"}}
+              - remove: "x-subject"
+              - remove: "x-roles"
               - remove: x-envoy-auth-failure-mode-allowed
+              - remove: x-envoy-downstream-service-cluster
+              - remove: x-envoy-downstream-service-node
+              - remove: x-envoy-decorator-operation
           http_filters:
           - name: envoy.filters.http.set_metadata
             typed_config:
@@ -141,6 +185,51 @@ static_resources:
           - name: envoy.filters.http.cors
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.Cors
+          - name: envoy.filters.http.local_ratelimit
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+              stat_prefix: rate_limit
+              filter_enabled:
+                default_value:
+                  numerator: 100
+                  denominator: HUNDRED
+              filter_enforced:
+                default_value:
+                  numerator: 100
+                  denominator: HUNDRED
+              rate_limited_as_resource_exhausted: true
+              always_consume_default_token_bucket: false
+              max_dynamic_descriptors: 65536
+              rate_limits:
+              - actions:
+                - metadata: {descriptor_key: bucket, metadata_key: {key: "example.gateway.rate_limit", path: [{key: all}]}, source: ROUTE_ENTRY}
+              - actions:
+                - metadata: {descriptor_key: bucket, metadata_key: {key: "example.gateway.rate_limit", path: [{key: client}]}, source: ROUTE_ENTRY}
+                - remote_address: {}
+              descriptors:
+              - entries: [{key: bucket, value: "rpc"}]
+                token_bucket: {max_tokens: 100, tokens_per_fill: 100, fill_interval: 1s}
+              - entries: [{key: bucket, value: "catalog"}, {key: remote_address}]
+                token_bucket: {max_tokens: 30, tokens_per_fill: 20, fill_interval: 1s}
+          - name: envoy.filters.http.jwt_authn
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
+              providers:
+                jwt:
+                  issuer: "https://login.example.com"
+                  audiences: ["api.example.com", "admin.example.com"]
+                  require_expiration: true
+                  remote_jwks:
+                    http_uri: {uri: "https://login.example.com/.well-known/jwks.json", cluster: jwks, timeout: 2s}
+                    retry_policy: {num_retries: 1}
+                  forward: true
+                  from_headers: [{name: "x-access-token"}]
+                  claim_to_headers: [{header_name: "x-subject", claim_name: "sub"}, {header_name: "x-roles", claim_name: "realm.roles"}]
+              rules:
+              - match: {prefix: "/"}
+                requires:
+                  requires_any:
+                    requirements: [{provider_name: jwt}, {allow_missing: {}}]
           - name: envoy.filters.http.ext_authz
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.common.matching.v3.ExtensionWithMatcher
@@ -152,7 +241,7 @@ static_resources:
                     server_uri: {uri: "http://127.0.0.1:7070/auth/check", cluster: "accounts_http", timeout: 1.5s}
                     path_override: "/auth/check"
                     authorization_request:
-                      headers_to_add: [{key: x-gateway-timeout-ms, value: "1500"}]
+                      headers_to_add: [{key: x-gateway-timeout-ms, value: "1500"}, {key: x-forwarded-uri, value: "%REQ(:PATH)%"}, {key: x-forwarded-method, value: "%REQ(:METHOD)%"}, {key: x-forwarded-proto, value: "%REQ(:SCHEME)%"}, {key: x-forwarded-host, value: "%REQ(:AUTHORITY)%"}]
                     authorization_response:
                       allowed_upstream_headers:
                         patterns:
@@ -264,26 +353,43 @@ static_resources:
                   max_age: "600"
                   forward_not_matching_preflights: false
               routes:
+              - name: "refused:dot-segment-with-parameter"
+                match: {safe_regex: {regex: ".*/\\.\\.?;.*"}}
+                direct_response: {status: 400}
               - name: "accounts-events"
                 match: {safe_regex: {regex: "^/events/[a-z0-9-]+$"}}
+                decorator: {operation: "accounts-events", propagate: false}
                 route: {cluster: "accounts_http", host_rewrite_literal: "127.0.0.1:7070", timeout: 0s, idle_timeout: 90s}
                 typed_per_filter_config:
+                  envoy.filters.http.jwt_authn:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+                    disabled: true
                   envoy.filters.http.ext_authz:
                     "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
                     disabled: true
-              - {name: "accounts-rpc", match: {path: "/example.accounts.v1.ProfileService/GetProfile"}, metadata: {filter_metadata: {"example.gateway": {action: ""}}}, typed_per_filter_config: {envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}, envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}}, route: {cluster: "accounts_grpc", host_rewrite_literal: "127.0.0.1:7070", timeout: 0s, idle_timeout: 90s, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}}}
-              - {name: "shop", match: {path: "/example.shop.v1.CartService/AddItem"}, metadata: {filter_metadata: {"example.gateway": {action: "buy"}}}, typed_per_filter_config: {envoy.filters.http.header_mutation: {"@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutationPerRoute, mutations: {request_mutations: [{append: {header: {key: x-gateway-action, value: "buy"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}, {append: {header: {key: x-gateway-reports, value: "browse"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}]}}, envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}, envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}}, route: {cluster: "shop_grpc", timeout: 0s, idle_timeout: 90s, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}}}
-              - {name: "shop", match: {path: "/example.shop.v1.CartService/GetCart"}, metadata: {filter_metadata: {"example.gateway": {action: "browse"}}}, typed_per_filter_config: {envoy.filters.http.header_mutation: {"@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutationPerRoute, mutations: {request_mutations: [{append: {header: {key: x-gateway-action, value: "browse"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}]}}, envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}, envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}}, route: {cluster: "shop_grpc", timeout: 0s, idle_timeout: 90s, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}}}
+              - {name: "accounts-rpc", match: {path: "/example.accounts.v1.ProfileService/GetProfile"}, metadata: {filter_metadata: {"example.gateway": {action: ""}, "example.gateway.rate_limit": {all: "rpc"}}}, decorator: {operation: "accounts-rpc", propagate: false}, typed_per_filter_config: {envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}, envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}}, route: {cluster: "accounts_grpc", host_rewrite_literal: "127.0.0.1:7070", timeout: 0s, idle_timeout: 90s, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}}}
+              - {name: "shop", match: {path: "/example.shop.v1.CartService/AddItem"}, metadata: {filter_metadata: {"example.gateway": {action: "buy"}, "example.gateway.rate_limit": {all: "rpc"}}}, decorator: {operation: "shop", propagate: false}, typed_per_filter_config: {envoy.filters.http.header_mutation: {"@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutationPerRoute, mutations: {request_mutations: [{append: {header: {key: x-gateway-action, value: "buy"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}, {append: {header: {key: x-gateway-reports, value: "browse"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}]}}, envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}, envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}}, route: {cluster: "shop_grpc", timeout: 0s, idle_timeout: 90s, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}}}
+              - {name: "shop", match: {path: "/example.shop.v1.CartService/GetCart"}, metadata: {filter_metadata: {"example.gateway": {action: "browse"}, "example.gateway.rate_limit": {all: "rpc"}}}, decorator: {operation: "shop", propagate: false}, typed_per_filter_config: {envoy.filters.http.header_mutation: {"@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutationPerRoute, mutations: {request_mutations: [{append: {header: {key: x-gateway-action, value: "browse"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}]}}, envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}, envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}}, route: {cluster: "shop_grpc", timeout: 0s, idle_timeout: 90s, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}}}
               - name: "accounts-webhooks"
                 match: {path: "/api/webhooks", headers: [{name: ":method", string_match: {exact: "POST"}}]}
+                decorator: {operation: "accounts-webhooks", propagate: false}
                 route: {cluster: "accounts_http", host_rewrite_literal: "127.0.0.1:7070", prefix_rewrite: "/hooks/payments", timeout: 0s, idle_timeout: 90s}
                 typed_per_filter_config:
+                  envoy.filters.http.jwt_authn:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+                    disabled: true
                   envoy.filters.http.ext_authz:
                     "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
                     disabled: true
+              - name: "catalog"
+                match: {prefix: "/catalog/"}
+                metadata: {filter_metadata: {"example.gateway": {action: ""}, "example.gateway.rate_limit": {client: "catalog"}}}
+                decorator: {operation: "catalog", propagate: false}
+                route: {cluster: "catalog_http", timeout: 0s, idle_timeout: 90s}
               - name: "shop"
                 match: {prefix: "/"}
                 metadata: {filter_metadata: {"example.gateway": {action: ""}}}
+                decorator: {operation: "shop", propagate: false}
                 route: {cluster: "shop_http", timeout: 0s, idle_timeout: 90s, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}}
             - name: "test"
               domains: ["api.test.example.com"]
@@ -314,26 +420,43 @@ static_resources:
                   max_age: "600"
                   forward_not_matching_preflights: false
               routes:
+              - name: "refused:dot-segment-with-parameter"
+                match: {safe_regex: {regex: ".*/\\.\\.?;.*"}}
+                direct_response: {status: 400}
               - name: "accounts-events"
                 match: {safe_regex: {regex: "^/events/[a-z0-9-]+$"}}
+                decorator: {operation: "accounts-events", propagate: false}
                 route: {cluster: "accounts_http", host_rewrite_literal: "127.0.0.1:7070", timeout: 0s, idle_timeout: 90s}
                 typed_per_filter_config:
+                  envoy.filters.http.jwt_authn:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+                    disabled: true
                   envoy.filters.http.ext_authz:
                     "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
                     disabled: true
-              - {name: "accounts-rpc", match: {path: "/example.accounts.v1.ProfileService/GetProfile"}, metadata: {filter_metadata: {"example.gateway": {action: ""}}}, typed_per_filter_config: {envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}, envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}}, route: {cluster: "accounts_grpc", host_rewrite_literal: "127.0.0.1:7070", timeout: 0s, idle_timeout: 90s, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}}}
-              - {name: "shop", match: {path: "/example.shop.v1.CartService/AddItem"}, metadata: {filter_metadata: {"example.gateway": {action: "buy"}}}, typed_per_filter_config: {envoy.filters.http.header_mutation: {"@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutationPerRoute, mutations: {request_mutations: [{append: {header: {key: x-gateway-action, value: "buy"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}, {append: {header: {key: x-gateway-reports, value: "browse"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}]}}, envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}, envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}}, route: {cluster: "shop_grpc", timeout: 0s, idle_timeout: 90s, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}}}
-              - {name: "shop", match: {path: "/example.shop.v1.CartService/GetCart"}, metadata: {filter_metadata: {"example.gateway": {action: "browse"}}}, typed_per_filter_config: {envoy.filters.http.header_mutation: {"@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutationPerRoute, mutations: {request_mutations: [{append: {header: {key: x-gateway-action, value: "browse"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}]}}, envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}, envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}}, route: {cluster: "shop_grpc", timeout: 0s, idle_timeout: 90s, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}}}
+              - {name: "accounts-rpc", match: {path: "/example.accounts.v1.ProfileService/GetProfile"}, metadata: {filter_metadata: {"example.gateway": {action: ""}, "example.gateway.rate_limit": {all: "rpc"}}}, decorator: {operation: "accounts-rpc", propagate: false}, typed_per_filter_config: {envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}, envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}}, route: {cluster: "accounts_grpc", host_rewrite_literal: "127.0.0.1:7070", timeout: 0s, idle_timeout: 90s, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}}}
+              - {name: "shop", match: {path: "/example.shop.v1.CartService/AddItem"}, metadata: {filter_metadata: {"example.gateway": {action: "buy"}, "example.gateway.rate_limit": {all: "rpc"}}}, decorator: {operation: "shop", propagate: false}, typed_per_filter_config: {envoy.filters.http.header_mutation: {"@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutationPerRoute, mutations: {request_mutations: [{append: {header: {key: x-gateway-action, value: "buy"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}, {append: {header: {key: x-gateway-reports, value: "browse"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}]}}, envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}, envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}}, route: {cluster: "shop_grpc", timeout: 0s, idle_timeout: 90s, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}}}
+              - {name: "shop", match: {path: "/example.shop.v1.CartService/GetCart"}, metadata: {filter_metadata: {"example.gateway": {action: "browse"}, "example.gateway.rate_limit": {all: "rpc"}}}, decorator: {operation: "shop", propagate: false}, typed_per_filter_config: {envoy.filters.http.header_mutation: {"@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutationPerRoute, mutations: {request_mutations: [{append: {header: {key: x-gateway-action, value: "browse"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}]}}, envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}, envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}}, route: {cluster: "shop_grpc", timeout: 0s, idle_timeout: 90s, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}}}
               - name: "accounts-webhooks"
                 match: {path: "/api/webhooks", headers: [{name: ":method", string_match: {exact: "POST"}}]}
+                decorator: {operation: "accounts-webhooks", propagate: false}
                 route: {cluster: "accounts_http", host_rewrite_literal: "127.0.0.1:7070", prefix_rewrite: "/hooks/payments", timeout: 0s, idle_timeout: 90s}
                 typed_per_filter_config:
+                  envoy.filters.http.jwt_authn:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+                    disabled: true
                   envoy.filters.http.ext_authz:
                     "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
                     disabled: true
+              - name: "catalog"
+                match: {prefix: "/catalog/"}
+                metadata: {filter_metadata: {"example.gateway": {action: ""}, "example.gateway.rate_limit": {client: "catalog"}}}
+                decorator: {operation: "catalog", propagate: false}
+                route: {cluster: "catalog_http", timeout: 0s, idle_timeout: 90s}
               - name: "shop"
                 match: {prefix: "/"}
                 metadata: {filter_metadata: {"example.gateway": {action: ""}}}
+                decorator: {operation: "shop", propagate: false}
                 route: {cluster: "shop_http", timeout: 0s, idle_timeout: 90s, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}}
             - name: "local"
               domains: ["127.0.0.1", "localhost"]
@@ -363,33 +486,68 @@ static_resources:
                   max_age: "600"
                   forward_not_matching_preflights: false
               routes:
+              - name: "refused:dot-segment-with-parameter"
+                match: {safe_regex: {regex: ".*/\\.\\.?;.*"}}
+                direct_response: {status: 400}
               - name: "accounts-events"
                 match: {safe_regex: {regex: "^/events/[a-z0-9-]+$"}}
+                decorator: {operation: "accounts-events", propagate: false}
                 route: {cluster: "accounts_http", host_rewrite_literal: "127.0.0.1:7070", timeout: 0s, idle_timeout: 90s}
                 typed_per_filter_config:
+                  envoy.filters.http.jwt_authn:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+                    disabled: true
                   envoy.filters.http.ext_authz:
                     "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
                     disabled: true
-              - {name: "accounts-rpc", match: {path: "/example.accounts.v1.ProfileService/GetProfile"}, metadata: {filter_metadata: {"example.gateway": {action: ""}}}, typed_per_filter_config: {envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}, envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}}, route: {cluster: "accounts_grpc", host_rewrite_literal: "127.0.0.1:7070", timeout: 0s, idle_timeout: 90s, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}}}
-              - {name: "shop", match: {path: "/example.shop.v1.CartService/AddItem"}, metadata: {filter_metadata: {"example.gateway": {action: "buy"}}}, typed_per_filter_config: {envoy.filters.http.header_mutation: {"@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutationPerRoute, mutations: {request_mutations: [{append: {header: {key: x-gateway-action, value: "buy"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}, {append: {header: {key: x-gateway-reports, value: "browse"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}]}}, envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}, envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}}, route: {cluster: "shop_grpc", timeout: 0s, idle_timeout: 90s, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}}}
-              - {name: "shop", match: {path: "/example.shop.v1.CartService/GetCart"}, metadata: {filter_metadata: {"example.gateway": {action: "browse"}}}, typed_per_filter_config: {envoy.filters.http.header_mutation: {"@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutationPerRoute, mutations: {request_mutations: [{append: {header: {key: x-gateway-action, value: "browse"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}]}}, envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}, envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}}, route: {cluster: "shop_grpc", timeout: 0s, idle_timeout: 90s, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}}}
+              - {name: "accounts-rpc", match: {path: "/example.accounts.v1.ProfileService/GetProfile"}, metadata: {filter_metadata: {"example.gateway": {action: ""}, "example.gateway.rate_limit": {all: "rpc"}}}, decorator: {operation: "accounts-rpc", propagate: false}, typed_per_filter_config: {envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}, envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}}, route: {cluster: "accounts_grpc", host_rewrite_literal: "127.0.0.1:7070", timeout: 0s, idle_timeout: 90s, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}}}
+              - {name: "shop", match: {path: "/example.shop.v1.CartService/AddItem"}, metadata: {filter_metadata: {"example.gateway": {action: "buy"}, "example.gateway.rate_limit": {all: "rpc"}}}, decorator: {operation: "shop", propagate: false}, typed_per_filter_config: {envoy.filters.http.header_mutation: {"@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutationPerRoute, mutations: {request_mutations: [{append: {header: {key: x-gateway-action, value: "buy"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}, {append: {header: {key: x-gateway-reports, value: "browse"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}]}}, envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}, envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}}, route: {cluster: "shop_grpc", timeout: 0s, idle_timeout: 90s, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}}}
+              - {name: "shop", match: {path: "/example.shop.v1.CartService/GetCart"}, metadata: {filter_metadata: {"example.gateway": {action: "browse"}, "example.gateway.rate_limit": {all: "rpc"}}}, decorator: {operation: "shop", propagate: false}, typed_per_filter_config: {envoy.filters.http.header_mutation: {"@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutationPerRoute, mutations: {request_mutations: [{append: {header: {key: x-gateway-action, value: "browse"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}]}}, envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}, envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}}, route: {cluster: "shop_grpc", timeout: 0s, idle_timeout: 90s, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}}}
               - name: "accounts-webhooks"
                 match: {path: "/api/webhooks", headers: [{name: ":method", string_match: {exact: "POST"}}]}
+                decorator: {operation: "accounts-webhooks", propagate: false}
                 route: {cluster: "accounts_http", host_rewrite_literal: "127.0.0.1:7070", prefix_rewrite: "/hooks/payments", timeout: 0s, idle_timeout: 90s}
                 typed_per_filter_config:
+                  envoy.filters.http.jwt_authn:
+                    "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+                    disabled: true
                   envoy.filters.http.ext_authz:
                     "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
                     disabled: true
+              - name: "catalog"
+                match: {prefix: "/catalog/"}
+                metadata: {filter_metadata: {"example.gateway": {action: ""}, "example.gateway.rate_limit": {client: "catalog"}}}
+                decorator: {operation: "catalog", propagate: false}
+                route: {cluster: "catalog_http", timeout: 0s, idle_timeout: 90s}
               - name: "shop"
                 match: {prefix: "/"}
                 metadata: {filter_metadata: {"example.gateway": {action: ""}}}
+                decorator: {operation: "shop", propagate: false}
                 route: {cluster: "shop_http", timeout: 0s, idle_timeout: 90s, retry_policy: {retry_on: "connect-failure,reset-before-request", num_retries: 1}}
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+          common_tls_context:
+            alpn_protocols: [h2, http/1.1]
+            tls_certificates: [{certificate_chain: {filename: "/etc/gateway/tls/certificate.pem"}, private_key: {filename: "/etc/gateway/tls/key.pem"}}]
+            validation_context: {trusted_ca: {filename: "/etc/gateway/tls/clients-ca.pem"}}
+          require_client_certificate: true
   clusters:
   - name: "shop_http"
     type: STATIC
+    lb_policy: LEAST_REQUEST
     load_assignment:
       cluster_name: "shop_http"
-      endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: "127.0.0.1", port_value: 8080}}}}]}]
+      endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: "10.0.1.11", port_value: 8080}}}}, {endpoint: {address: {socket_address: {address: "10.0.1.12", port_value: 8080}}}}]}]
+    health_checks:
+    - timeout: 1s
+      interval: 10s
+      no_traffic_interval: 10s
+      healthy_threshold: 2
+      unhealthy_threshold: 3
+      http_health_check: {path: "/healthz", expected_statuses: [{start: 200, end: 300}], retriable_statuses: [{start: 100, end: 600}]}
+    common_lb_config: {healthy_panic_threshold: {value: 0}}
     circuit_breakers: {thresholds: [{max_connections: 4096, max_pending_requests: 4096, max_requests: 4096}]}
     typed_extension_protocol_options:
       envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
@@ -398,9 +556,18 @@ static_resources:
         explicit_http_config: {http_protocol_options: {}}
   - name: "shop_grpc"
     type: STATIC
+    lb_policy: LEAST_REQUEST
     load_assignment:
       cluster_name: "shop_grpc"
-      endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: "127.0.0.1", port_value: 8081}}}}]}]
+      endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: "10.0.1.11", port_value: 8081}}}}, {endpoint: {address: {socket_address: {address: "10.0.1.12", port_value: 8081}}}}]}]
+    health_checks:
+    - timeout: 1s
+      interval: 10s
+      no_traffic_interval: 10s
+      healthy_threshold: 2
+      unhealthy_threshold: 3
+      grpc_health_check: {}
+    common_lb_config: {healthy_panic_threshold: {value: 0}}
     circuit_breakers: {thresholds: [{max_connections: 4096, max_pending_requests: 4096, max_requests: 4096}]}
     typed_extension_protocol_options:
       envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
@@ -428,4 +595,56 @@ static_resources:
       envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
         "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
         common_http_protocol_options: {idle_timeout: 45s}
+        explicit_http_config: {http_protocol_options: {}}
+  - name: "catalog_http"
+    type: STRICT_DNS
+    dns_lookup_family: ALL
+    lb_policy: RING_HASH
+    typed_dns_resolver_config:
+      name: envoy.network.dns_resolver.cares
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+        resolvers: [{socket_address: {address: "10.0.0.2", port_value: 53}}]
+    load_assignment:
+      cluster_name: "catalog_http"
+      endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: "catalog.internal.example", port_value: 8090}}}}]}]
+    circuit_breakers: {thresholds: [{max_connections: 4096, max_pending_requests: 4096, max_requests: 4096}]}
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        hash_policy: [{header: {header_name: "x-session-id"}}]
+        common_http_protocol_options: {idle_timeout: 45s}
+        explicit_http_config: {http_protocol_options: {}}
+  - name: "otel_collector"
+    type: STATIC
+    load_assignment:
+      cluster_name: "otel_collector"
+      endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: "10.0.3.40", port_value: 4317}}}}]}]
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config: {http2_protocol_options: {}}
+  - name: "jwks"
+    type: STRICT_DNS
+    dns_lookup_family: ALL
+    typed_dns_resolver_config:
+      name: envoy.network.dns_resolver.cares
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+        resolvers: [{socket_address: {address: "10.0.0.2", port_value: 53}}]
+    load_assignment:
+      cluster_name: "jwks"
+      endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: "login.example.com", port_value: 443}}}}]}]
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        sni: "login.example.com"
+        common_tls_context:
+          validation_context:
+            trusted_ca: {filename: "/etc/gateway/jwt/ca.pem"}
+            match_typed_subject_alt_names: [{san_type: DNS, matcher: {exact: "login.example.com"}}]
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
         explicit_http_config: {http_protocol_options: {}}

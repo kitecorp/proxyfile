@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=../../../schema/proxyfile.schema.json
+# A gateway that sends an OpenTelemetry span for each sampled request to a collector it finds by name, such as a
+# Compose service. Each span is named after the route the request took.
+listen: 8000
+services:
+  app: {http: 3000}
+origins:
+  all: {hosts: [localhost], origins: ["http://localhost:3000"]}
+routes:
+  - {name: api, prefix: /api/, to: app}
+  - {name: app, prefix: /, to: app}
+tracing:
+  provider:
+    otel:
+      endpoint: otel-collector:4317
+      service: example-gateway
+      sample: {rate: 10%}
+  tags:
+    environment: {env: APP_ENVIRONMENT, default: local}
+    request_id: {header: x-request-id}
+  path_in_url: false

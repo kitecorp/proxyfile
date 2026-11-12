@@ -22,8 +22,10 @@ import (
 var update = flag.Bool("update", false, "rewrite the generated files of examples/")
 
 // TestExampleTrees is the generator's proof: the tree it writes for each of the three 1.1 examples equals a tree
-// written by hand, list order included, and a second render gives the same bytes. The rest of the tracing example's
-// tree is the 1.1 generator's, which these three pin; TestTracingExample is the proof of its tracing parts.
+// written apart from it, list order included, and a second render gives the same bytes. The minimal and partial trees
+// are written by hand. The full tree was built from the 2.0 generator's render by exact replacement and loaded by
+// Envoy 1.40.2. The rest of the tracing example's tree is the 1.1 generator's, which these three pin;
+// TestTracingExample is the proof of its tracing parts.
 func TestExampleTrees(t *testing.T) {
 	for _, name := range []string{"minimal", "partial", "full"} {
 		t.Run(name, func(t *testing.T) {
@@ -377,20 +379,26 @@ func TestInlineMethods(t *testing.T) {
 	}
 }
 
-// A tool may switch the check by editing this line of the generated file as text, so it appears exactly once.
+// A tool may switch the check by editing this line of the generated file as text, so in every example the line appears
+// once, in the state the file's check has, and the other state's line never does: a tool that switches the check back
+// must not find a second line either. An example without a check has neither.
 func TestAuthSwitchLine(t *testing.T) {
-	cases := []struct{ example, line string }{
-		{"full", "default_value: {numerator: 100, denominator: HUNDRED}"},
-		{"partial", "default_value: {numerator: 0, denominator: HUNDRED}"},
-	}
-	for _, c := range cases {
-		t.Run(c.example, func(t *testing.T) {
-			files, problems := render(requestFor(t, c.example+"/yaml", "envoy.yaml"))
+	const (
+		on  = "default_value: {numerator: 100, denominator: HUNDRED}"
+		off = "default_value: {numerator: 0, denominator: HUNDRED}"
+	)
+	// By example: how often the line reads on, and how often off.
+	want := map[string][2]int{"full": {1, 0}, "tracing": {1, 0}, "partial": {0, 1}}
+	for _, form := range testsupport.ExampleForms {
+		t.Run(form.Dir, func(t *testing.T) {
+			files, problems := render(requestFor(t, form.Dir, "envoy.yaml"))
 			if problems != nil {
 				t.Fatalf("render problems = %q, want none", testsupport.ProblemStrings(problems))
 			}
-			if got := bytes.Count(files[0].Bytes, []byte(c.line)); got != 1 {
-				t.Errorf("the line %q appears %d times, want 1", c.line, got)
+			example, _, _ := strings.Cut(form.Dir, "/")
+			got := [2]int{bytes.Count(files[0].Bytes, []byte(on)), bytes.Count(files[0].Bytes, []byte(off))}
+			if got != want[example] {
+				t.Errorf("the lines on and off appear %v times, want %v", got, want[example])
 			}
 		})
 	}
@@ -488,11 +496,13 @@ typed_per_filter_config:
 // TestExampleParts pins the parts of the 2.1 examples' trees that are new in 2.1, each against a tree Envoy validated.
 func TestExampleParts(t *testing.T) {
 	manager := []any{"static_resources", "listeners", 0, "filter_chains", 0, "filters", 0, "typed_config"}
-	routes := slices.Concat(manager, []any{"route_config", "virtual_hosts", 0, "routes"}) // 0 and 1 the RPC routes, 2 login, 3 shop
+	routes := slices.Concat(manager, []any{"route_config", "virtual_hosts", 0, "routes"}) // 0 the refusal, 1 and 2 the RPC routes, 3 login, 4 shop
 	cases := []struct {
 		name, dir string // dir is an example folder, <example>/<form>
 		at        []any  // the sub-tree the row compares, as valueAt's steps
-		want      string
+		// names compares only the name of each item of the list at at, as in TestPartsNoExampleCombines.
+		names bool
+		want  string
 	}{
 		{name: "balanced, shop's cluster", dir: "balanced/yaml", at: []any{"static_resources", "clusters", 0}, want: `
 name: shop_http
@@ -532,6 +542,7 @@ typed_extension_protocol_options:
 		{name: "dns, catalog's cluster", dir: "dns/yaml", at: []any{"static_resources", "clusters", 0}, want: `
 name: catalog_http
 type: STRICT_DNS
+dns_lookup_family: ALL
 lb_policy: RING_HASH
 typed_dns_resolver_config:
   name: envoy.network.dns_resolver.cares
@@ -550,6 +561,7 @@ typed_extension_protocol_options:
 		{name: "dns, search's cluster", dir: "dns/yaml", at: []any{"static_resources", "clusters", 1}, want: `
 name: search_http
 type: STRICT_DNS
+dns_lookup_family: ALL
 lb_policy: RING_HASH
 typed_dns_resolver_config:
   name: envoy.network.dns_resolver.cares
@@ -600,11 +612,11 @@ typed_config:
   - entries: [{key: bucket, value: login}, {key: remote_address}]
     token_bucket: {max_tokens: 10, tokens_per_fill: 5, fill_interval: 60s}
 `},
-		{name: "limited, an RPC route's bucket", dir: "limited/yaml", at: slices.Concat(routes, []any{1, "metadata"}),
+		{name: "limited, an RPC route's bucket", dir: "limited/yaml", at: slices.Concat(routes, []any{2, "metadata"}),
 			want: `{filter_metadata: {proxyfile.rate_limit: {all: rpc}}}`},
-		{name: "limited, login's bucket", dir: "limited/yaml", at: slices.Concat(routes, []any{2, "metadata"}),
+		{name: "limited, login's bucket", dir: "limited/yaml", at: slices.Concat(routes, []any{3, "metadata"}),
 			want: `{filter_metadata: {proxyfile.rate_limit: {client: login}}}`},
-		{name: "limited, the route with no limit", dir: "limited/yaml", at: slices.Concat(routes, []any{3}),
+		{name: "limited, the route with no limit", dir: "limited/yaml", at: slices.Concat(routes, []any{4}),
 			want: `{name: shop, match: {prefix: /}, route: {cluster: shop_http}}`},
 		{name: "limited, the Connect answer", dir: "limited/yaml", at: slices.Concat(manager, []any{"local_reply_config", "mappers", 2}), want: `
 filter:
@@ -619,6 +631,71 @@ body_format_override:
   text_format_source: {inline_string: "%LOCAL_REPLY_BODY%"}
   content_type: application/json
 `},
+		{name: "otel, the tracer", dir: "otel/yaml", at: slices.Concat(manager, []any{"tracing"}), want: `
+client_sampling: {value: 0}
+random_sampling: {value: 10}
+max_path_tag_length: 0
+custom_tags:
+- tag: environment
+  environment: {name: APP_ENVIRONMENT, default_value: local}
+- tag: request_id
+  request_header: {name: x-request-id}
+provider:
+  name: envoy.tracers.opentelemetry
+  typed_config:
+    "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+    grpc_service:
+      envoy_grpc: {cluster_name: otel_collector}
+    service_name: example-gateway
+`},
+		{name: "otel, the collector's cluster", dir: "otel/yaml", at: []any{"static_resources", "clusters", 1}, want: `
+name: otel_collector
+type: STRICT_DNS
+dns_lookup_family: ALL
+load_assignment:
+  cluster_name: otel_collector
+  endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: otel-collector, port_value: 4317}}}}]}]
+typed_extension_protocol_options:
+  envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+    "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+    explicit_http_config: {http2_protocol_options: {}}
+`},
+		{name: "otel, a route names its span", dir: "otel/yaml", at: slices.Concat(manager, []any{"route_config", "virtual_hosts", 0, "routes", 1}),
+			want: `{name: api, match: {prefix: /api/}, decorator: {operation: api, propagate: false}, route: {cluster: app_http}}`},
+		{name: "otel, the early removal", dir: "otel/yaml", at: slices.Concat(manager, []any{"early_header_mutation_extensions", 0, "typed_config", "mutations"}), want: `
+- remove: x-envoy-downstream-service-cluster
+- remove: x-envoy-downstream-service-node
+- remove: x-envoy-decorator-operation
+`},
+		{name: "jwt, its filters", dir: "jwt/yaml", at: slices.Concat(manager, []any{"http_filters"}), names: true,
+			want: `[envoy.filters.http.header_mutation, envoy.filters.http.rbac, envoy.filters.http.cors, envoy.filters.http.jwt_authn, envoy.filters.http.router]`},
+		{name: "jwt, the token filter", dir: "jwt/yaml", at: slices.Concat(manager, []any{"http_filters", 3, "typed_config"}), want: `
+"@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
+providers:
+  jwt:
+    issuer: https://login.example.com
+    audiences: [api.example.com]
+    require_expiration: true
+    local_jwks: {filename: /etc/gateway/jwt/jwks.json}
+    forward: true
+    from_headers: [{name: authorization, value_prefix: "Bearer "}]
+    claim_to_headers: [{header_name: x-user-id, claim_name: sub}, {header_name: x-user-roles, claim_name: realm.roles}]
+rules:
+- match: {prefix: /}
+  requires: {provider_name: jwt}
+`},
+		// With no ask there is no ext_authz filter, so the route turns off the token check alone.
+		{name: "jwt, the sign-in route", dir: "jwt/yaml", at: slices.Concat(manager, []any{"route_config", "virtual_hosts", 0, "routes", 1}), want: `
+name: sign-in
+match: {prefix: /login/}
+route: {cluster: identity_http}
+typed_per_filter_config:
+  envoy.filters.http.jwt_authn:
+    "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+    disabled: true
+`},
+		{name: "jwt, a client's claims headers removed", dir: "jwt/yaml",
+			at: slices.Concat(manager, []any{"early_header_mutation_extensions", 0, "typed_config", "mutations"}), want: "[{remove: x-user-id}, {remove: x-user-roles}]"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -626,8 +703,49 @@ body_format_override:
 			if problems != nil {
 				t.Fatalf("render problems = %q, want none", testsupport.ProblemStrings(problems))
 			}
-			if d := firstDifference(decode(t, []byte(c.want)), valueAt(decode(t, files[0].Bytes), c.at...), ""); d != "" {
+			got := valueAt(decode(t, files[0].Bytes), c.at...)
+			if c.names {
+				got = names(got)
+			}
+			if d := firstDifference(decode(t, []byte(c.want)), got, ""); d != "" {
 				t.Error(d)
+			}
+		})
+	}
+}
+
+// The first route of every virtual host answers 400 to a path that still holds a dot segment with a ; parameter after
+// normalisation, so no route of the file takes such a path: in a file with one environment and in the full example,
+// whose three environments each start with it.
+func TestRefusedRouteComesFirst(t *testing.T) {
+	const refused = `
+name: "refused:dot-segment-with-parameter"
+match: {safe_regex: {regex: ".*/\\.\\.?;.*"}}
+direct_response: {status: 400}
+`
+	at := []any{"static_resources", "listeners", 0, "filter_chains", 0, "filters", 0, "typed_config", "route_config", "virtual_hosts"}
+	cases := []struct {
+		dir   string // an example folder, <example>/<form>
+		hosts int    // how many virtual hosts the file holds
+	}{
+		{dir: "minimal/yaml", hosts: 1},
+		{dir: "full/yaml", hosts: 3},
+	}
+	for _, c := range cases {
+		t.Run(c.dir, func(t *testing.T) {
+			files, problems := render(requestFor(t, c.dir, "envoy.yaml"))
+			if problems != nil {
+				t.Fatalf("render problems = %q, want none", testsupport.ProblemStrings(problems))
+			}
+			tree := decode(t, files[0].Bytes)
+			virtualHosts := listAt(t, tree, at...)
+			if got := len(virtualHosts); got != c.hosts {
+				t.Fatalf("virtual hosts = %d, want %d", got, c.hosts)
+			}
+			for i := range virtualHosts {
+				if d := firstDifference(decode(t, []byte(refused)), valueAt(virtualHosts[i], "routes", 0), ""); d != "" {
+					t.Errorf("virtual host %d, route 0: %s", i, d)
+				}
 			}
 		})
 	}
@@ -640,8 +758,12 @@ body_format_override:
 // question alone; the check's switch header is the one only_with_header names; with auth, the early header removal adds
 // the question headers and the accept names that remove_from_clients does not already cover; with tracing, the early
 // header removal is written for the two downstream headers alone and leaves out one an entry covers; without sample no
-// manifest is written; path_in_url: true writes no max_path_tag_length; and an environment that admits no browser
-// origin writes an empty CORS list.
+// manifest is written; path_in_url: true writes no max_path_tag_length; with xray no route names its span; with otel
+// the collector's name is asked of dns.resolver and an RPC route names its span; an environment that admits no
+// browser origin writes an empty CORS list; with jwt keys at a URL, the token filter fetches them through a TLS cluster
+// that names the URL's host, asked of dns.resolver, or matches its IP address; with jwt and ask, the token filter
+// sits between the rate limit and the check, and a route with auth off turns both off; and a gateway with no auth
+// normalises the request's path as every gateway does.
 func TestPartsNoExampleCombines(t *testing.T) {
 	manager := []any{"static_resources", "listeners", 0, "filter_chains", 0, "filters", 0, "typed_config"}
 	const rpcWithoutAuth = `listen: 8000
@@ -653,7 +775,8 @@ routes:
   - {name: q, prefix: /, to: q}
 `
 	const rpcMethod = `[{"service": "q.v1.S", "method": "Do", "action": "use", "reports": ["operate"]}]`
-	// tracingBase is a gateway with neither auth nor remove_from_clients; each tracing row appends its envoy block.
+	// tracingBase is a gateway with neither auth nor remove_from_clients; each tracing row appends tracing or
+	// envoy.tracing.
 	const tracingBase = `listen: 8000
 services:
   q: {http: 3000}
@@ -681,6 +804,24 @@ rpc:
     - {service: example.shop.v1.CartService, method: AddItem, action: buy}
 envoy: {namespace: edge}
 `
+	// askWithRequest is a gateway whose check is told which request it is asked about. Its filters are set_metadata,
+	// header_mutation, rbac, cors, ext_authz and router.
+	const askWithRequest = `listen: 8000
+services:
+  q: {http: 3000}
+auth: {ask: q /check, timeout: 1s, enabled: true, when_unavailable: deny, send_request: true}
+origins: origins.json
+routes:
+  - {name: q, prefix: /, to: q}
+`
+	// jwtByURL verifies tokens with keys fetched from a URL whose host is a name, asked of dns.resolver, with no check;
+	// jwtAtAnAddress fetches them from an IP address and a port.
+	const jwtByURL = "listen: 8000\nservices:\n  q: {http: 3000}\ndns: {resolver: \"10.0.0.2:53\"}\n" +
+		"auth: {jwt: {issuer: https://login.example.com, audiences: any, keys: \"https://login.example.com/.well-known/jwks.json\", " +
+		"ca: /etc/gateway/jwt/ca.pem, header: x-access-token, optional: true}}\norigins: origins.json\nroutes:\n  - {name: q, prefix: /, to: q}\n"
+	jwtAtAnAddress := strings.Replace(jwtByURL, "https://login.example.com/.well-known/jwks.json", "https://10.0.3.50:8443/jwks.json", 1)
+	// limitedWithJWT is limitedWithAuth with a token verified as well as the check.
+	limitedWithJWT := strings.Replace(limitedWithAuth, "when_unavailable: deny}", "when_unavailable: deny, jwt: {issuer: i, audiences: [a], keys: /k.json}}", 1)
 	// limiter is the rate limit filter's typed_config in limitedWithAuth: the fifth filter, after CORS and before the
 	// check.
 	limiter := slices.Concat(manager, []any{"http_filters", 4, "typed_config"})
@@ -694,14 +835,16 @@ envoy: {namespace: edge}
 		at                       []any  // the sub-tree the row compares, as valueAt's steps
 		// names compares only the name of each item of the list at at, which keeps the Lua script out of a filter row.
 		names bool
-		want  string
+		// keys compares only these keys of the mapping at at, so one row pins a few settings of a large mapping.
+		keys []string
+		want string
 	}{
 		{name: "rpc without auth, its filters", proxyfile: rpcWithoutAuth, methods: rpcMethod,
 			at: slices.Concat(manager, []any{"http_filters"}), names: true,
 			want: `[envoy.filters.http.header_mutation, envoy.filters.http.rbac, envoy.filters.http.cors, envoy.filters.http.lua,
   envoy.filters.http.connect_grpc_bridge, envoy.filters.http.router]`},
 		{name: "rpc without auth", proxyfile: rpcWithoutAuth, methods: rpcMethod,
-			at: slices.Concat(manager, []any{"route_config", "virtual_hosts", 0, "routes", 0}),
+			at: slices.Concat(manager, []any{"route_config", "virtual_hosts", 0, "routes", 1}),
 			want: `
 name: q-rpc
 match: {path: /q.v1.S/Do}
@@ -716,7 +859,7 @@ route: {cluster: q_grpc}
 			at: slices.Concat(manager, []any{"http_filters"}), names: true,
 			want: `[envoy.filters.http.header_mutation, envoy.filters.http.rbac, envoy.filters.http.cors, envoy.filters.http.router]`},
 		{name: "bridge off", proxyfile: rpcWithoutAuth + bridgeOff, methods: rpcMethod,
-			at: slices.Concat(manager, []any{"route_config", "virtual_hosts", 0, "routes", 0}),
+			at: slices.Concat(manager, []any{"route_config", "virtual_hosts", 0, "routes", 1}),
 			want: `
 name: q-rpc
 match: {path: /q.v1.S/Do}
@@ -724,7 +867,7 @@ route: {cluster: q_grpc}
 `},
 		{name: "bridge off, with auth",
 			proxyfile: strings.Replace(rpcWithoutAuth, "origins:", "auth: {ask: q /check, timeout: 1s, enabled: true, when_unavailable: allow}\norigins:", 1) + bridgeOff,
-			methods:   rpcMethod, at: slices.Concat(manager, []any{"route_config", "virtual_hosts", 0, "routes", 0}),
+			methods:   rpcMethod, at: slices.Concat(manager, []any{"route_config", "virtual_hosts", 0, "routes", 1}),
 			want: `
 name: q-rpc
 match: {path: /q.v1.S/Do}
@@ -883,6 +1026,25 @@ provider:
 			want: `
 - remove_on_match: {key_matcher: {prefix: x-envoy-}}
 `},
+		// X-Ray keeps 2.0's bytes: a client's x-envoy-decorator-operation renames no segment (measured on Envoy 1.40.2), so
+		// no route names its span and the header is not removed.
+		{name: "xray, no decorator", proxyfile: tracingBase + "tracing: {provider: {xray: {segment: s}}}\n",
+			at: slices.Concat(manager, []any{"route_config", "virtual_hosts", 0, "routes", 1}), want: `{name: q, match: {prefix: /}, route: {cluster: q_http}}`},
+		// The collector's name is asked of dns.resolver, as a service's address is.
+		{name: "otel endpoint by name, the resolver", proxyfile: tracingBase + "dns: {resolver: \"10.0.0.2:53\"}\n" +
+			`tracing: {provider: {otel: {endpoint: "collector.internal:4317", service: s}}}` + "\n",
+			at:   []any{"static_resources", "clusters", 1, "typed_dns_resolver_config", "typed_config", "resolvers"},
+			want: `[{socket_address: {address: 10.0.0.2, port_value: 53}}]`},
+		{name: "otel, an RPC route names its span", proxyfile: rpcWithoutAuth + `tracing: {provider: {otel: {endpoint: "127.0.0.1:4317", service: s}}}` + "\n",
+			methods: rpcMethod, at: slices.Concat(manager, []any{"route_config", "virtual_hosts", 0, "routes", 1}), want: `
+name: q-rpc
+match: {path: /q.v1.S/Do}
+decorator: {operation: q-rpc, propagate: false}
+typed_per_filter_config:
+  envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}
+  envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}
+route: {cluster: q_grpc}
+`},
 		// RBAC admits only a request without an Origin and an origin on the environment's own host, and the CORS policy
 		// keeps its list, written empty.
 		{name: "an environment with no origins and no patterns",
@@ -938,6 +1100,7 @@ routes:
 			methods: rpcMethod, at: []any{"static_resources", "clusters", 0}, want: `
 name: q_grpc
 type: STRICT_DNS
+dns_lookup_family: ALL
 lb_policy: RING_HASH
 load_assignment:
   cluster_name: q_grpc
@@ -1023,17 +1186,19 @@ typed_config:
   token_bucket: {max_tokens: 150, tokens_per_fill: 100, fill_interval: 1s}
 `},
 		{name: "rate limits with auth, an RPC route", proxyfile: limitedWithAuth,
-			at:   slices.Concat(manager, []any{"route_config", "virtual_hosts", 0, "routes", 0, "metadata"}),
+			at:   slices.Concat(manager, []any{"route_config", "virtual_hosts", 0, "routes", 1, "metadata"}),
 			want: `{filter_metadata: {edge: {action: buy}, edge.rate_limit: {all: rpc}}}`},
 		// A route with auth off carries its bucket alone.
 		{name: "rate limits with auth, a route with auth off, second environment", proxyfile: limitedWithAuth,
-			at:   slices.Concat(manager, []any{"route_config", "virtual_hosts", 1, "routes", 1, "metadata"}),
+			at:   slices.Concat(manager, []any{"route_config", "virtual_hosts", 1, "routes", 2, "metadata"}),
 			want: `{filter_metadata: {edge.rate_limit: {client: login}}}`},
 		{name: "rate limits with auth, a checked route, second environment", proxyfile: limitedWithAuth,
-			at:   slices.Concat(manager, []any{"route_config", "virtual_hosts", 1, "routes", 2, "metadata"}),
+			at:   slices.Concat(manager, []any{"route_config", "virtual_hosts", 1, "routes", 3, "metadata"}),
 			want: `{filter_metadata: {edge: {action: ""}, edge.rate_limit: {client: shop}}}`},
-		// The first mapper that matches decides, so the one on UAEX, which changes nothing, comes before the Connect
-		// answer: a 429 the check itself answers to a Connect call keeps the body the check wrote.
+		// The first mapper that matches decides, so a check's 2xx other than 200 becomes 403 before the pass-through on
+		// UAEX keeps a check's own refusal as the check wrote it (measured on Envoy 1.40.2: a check's 202 and 204 give
+		// 403, a Connect call the check answers 429 keeps the check's body, a Connect call over the limit gets the JSON
+		// error and the check is not asked).
 		{name: "rate limits with auth, the mappers in order", proxyfile: limitedWithAuth,
 			at: slices.Concat(manager, []any{"local_reply_config", "mappers"}), want: `
 - filter: {response_flag_filter: {flags: [UF, UH, UC, URX]}}
@@ -1047,6 +1212,13 @@ typed_config:
       - header_filter:
           header: {name: origin, present_match: true}
   body: {inline_string: "Invalid CORS request"}
+- filter:
+    and_filter:
+      filters:
+      - response_flag_filter: {flags: [UAEX]}
+      - status_code_filter: {comparison: {op: GE, value: {default_value: 200}}}
+      - status_code_filter: {comparison: {op: LE, value: {default_value: 299}}}
+  status_code: 403
 - filter: {response_flag_filter: {flags: [UAEX]}}
 - filter:
     and_filter:
@@ -1059,6 +1231,104 @@ typed_config:
   body_format_override:
     text_format_source: {inline_string: "%LOCAL_REPLY_BODY%"}
     content_type: application/json
+`},
+		// The four headers forward-auth services read replace a client's copies (measured on Envoy 1.40.2).
+		{name: "send_request, what the check is told", proxyfile: askWithRequest,
+			at: slices.Concat(manager, []any{"http_filters", 4, "typed_config", "http_service", "authorization_request"}), want: `
+headers_to_add: [{key: x-gateway-timeout-ms, value: "1000"}, {key: x-forwarded-uri, value: "%REQ(:PATH)%"},
+  {key: x-forwarded-method, value: "%REQ(:METHOD)%"}, {key: x-forwarded-proto, value: "%REQ(:SCHEME)%"},
+  {key: x-forwarded-host, value: "%REQ(:AUTHORITY)%"}]
+`},
+		{name: "send_request, the path normalised", proxyfile: askWithRequest, at: slices.Concat(manager, []any{"normalize_path"}), want: "true"},
+		{name: "send_request, the slashes merged", proxyfile: askWithRequest, at: slices.Concat(manager, []any{"merge_slashes"}), want: "true"},
+		{name: "send_request, escaped slashes unescaped", proxyfile: askWithRequest,
+			at: slices.Concat(manager, []any{"path_with_escaped_slashes_action"}), want: "UNESCAPE_AND_FORWARD"},
+		// A gateway with no auth normalises the path too, so the route and a limit read the path the service receives:
+		// without these three settings /open/../private/report.txt took a route with prefix /open/ and auth off, and with
+		// them it is answered 401 and reaches no service (measured on Envoy 1.40.2).
+		{name: "no auth, the path normalised", proxyfile: tracingBase, at: manager,
+			keys: []string{"normalize_path", "merge_slashes", "path_with_escaped_slashes_action"}, want: `
+normalize_path: true
+merge_slashes: true
+path_with_escaped_slashes_action: UNESCAPE_AND_FORWARD
+`},
+		{name: "jwt keys by URL, optional", proxyfile: jwtByURL, at: slices.Concat(manager, []any{"http_filters", 3, "typed_config"}), want: `
+"@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
+providers:
+  jwt:
+    issuer: https://login.example.com
+    require_expiration: true
+    remote_jwks:
+      http_uri: {uri: "https://login.example.com/.well-known/jwks.json", cluster: jwks, timeout: 2s}
+      retry_policy: {num_retries: 1}
+    forward: true
+    from_headers: [{name: x-access-token}]
+rules:
+- match: {prefix: /}
+  requires:
+    requires_any:
+      requirements: [{provider_name: jwt}, {allow_missing: {}}]
+`},
+		{name: "jwt keys by URL, the keys' cluster", proxyfile: jwtByURL, at: []any{"static_resources", "clusters", 1}, want: `
+name: jwks
+type: STRICT_DNS
+dns_lookup_family: ALL
+typed_dns_resolver_config:
+  name: envoy.network.dns_resolver.cares
+  typed_config:
+    "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+    resolvers: [{socket_address: {address: 10.0.0.2, port_value: 53}}]
+load_assignment:
+  cluster_name: jwks
+  endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: login.example.com, port_value: 443}}}}]}]
+transport_socket:
+  name: envoy.transport_sockets.tls
+  typed_config:
+    "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+    sni: login.example.com
+    common_tls_context:
+      validation_context:
+        trusted_ca: {filename: /etc/gateway/jwt/ca.pem}
+        match_typed_subject_alt_names: [{san_type: DNS, matcher: {exact: login.example.com}}]
+typed_extension_protocol_options:
+  envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+    "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+    explicit_http_config: {http_protocol_options: {}}
+`},
+		// RFC 6066 section 3 allows no IP address as a server name, so an address gets no sni and an IP_ADDRESS match.
+		{name: "jwt keys at an IP address", proxyfile: jwtAtAnAddress, at: []any{"static_resources", "clusters", 1}, want: `
+name: jwks
+type: STATIC
+load_assignment:
+  cluster_name: jwks
+  endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: 10.0.3.50, port_value: 8443}}}}]}]
+transport_socket:
+  name: envoy.transport_sockets.tls
+  typed_config:
+    "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+    common_tls_context:
+      validation_context:
+        trusted_ca: {filename: /etc/gateway/jwt/ca.pem}
+        match_typed_subject_alt_names: [{san_type: IP_ADDRESS, matcher: {exact: 10.0.3.50}}]
+typed_extension_protocol_options:
+  envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+    "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+    explicit_http_config: {http_protocol_options: {}}
+`},
+		// A request over a limit is refused before its token is verified, and a token is verified before the check is
+		// asked (measured on Envoy 1.40.2).
+		{name: "jwt with a limit and a check, its filters", proxyfile: limitedWithJWT, at: slices.Concat(manager, []any{"http_filters"}), names: true,
+			want: `[envoy.filters.http.set_metadata, envoy.filters.http.header_mutation, envoy.filters.http.rbac, envoy.filters.http.cors,
+  envoy.filters.http.local_ratelimit, envoy.filters.http.jwt_authn, envoy.filters.http.ext_authz, envoy.filters.http.lua,
+  envoy.filters.http.connect_grpc_bridge, envoy.filters.http.router]`},
+		{name: "jwt with a check, a route with auth off", proxyfile: limitedWithJWT,
+			at: slices.Concat(manager, []any{"route_config", "virtual_hosts", 0, "routes", 2, "typed_per_filter_config"}), want: `
+envoy.filters.http.jwt_authn:
+  "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+  disabled: true
+envoy.filters.http.ext_authz:
+  "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+  disabled: true
 `},
 	}
 	defaultOrigins := string(testsupport.ReadFile(t, "testdata/origins.json"))
@@ -1080,6 +1350,9 @@ typed_config:
 			if c.names {
 				got = names(got)
 			}
+			if c.keys != nil {
+				got = only(got, c.keys)
+			}
 			if d := firstDifference(decode(t, []byte(c.want)), got, ""); d != "" {
 				t.Error(d)
 			}
@@ -1087,9 +1360,9 @@ typed_config:
 	}
 }
 
-// The tracing example's connection manager holds the tree the design lists, the manifest's text byte for byte, and the
-// early header removal in its order: remove_from_clients, the check's headers, Envoy's auth mark, then the two
-// tracing removals.
+// The tracing example's connection manager holds the request id extension and the tracing tree written below by hand,
+// the manifest's text byte for byte, and the early header removal in its order: remove_from_clients, the check's
+// headers, Envoy's auth mark, then the two tracing removals.
 func TestTracingExample(t *testing.T) {
 	files, problems := render(requestFor(t, "tracing/yaml", "envoy.yaml"))
 	if problems != nil {
@@ -1155,6 +1428,22 @@ func names(value any) any {
 		found[i] = valueAt(item, "name")
 	}
 	return found
+}
+
+// only returns the entries of a mapping that keys names, or the value unchanged when it is not a mapping. A key the
+// mapping lacks is left out, so a difference names it as absent.
+func only(value any, keys []string) any {
+	mapping, ok := value.(map[string]any)
+	if !ok {
+		return value
+	}
+	kept := map[string]any{}
+	for _, key := range keys {
+		if entry, found := mapping[key]; found {
+			kept[key] = entry
+		}
+	}
+	return kept
 }
 
 // valueAt follows keys of maps and indexes of lists down a decoded tree, and returns nil when a step is missing.

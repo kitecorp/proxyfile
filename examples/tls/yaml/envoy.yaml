@@ -12,8 +12,9 @@ static_resources:
           use_remote_address: true
           always_set_request_id_in_response: true
           server_header_transformation: PASS_THROUGH
-          normalize_path: false
-          merge_slashes: false
+          normalize_path: true
+          merge_slashes: true
+          path_with_escaped_slashes_action: UNESCAPE_AND_FORWARD
           upgrade_configs: [{upgrade_type: websocket}]
           local_reply_config:
             mappers:
@@ -104,6 +105,9 @@ static_resources:
                   - {exact: "https://app.example.com", ignore_case: true}
                   forward_not_matching_preflights: false
               routes:
+              - name: "refused:dot-segment-with-parameter"
+                match: {safe_regex: {regex: ".*/\\.\\.?;.*"}}
+                direct_response: {status: 400}
               - name: "app"
                 match: {prefix: "/"}
                 route: {cluster: "app_http"}

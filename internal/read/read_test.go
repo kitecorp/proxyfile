@@ -91,8 +91,6 @@ func TestReadProblems(t *testing.T) {
 			want: []string{`g.yaml:3:44: service "web": the address "fd00:0::1" is written twice in addresses (the first on line 3)`}},
 		{name: "an address twice, once as an IPv4-mapped IPv6 address", document: b.Replaced(3, 3, `  web: {http: 3000, addresses: ["10.0.0.2", "::ffff:10.0.0.2"]}`),
 			want: []string{`g.yaml:3:45: service "web": the address "::ffff:10.0.0.2" is written twice in addresses (the first on line 3)`}},
-		{name: "hash client false", document: b.Replaced(3, 3, `  web: {http: 3000, balance: hash, hash: {client: false}}`),
-			want: []string{`g.yaml:3:51: "client" must be true`}},
 		{name: "resolver not an IP address", document: b.Inserted(8, "dns: {resolver: ns.example}"),
 			want: []string{`g.yaml:8:17: "resolver" must be an IP address with an optional port, such as 10.0.0.2:53`}},
 		{name: "balance hash without hash", document: b.Replaced(3, 3, `  web: {http: 3000, balance: hash}`),
@@ -105,8 +103,6 @@ func TestReadProblems(t *testing.T) {
 			want: []string{`g.yaml:4:44: service "rpc-backend": health.path needs an http port`}},
 		{name: "health grpc without a grpc port", document: b.Replaced(3, 3, "  web: {http: 3000, health: {grpc: true}}"),
 			want: []string{`g.yaml:3:36: service "web": health.grpc needs a grpc port`}},
-		{name: "health grpc false", document: b.Replaced(3, 3, "  web: {http: 3000, health: {path: /healthz, grpc: false}}"),
-			want: []string{`g.yaml:3:52: "grpc" must be true`}},
 		{name: "health timeout as long as the interval", document: b.Replaced(3, 3, "  web: {http: 3000, health: {path: /healthz, interval: 2s, timeout: 2s}}"),
 			want: []string{`g.yaml:3:69: service "web": health.timeout 2s must be shorter than health.interval 2s`}},
 		// The default timeout, 2s, against a written interval: the message points at the interval.
@@ -114,6 +110,8 @@ func TestReadProblems(t *testing.T) {
 			want: []string{`g.yaml:3:56: service "web": health.timeout 2s must be shorter than health.interval 1s`}},
 		{name: "health interval too large", document: b.Replaced(3, 3, "  web: {http: 3000, health: {path: /healthz, interval: 9999999999999h}}"),
 			want: []string{`g.yaml:3:56: "interval" must be a time such as 5s`}},
+		{name: "health interval below 1s", document: b.Replaced(3, 3, "  web: {http: 3000, health: {path: /healthz, interval: 500ms, timeout: 100ms}}"),
+			want: []string{`g.yaml:3:56: health.interval must be at least 1s`}},
 		// Envoy's smallest fill interval is 50ms; nginx writes a rate per second or per minute.
 		{name: "rate limit period below 1s", document: b.Replaced(7, 7, "  - {name: web, prefix: /, to: web, rate_limit: {requests: 10, per: 500ms}}"),
 			want: []string{`g.yaml:7:69: rate_limit.per must be at least 1s`}},
@@ -230,15 +228,15 @@ func TestReadProblems(t *testing.T) {
 		{name: "HOCON: format check", file: "g.conf", document: strings.Replace(bHOCON, "listen = 8000", "liste = 8000", 1),
 			want: []string{
 				`g.conf: "listen" is required here`,
-				`g.conf: liste: unknown key "liste"; known here: admin, auth, client_address, cors, dns, envoy, haproxy, limits, listen, log, nginx, origins, remove_from_clients, routes, rpc, services, timeouts, tls`,
+				`g.conf: liste: unknown key "liste"; known here: admin, auth, client_address, cors, dns, envoy, haproxy, limits, listen, log, nginx, origins, remove_from_clients, routes, rpc, services, timeouts, tls, tracing`,
 			}},
-		// A 1.x file is refused at every key that moved into the envoy block, each named by its key path, in one run.
+		// A 1.x file is refused at every key that moved into the envoy block, each named by its key path, in one run. A
+		// 1.x tracing is read as 2.1's tracing key, so it is refused no more.
 		{name: "HOCON: every 1.x key at its 1.x place", file: "g.conf",
 			document: "namespace = example.gateway\nlimits { heap = 64MiB }\n" + bHOCON + "tracing { provider { xray { segment = s } } }\n",
 			want: []string{
 				`g.conf: limits.heap: "heap" moved to envoy.heap in proxyfile 2.0`,
 				`g.conf: namespace: "namespace" moved to envoy.namespace in proxyfile 2.0`,
-				`g.conf: tracing: "tracing" moved to envoy.tracing in proxyfile 2.0`,
 			}},
 		{name: "HOCON: YAML text", file: "g.conf", document: b.String(),
 			want: []string{`g.conf:3:6: unexpected token 11`}},
@@ -276,12 +274,48 @@ func TestReadProblems(t *testing.T) {
 				`g.conf: rpc.proto.roots[1]: the root "proto" is written twice (the first at rpc.proto.roots[0])`,
 				`g.conf: rpc.proto.roots[2]: the root "proto" is written twice (the first at rpc.proto.roots[0])`,
 			}},
+		{name: "tracing in both places", document: b.Replaced(7, 7, "  - {name: web, prefix: /, to: web}",
+			"tracing: {provider: {xray: {segment: s}}}", "envoy: {tracing: {provider: {xray: {segment: s}}}}"),
+			want: []string{`g.yaml:9:9: write tracing or envoy.tracing, not both`}},
 		// The check's pattern for agent takes digits and dots and a port of up to five digits; the reader refuses an
 		// octet above 255 and a port above 65535.
 		{name: "agent above 255", document: b.Inserted(8, "envoy: {tracing: {provider: {xray: {segment: s, agent: 300.1.2.3:2000}}}}"),
 			want: []string{`g.yaml:8:56: "agent" must be an IPv4 address and a port from 1 to 65535, such as 127.0.0.1:2000`}},
 		{name: "agent port above 65535", document: b.Inserted(8, "envoy: {tracing: {provider: {xray: {segment: s, agent: 127.0.0.1:65536}}}}"),
 			want: []string{`g.yaml:8:56: "agent" must be an IPv4 address and a port from 1 to 65535, such as 127.0.0.1:2000`}},
+		// The check's pattern for endpoint takes any text without a space; the reader refuses one that is not an IP
+		// address or a DNS name, and a port.
+		{name: "otel endpoint without a port", document: b.Inserted(8, "tracing: {provider: {otel: {endpoint: collector, service: s}}}"),
+			want: []string{`g.yaml:8:39: "endpoint" must be an IP address or a DNS name, and a port, such as 127.0.0.1:4317 or [fd00::40]:4317`}},
+		// auth holds ask, jwt or both; the check's keys are required with ask and refused without it.
+		{name: "auth with neither ask nor jwt", document: b.Inserted(8, "auth: {}"),
+			want: []string{`g.yaml:8:7: auth needs ask or jwt`}},
+		{name: "ask without its three keys", document: b.Inserted(8, "auth: {ask: web /check}"), want: []string{
+			`g.yaml:8:7: "enabled" is required here`, `g.yaml:8:7: "timeout" is required here`, `g.yaml:8:7: "when_unavailable" is required here`}},
+		{name: "the check's keys without ask", document: b.Inserted(8, "auth: {jwt: {issuer: i, audiences: any, keys: /k.json}, timeout: 1s, send_request: true}"),
+			want: []string{`g.yaml:8:57: auth: timeout is written, but ask is not`, `g.yaml:8:70: auth: send_request is written, but ask is not`}},
+		{name: "jwt keys a URL without a host, and no audience", document: b.Inserted(8, `auth: {jwt: {issuer: i, audiences: [], keys: "https://"}}`),
+			want: []string{`g.yaml:8:36: auth.jwt: audiences needs one audience or more; any accepts every audience`,
+				`g.yaml:8:46: "keys" must be an https URL of an IP address or a DNS name, with no user part, and with a port from 1 to 65535 when it writes one`}},
+		{name: "jwt ca with a keys file", document: b.Inserted(8, "auth: {jwt: {issuer: i, audiences: any, keys: /k.json, ca: /ca.pem}}"),
+			want: []string{`g.yaml:8:56: auth.jwt: ca is written, but keys is not a URL`}},
+		// The check's answer would overwrite the verified claim.
+		{name: "a claims header accept names", document: b.Inserted(8, "auth: {ask: web /check, timeout: 1s, enabled: true, when_unavailable: deny, "+
+			"accept: [x-user-*], jwt: {issuer: i, audiences: any, keys: /k.json, claims: {x-user-id: sub}}}"),
+			want: []string{`g.yaml:8:154: auth.jwt.claims: "x-user-id" is a header accept names`}},
+		{name: "a claims header send names", document: b.Inserted(8, "auth: {ask: web /check, timeout: 1s, enabled: true, when_unavailable: deny, "+
+			"send: [x-user-id], jwt: {issuer: i, audiences: any, keys: /k.json, claims: {x-user-id: sub}}}"),
+			want: []string{`g.yaml:8:153: auth.jwt.claims: "x-user-id" is a header send names`}},
+		// The early header removal takes every claims header and every remove_from_clients entry from the client's
+		// request before the token filter reads it, so a file whose token header is either would never see a token.
+		{name: "a claims header that carries the token", document: b.Inserted(8, "auth: {jwt: {issuer: i, audiences: any, keys: /k.json, claims: {authorization: sub}}}"),
+			want: []string{`g.yaml:8:65: auth.jwt.claims: "authorization" is the header that carries the token`}},
+		{name: "a remove_from_clients entry that covers the token's header", document: b.Replaced(7, 7, "  - {name: web, prefix: /, to: web}",
+			"auth: {jwt: {issuer: i, audiences: any, keys: /k.json, header: x-token}}", `remove_from_clients: [x-debug, "x-*"]`),
+			want: []string{`g.yaml:9:32: remove_from_clients: this entry removes "x-token", the header that carries the token of auth.jwt`}},
+		// A header other than authorization is read whole as the bare token, and a Cookie header holds name=value pairs.
+		{name: "the token in the cookie header", document: b.Inserted(8, "auth: {jwt: {issuer: i, audiences: any, keys: /k.json, header: cookie}}"),
+			want: []string{`g.yaml:8:64: auth.jwt: header cannot be cookie; a token inside a cookie is not read`}},
 		// HOCON reads an unquoted colon as a separator, so the agent is written in quotes there.
 		{name: "HOCON: agent unquoted", file: "g.conf",
 			document: bHOCON + "envoy { tracing { provider { xray { segment = s, agent = 127.0.0.1:2000 } } } }\n",
@@ -488,8 +522,8 @@ func TestReadFullExample(t *testing.T) {
 		{"request header size", g.Limits.RequestHeaders.Size.Bytes, int64(98304)},
 		{"request header count", g.Limits.RequestHeaders.Count.Number, int64(150)},
 		{"timeouts", millis(g.Timeouts.Request, g.Timeouts.Idle, g.Timeouts.UpstreamIdle), []int64{0, 90000, 45000}},
-		{"ports", ports(g), []string{"shop http 8080", "shop grpc 8081", "accounts grpc 7070", "accounts http 7070"}},
-		{"addresses", addresses(g), []string{"shop 127.0.0.1", "accounts 127.0.0.1 127.0.0.1:7070"}},
+		{"ports", ports(g), []string{"shop http 8080", "shop grpc 8081", "accounts grpc 7070", "accounts http 7070", "catalog http 8090"}},
+		{"addresses", addresses(g), []string{"shop 10.0.1.11,10.0.1.12", "accounts 127.0.0.1 127.0.0.1:7070", "catalog catalog.internal.example"}},
 		{"auth service", g.Auth.Service.Value + " " + g.Auth.Path, "accounts /auth/check"},
 		{"auth timeout", g.Auth.Timeout.Millis, int64(1500)},
 		{"auth allow and enabled", g.Auth.Allow && g.Auth.Enabled, true},
@@ -500,19 +534,27 @@ func TestReadFullExample(t *testing.T) {
 			[]string{"x-user- prefix", "x-client- prefix", "x-tier- prefix", "x-gateway- prefix"}},
 		{"origins", g.Origins.Value, ""},
 		{"environments", strings.Join(environments, ","), "live,test,local"},
-		{"routes", routes(g), []string{"accounts-events pattern", "rpc", "accounts-webhooks path", "shop prefix"}},
+		{"routes", routes(g), []string{"accounts-events pattern", "rpc", "accounts-webhooks path", "catalog prefix", "shop prefix"}},
 		{"route keys", routeKeys(g), []string{
 			`accounts-events "^/events/[a-z0-9-]+$" "" to accounts rewrite "" auth off true retries 0`,
 			"rpc retries 1",
 			`accounts-webhooks "/api/webhooks" "POST" to accounts rewrite "/hooks/payments" auth off true retries 0`,
+			`catalog "/catalog/" "" to catalog rewrite "" auth off false retries 0`,
 			`shop "/" "" to shop rewrite "" auth off false retries 1`,
 		}},
 		{"targets", targets(g), []string{"example.shop.* shop shop", "* accounts accounts-rpc"}},
 		{"log", fmt.Sprint(g.Log.StatusFrom, g.Log.SamplePercent), "400 1"},
-		{"services key", g.ServicesPos, model.Pos{File: "../../examples/full/yaml/proxyfile.yaml", Line: 12, Column: 1}},
-		{"routes key", g.RoutesPos, model.Pos{File: "../../examples/full/yaml/proxyfile.yaml", Line: 42, Column: 1}},
+		{"services key", g.ServicesPos, model.Pos{File: "../../examples/full/yaml/proxyfile.yaml", Line: 17, Column: 1}},
+		{"routes key", g.RoutesPos, model.Pos{File: "../../examples/full/yaml/proxyfile.yaml", Line: 63, Column: 1}},
 		{"methods", len(file.Methods), 3},
-		{"methods key", *file.MethodsKey, model.Pos{File: "../../examples/full/yaml/proxyfile.yaml", Line: 52, Column: 3}},
+		{"methods key", *file.MethodsKey, model.Pos{File: "../../examples/full/yaml/proxyfile.yaml", Line: 75, Column: 3}},
+		{"client address", g.ClientAddress, model.ClientConnection},
+		{"send request", g.Auth.SendRequest, true},
+		{"jwt", *g.JWT, model.JWT{Issuer: "https://login.example.com", Audiences: []string{"api.example.com", "admin.example.com"},
+			URL: "https://login.example.com/.well-known/jwks.json", Host: "login.example.com", Port: 443, DNS: true,
+			CA: "/etc/gateway/jwt/ca.pem", Header: "x-access-token", Optional: true,
+			Claims: []model.Claim{{Header: "x-subject", Name: "sub"}, {Header: "x-roles", Name: "realm.roles"}}}},
+		{"otel", *g.Tracing.OTel, model.OTel{Host: "10.0.3.40", Port: 4317, Service: "example-gateway", RatePercent: 10}},
 	})
 }
 
@@ -589,14 +631,22 @@ func TestReadOtherExamples(t *testing.T) {
 	})
 }
 
-// The reader fills the defaults the design names and keeps the written order of the tags, which here is not their
-// sorted order, in both forms; both forms of the tracing example give one model.
+// The reader fills the defaults the description's Docs name and keeps the written order of the tags, which here is
+// not their sorted order, in both forms; tracing at the top and at envoy.tracing, its old place, give one model; and
+// otel splits its endpoint into a host and a port, says whether the host is a name, and traces 5% without sample.rate.
 func TestReadTracing(t *testing.T) {
 	every := &model.Tracing{
-		XRay: model.XRay{Address: "127.0.0.1", Port: 2000, Segment: "example-gateway", Sample: &model.Sample{
+		XRay: &model.XRay{Address: "127.0.0.1", Port: 2000, Segment: "example-gateway", Sample: &model.Sample{
 			Default: model.SampleRule{First: 1, RatePercent: 5},
 			Rules:   []model.SampleRule{{Host: "*", Method: "*", Path: "/live*", First: 0, RatePercent: 0}},
 		}},
+		Tags: []model.Tag{
+			{Name: "environment", Env: "APP_ENVIRONMENT", Default: "local"},
+			{Name: "request_id", Header: "x-request-id"},
+		},
+	}
+	otel := &model.Tracing{
+		OTel: &model.OTel{Host: "otel-collector", Port: 4317, DNS: true, Service: "example-gateway", RatePercent: 10},
 		Tags: []model.Tag{
 			{Name: "environment", Env: "APP_ENVIRONMENT", Default: "local"},
 			{Name: "request_id", Header: "x-request-id"},
@@ -609,21 +659,28 @@ func TestReadTracing(t *testing.T) {
 		want                 *model.Tracing
 	}{
 		{name: "no tracing", document: b.String()},
+		{name: "the fewest keys, at the top", document: b.Inserted(8, "tracing: {provider: {xray: {segment: s}}}"),
+			want: &model.Tracing{XRay: &model.XRay{Address: "127.0.0.1", Port: 2000, Segment: "s"}}},
 		{name: "the fewest keys", document: b.Inserted(8, "envoy: {tracing: {provider: {xray: {segment: s}}}}"),
-			want: &model.Tracing{XRay: model.XRay{Address: "127.0.0.1", Port: 2000, Segment: "s"}}},
+			want: &model.Tracing{XRay: &model.XRay{Address: "127.0.0.1", Port: 2000, Segment: "s"}}},
 		{name: "the sample's defaults, a rule's patterns and the tags' order",
 			document: b.Inserted(8, "envoy: {tracing: {provider: {xray: {segment: s, agent: 10.0.0.9:2001, sample: {rules: [{first: 3, rate: 50%}]}}}, "+
 				"tags: {zone: {env: ZONE}, area: {header: x-area, default: none}}, path_in_url: true}}"),
-			want: &model.Tracing{XRay: model.XRay{Address: "10.0.0.9", Port: 2001, Segment: "s", Sample: &model.Sample{
+			want: &model.Tracing{XRay: &model.XRay{Address: "10.0.0.9", Port: 2001, Segment: "s", Sample: &model.Sample{
 				Default: model.SampleRule{First: 1, RatePercent: 5},
 				Rules:   []model.SampleRule{{Host: "*", Method: "*", Path: "*", First: 3, RatePercent: 50}},
 			}}, Tags: []model.Tag{{Name: "zone", Env: "ZONE"}, {Name: "area", Header: "x-area", Default: "none"}}, PathInURL: true}},
 		{name: "the tags' order, HOCON", file: "g.conf",
 			document: bHOCON + "envoy { tracing { provider { xray { segment = s } }, tags { zone { env = ZONE }, area { header = x-area } } } }\n",
-			want: &model.Tracing{XRay: model.XRay{Address: "127.0.0.1", Port: 2000, Segment: "s"},
+			want: &model.Tracing{XRay: &model.XRay{Address: "127.0.0.1", Port: 2000, Segment: "s"},
 				Tags: []model.Tag{{Name: "zone", Env: "ZONE"}, {Name: "area", Header: "x-area"}}}},
 		{name: "every key, YAML", file: "../../examples/tracing/yaml/proxyfile.yaml", want: every},
 		{name: "every key, HOCON", file: "../../examples/tracing/hocon/Proxyfile", want: every},
+		{name: "every key, the old place", file: "../../examples/tracing/envoy-tracing/proxyfile.yaml", want: every},
+		{name: "otel, the default rate and an IPv6 endpoint", document: b.Inserted(8, `tracing: {provider: {otel: {endpoint: "[fd00::40]:4317", service: s}}}`),
+			want: &model.Tracing{OTel: &model.OTel{Host: "fd00::40", Port: 4317, Service: "s", RatePercent: 5}}},
+		{name: "otel example, YAML", file: "../../examples/otel/yaml/proxyfile.yaml", want: otel},
+		{name: "otel example, HOCON", file: "../../examples/otel/hocon/Proxyfile", want: otel},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -636,8 +693,52 @@ func TestReadTracing(t *testing.T) {
 			if problems != nil {
 				t.Fatalf("problems = %q, want none", testsupport.ProblemStrings(problems))
 			}
-			if !reflect.DeepEqual(file.Gateway.Envoy.Tracing, c.want) {
-				t.Errorf("Tracing = %#v, want %#v", file.Gateway.Envoy.Tracing, c.want)
+			if !reflect.DeepEqual(file.Gateway.Tracing, c.want) {
+				t.Errorf("Tracing = %#v, want %#v", file.Gateway.Tracing, c.want)
+			}
+		})
+	}
+}
+
+// The reader fills auth.jwt with the defaults the description's Docs name, in both forms: the authorization header,
+// the system CA bundle with a keys URL and none with a keys file, and 443 when the URL writes no port; claims keep the
+// written order, a route's auth: off is read in a file without ask, and the check is there only with ask.
+func TestReadJWT(t *testing.T) {
+	example := &model.JWT{Issuer: "https://login.example.com", Audiences: []string{"api.example.com"},
+		File: "/etc/gateway/jwt/jwks.json", Header: "authorization",
+		Claims: []model.Claim{{Header: "x-user-id", Name: "sub"}, {Header: "x-user-roles", Name: "realm.roles"}}}
+	cases := []struct {
+		// file names an example that is read as it is; the document is read as g.yaml when it is empty.
+		name, file, document string
+		want                 *model.JWT
+		check                bool // whether the gateway has the check, auth.ask
+	}{
+		{name: "no jwt", document: b.String()},
+		{name: "jwt example, YAML", file: "../../examples/jwt/yaml/proxyfile.yaml", want: example},
+		{name: "jwt example, HOCON", file: "../../examples/jwt/hocon/Proxyfile", want: example},
+		{name: "keys at an IP address, any audience, a header and optional",
+			document: b.Inserted(8, `auth: {jwt: {issuer: i, audiences: any, keys: "https://10.0.3.50:8443/jwks.json", header: x-token, optional: true}}`),
+			want: &model.JWT{Issuer: "i", URL: "https://10.0.3.50:8443/jwks.json", Host: "10.0.3.50", Port: 8443,
+				CA: "/etc/ssl/certs/ca-certificates.crt", Header: "x-token", Optional: true}},
+		{name: "ask and jwt", document: b.Inserted(8, "auth: {ask: web /check, timeout: 1s, enabled: true, when_unavailable: deny, jwt: {issuer: i, audiences: [a], keys: /k.json}}"),
+			want: &model.JWT{Issuer: "i", Audiences: []string{"a"}, File: "/k.json", Header: "authorization"}, check: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := c.file
+			if path == "" {
+				path = filepath.Join(t.TempDir(), "g.yaml")
+				testsupport.WriteFile(t, path, c.document)
+			}
+			file, problems := Proxyfile(path)
+			if problems != nil {
+				t.Fatalf("problems = %q, want none", testsupport.ProblemStrings(problems))
+			}
+			if !reflect.DeepEqual(file.Gateway.JWT, c.want) {
+				t.Errorf("JWT = %#v, want %#v", file.Gateway.JWT, c.want)
+			}
+			if got := file.Gateway.Auth != nil; got != c.check {
+				t.Errorf("Auth != nil = %t, want %t", got, c.check)
 			}
 		})
 	}
@@ -647,6 +748,7 @@ func TestReadTracing(t *testing.T) {
 func TestReadBackends(t *testing.T) {
 	balanced := []string{"shop 10.0.1.11,10.0.1.12,10.0.1.13 static least_requests", "orders 10.0.2.21,10.0.2.22 static random"}
 	dns := []string{"catalog catalog.internal.example dns hash header x-session-id", "search search.internal.example dns hash client"}
+	full := []string{"shop 10.0.1.11,10.0.1.12 static least_requests", "accounts 127.0.0.1 static round_robin", "catalog catalog.internal.example dns hash header x-session-id"}
 	defaultBackend := "rpc-backend 127.0.0.1 static round_robin"
 	cases := []struct {
 		name, file, document string // file is an example read as it is; otherwise document is written to g.yaml
@@ -657,6 +759,8 @@ func TestReadBackends(t *testing.T) {
 		{name: "balanced example, HOCON", file: "../../examples/balanced/hocon/Proxyfile", want: balanced},
 		{name: "dns example, YAML", file: "../../examples/dns/yaml/proxyfile.yaml", want: dns, resolver: &model.Resolver{Address: "10.0.0.2", Port: 53}},
 		{name: "dns example, HOCON", file: "../../examples/dns/hocon/Proxyfile", want: dns, resolver: &model.Resolver{Address: "10.0.0.2", Port: 53}},
+		{name: "full example, YAML", file: "../../examples/full/yaml/proxyfile.yaml", want: full, resolver: &model.Resolver{Address: "10.0.0.2", Port: 53}},
+		{name: "full example, HOCON", file: "../../examples/full/hocon/Proxyfile", want: full, resolver: &model.Resolver{Address: "10.0.0.2", Port: 53}},
 		// A Compose service name is a DNS name of one label.
 		{name: "a name of one label", document: b.Replaced(3, 3, "  web: {http: 3000, address: catalog}"),
 			want: []string{"web catalog dns round_robin", defaultBackend}},
@@ -687,6 +791,7 @@ func TestReadBackends(t *testing.T) {
 // The reader fills each check and its defaults, in both forms.
 func TestReadHealth(t *testing.T) {
 	balanced := []string{"shop path /healthz every 5s within 2s, 2 to join, 3 to leave", "orders grpc every 10s within 1s, 1 to join, 2 to leave"}
+	full := []string{"shop path /healthz and grpc every 10s within 1s, 2 to join, 3 to leave"}
 	cases := []struct {
 		name, file string
 		want       []string
@@ -694,6 +799,8 @@ func TestReadHealth(t *testing.T) {
 		{"balanced example, YAML", "../../examples/balanced/yaml/proxyfile.yaml", balanced},
 		{"balanced example, HOCON", "../../examples/balanced/hocon/Proxyfile", balanced},
 		{"dns example, no health", "../../examples/dns/yaml/proxyfile.yaml", nil},
+		{"full example, YAML", "../../examples/full/yaml/proxyfile.yaml", full},
+		{"full example, HOCON", "../../examples/full/hocon/Proxyfile", full},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
