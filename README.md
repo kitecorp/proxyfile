@@ -1,4 +1,10 @@
 # proxyfile
+
+[![Release](https://img.shields.io/github/v/release/kitecorp/proxyfile)](https://github.com/kitecorp/proxyfile/releases/latest)
+[![Pre-merge](https://github.com/kitecorp/proxyfile/actions/workflows/required.yml/badge.svg?branch=master)](https://github.com/kitecorp/proxyfile/actions/workflows/required.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/kitecorp/proxyfile/v2.svg)](https://pkg.go.dev/github.com/kitecorp/proxyfile/v2)
+[![Licence](https://img.shields.io/github/license/kitecorp/proxyfile)](LICENSE)
+
 Generates a proxy's config from a short file. Envoy first.
 
 A proxyfile is a short file, written in YAML or in HOCON, that describes one gateway: the services behind it, the routes
@@ -20,6 +26,34 @@ flowchart LR
 
 proxyfile does not run Envoy: an image build can load the committed file with `envoy --mode validate`, as this
 repository's [`scripts/validate-envoy.sh`](scripts/validate-envoy.sh) does for the examples.
+
+## Quick start
+
+The smallest proxyfile, [`examples/minimal/gateway.yaml`](examples/minimal/gateway.yaml): one service, one route, and
+the browser origins it admits.
+
+```yaml
+listen: 8000
+services:
+  app: {http: 3000}
+origins:
+  all: {hosts: [localhost], origins: ["http://localhost:3000"]}
+routes:
+  - {name: app, prefix: /, to: app}
+```
+
+Save it as `gateway.yaml` and [install proxyfile](#install). Then render it, commit what comes out, and let the build
+refuse a hand edit or a missed render:
+
+```sh
+proxyfile render gateway.yaml -o envoy.yaml   # writes the complete Envoy configuration
+proxyfile check gateway.yaml -o envoy.yaml    # in the build: renders again, fails when envoy.yaml differs
+```
+
+The `envoy.yaml` it writes has the listener on 8000, a cluster for `app` on 3000, the route and the CORS filter for the
+origin; the committed one is [`examples/minimal/envoy.yaml`](examples/minimal/envoy.yaml). The same file in HOCON is
+[`examples/minimal/gateway.conf`](examples/minimal/gateway.conf), and the other directories under
+[`examples/`](examples/) add an auth check, RPC routes read from `.proto` files, tracing and nearly every key.
 
 ## Install
 
