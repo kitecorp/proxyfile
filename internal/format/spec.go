@@ -81,8 +81,9 @@ const (
 	// max_headers_count (protocol.proto), which limits.request_headers.count is written to; the circuit breakers'
 	// max_connections, max_pending_requests and max_requests (circuit_breaker.proto), which limits.connections is
 	// written to; num_retries (route_components.proto), which retries is written to; and tracing's first, the
-	// fixed_target the X-Ray sampler holds as a uint32 (localized_sampling.cc line 35). As a Max, the limit reaches
-	// the JSON Schema too, so an editor refuses what the check refuses.
+	// fixed_target the X-Ray sampler holds as a uint32 (localized_sampling.cc line 35); and the token bucket's
+	// max_tokens and tokens_per_fill (token_bucket.proto), which a rate limit's requests + burst and requests are
+	// written to. As a Max, the limit reaches the JSON Schema too, so an editor refuses what the check refuses.
 	largestUint32 = math.MaxUint32
 )
 
@@ -114,6 +115,12 @@ func serviceName(name, doc string, required bool) Field {
 
 func path(name, doc string) Field {
 	return Field{Name: name, Doc: doc, Kind: Text, Pattern: `^/`, Expect: "a path starting with /"}
+}
+
+// absolutePath is a file the proxy reads on its host. It is absolute, so what the file names never depends on the
+// directory the proxy starts in.
+func absolutePath(name, doc string, required bool) Field {
+	return Field{Name: name, Doc: doc, Kind: Text, Required: required, Pattern: `^/`, Expect: "an absolute path"}
 }
 
 func timeOrNone(name, doc string) Field {
@@ -150,6 +157,34 @@ var (
 		withRule(port("grpc", "The service's gRPC port.", false), "Spoken as HTTP/2 without TLS (h2c).")}
 )
 
+// Health is a service's health key. It is exported because the reader quotes its Expect for a time the parser refuses,
+// and cannot walk the services' Dict to reach it.
+var Health = Field{Name: "health", Doc: "Active checks of each backend: one that fails unhealthy checks in a row leaves the pool until it passes healthy checks in a row.",
+	Kind: Map, Rule: "At least one of `path` and `grpc`.", Fields: []Field{
+		withRule(Field{Name: "path", Doc: "The path an HTTP GET must answer with a 2xx, on the service's http port.", Kind: Text,
+			Pattern: `^/[^\t\n\f\r ]*$`, Expect: "a path starting with /, with no space"}, "Needs an `http` port."),
+		{Name: "grpc", Doc: "true checks the service's grpc port with the gRPC health protocol, grpc.health.v1.Health/Check.", Kind: Bool,
+			Rule: "Only `true`. Needs a `grpc` port."},
+		{Name: "interval", Doc: "How often each backend is checked; 5s when not written.", Kind: Text, Pattern: model.TimePattern, Expect: "a time such as 5s"},
+		{Name: "timeout", Doc: "How long one check may take; 2s when not written.", Kind: Text, Pattern: model.TimePattern, Expect: "a time such as 2s",
+			Rule: "Shorter than `interval`."},
+		{Name: "healthy", Doc: "Checks in a row a backend must pass to join the pool; 2 when not written.", Kind: Int, Min: 1, Max: 255},
+		{Name: "unhealthy", Doc: "Checks in a row a backend must fail to leave the pool; 3 when not written.", Kind: Int, Min: 1, Max: 255,
+			Rule: "With `grpc`, the Envoy generator's check removes a backend that answers it is not serving at once."},
+	}}
+
+// RateLimit is the rate_limit key of a route and of the rpc entry. It is exported because the reader quotes its Expect
+// for a time the parser refuses, and cannot walk the routes' Either to reach it.
+var RateLimit = Field{Name: "rate_limit", Doc: "How many requests the route admits in a period; a request over the limit is answered 429 and never reaches the service.",
+	Kind: Map, Fields: []Field{
+		{Name: "requests", Doc: "Requests admitted per period.", Kind: Int, Required: true, Min: 1, Max: largestUint32},
+		{Name: "per", Doc: "The period.", Kind: Text, Required: true, Pattern: model.TimePattern, Expect: "a time such as 1s or 1m", Rule: "At least `1s`."},
+		{Name: "burst", Doc: "Extra requests admitted above requests after a quiet spell; 0 when not written.", Kind: Int, Min: 0, Max: largestUint32,
+			Rule: "`requests` and `burst` together at most 4294967295."},
+		{Name: "by", Doc: "client counts each client address on its own, all every client together; client when not written.", Kind: Enum,
+			Values: []string{"client", "all"}, Rule: "The client's address is the one `client_address` names."},
+	}}
+
 // Proxyfile describes the file proxyfile reads: every key, its kind and its rule. The meaning rules that need more
 // than one key, such as a route naming a declared service, belong to the reader.
 var Proxyfile = Field{
@@ -160,6 +195,17 @@ var Proxyfile = Field{
 		port("listen", "The port of the public listener, on 0.0.0.0.", true),
 		withRule(port("admin", "The port of the admin listener, on 127.0.0.1; no admin listener when not written.", false),
 			"Not the same as `listen`. It answers only `/ready`, `/stats` and `/server_info`."),
+		{Name: "tls", Doc: "The public listener serves HTTPS with this certificate and key; without it, plain HTTP.", Kind: Map,
+			Rule: "The proxy reads the files when it starts.", Fields: []Field{
+				absolutePath("certificate", "The certificate chain, PEM, a file on the proxy's host.", true),
+				absolutePath("key", "The private key, PEM, a file on the proxy's host.", true),
+				{Name: "clients", Doc: "Require a client certificate on every connection (mutual TLS).", Kind: Map, Fields: []Field{
+					absolutePath("ca", "The CA bundle, PEM, that a client's certificate must chain to.", true),
+				}},
+			}},
+		{Name: "client_address", Doc: "Which address counts as the client's: forwarded, the last address a proxy in front appended to X-Forwarded-For, or connection, the peer of the TCP connection.",
+			Kind: Enum, Values: []string{"forwarded", "connection"},
+			Rule: "When not written: `connection` in a file that writes `tls`, `forwarded` otherwise. A rate limit by client and `hash.client` read it."},
 		{Name: "limits", Doc: "Limits on connections and request headers.", Kind: Map, Moved: map[string]string{"heap": "envoy.heap"}, Fields: []Field{
 			{Name: "connections", Doc: "The most connections at once, from clients and to each service.", Kind: Int, Min: 1, Max: largestUint32},
 			{Name: "request_headers", Doc: "The largest header block and the most header fields a request may carry.", Kind: Map, Fields: []Field{
@@ -176,14 +222,31 @@ var Proxyfile = Field{
 			withRule(timeOrNone("upstream_idle", "The longest a connection to a service is kept open with no request on it."),
 				"Without it, the Envoy configuration keeps Envoy's default of 1 hour."),
 		}},
-		{Name: "services", Doc: "The services behind the gateway, on the same host, by name.", Kind: Dict, Required: true, Rule: "At least one service.",
+		{Name: "services", Doc: "The services behind the gateway, by name.", Kind: Dict, Required: true, Rule: "At least one service.",
 			Key: &Field{Name: "service name", Kind: Text, Pattern: serviceNamePattern, Expect: serviceNameExpect},
-			Item: &Field{Doc: "One service: a port per protocol, an optional Host header and an optional address.", Kind: Map, Rule: "It has at least one port.", Fields: slices.Concat(ServicePorts, []Field{
+			Item: &Field{Doc: "One service: a port per protocol, an optional Host header, its backends, how requests are spread over them and how they are checked.", Kind: Map, Rule: "It has at least one port.", Fields: slices.Concat(ServicePorts, []Field{
 				{Name: "host_header", Doc: "The Host header a request carries when a route sends it to this service.",
 					Kind: Text, Pattern: `^[A-Za-z0-9.:\[\]-]+$`, Expect: "a host, with an optional port", Rule: "Without it a request keeps the client's Host."},
-				{Name: "address", Doc: "The service's IP address; 127.0.0.1 when not written.", Kind: Text, Pattern: `^[^\t\n\f\r ]+$`, Expect: "an IP address",
-					Rule: "Not a name: the Envoy generator writes a static cluster, and Envoy looks up no name for one."},
+				{Name: "address", Doc: "The service's IP address, or a DNS name the proxy looks up again while it runs; 127.0.0.1 when not written.",
+					Kind: Text, Pattern: `^[^\t\n\f\r ]+$`, Expect: "an IP address or a DNS name",
+					Rule: "A name has no port and is looked up every 5 seconds; every address it gives is a backend. Not with `addresses`."},
+				{Name: "addresses", Doc: "The service's backends, by IP address, each on the service's ports.", Kind: List,
+					Item: &Field{Kind: Text, Pattern: `^[^\t\n\f\r ]+$`, Expect: "an IP address"},
+					Rule: "Two or more, none written twice. Not with `address`."},
+				{Name: "balance", Doc: "How requests are spread over the backends; round_robin when not written.", Kind: Enum,
+					Values: []string{"round_robin", "least_requests", "random", "hash"}},
+				{Name: "hash", Doc: "What balance hash hashes, so that one client or one header value always reaches the same backend.", Kind: Map,
+					OneOf: []string{"header", "client"}, Rule: "Required with `balance: hash`, and refused with any other balance.", Fields: []Field{
+						{Name: "header", Doc: "The request header whose value is hashed; a request without it goes to a backend chosen at random.",
+							Kind: Text, Pattern: lowerHeaderPattern, Expect: lowerHeaderExpect},
+						{Name: "client", Doc: "true hashes the client's address, the one client_address names.", Kind: Bool, Rule: "Only `true`."},
+					}},
+				Health,
 			})}},
+		{Name: "dns", Doc: "The name lookups of the services whose address is a DNS name.", Kind: Map, Fields: []Field{
+			{Name: "resolver", Doc: "The name server the proxy asks; the host's own resolver configuration when not written.", Kind: Text,
+				Pattern: `^[^\t\n\f\r ]+$`, Expect: "an IP address with an optional port, such as 10.0.0.2:53", Rule: "Port 53 when not written. An IPv6 address with a port is written in brackets, such as [fd00::53]:5353; no zone."},
+		}},
 		{Name: "auth", Doc: "The external check every request goes through before it reaches a service.", Kind: Map, Rule: "Without `auth` there is no check.", Fields: []Field{
 			{Name: "ask", Doc: "The service and the path the gateway asks.", Kind: Text, Required: true,
 				Pattern: `^[a-z][a-z0-9-]* /[^\t\n\f\r ]*$`, Expect: "a service and a path, such as accounts /check", Rule: "The service needs an `http` port."},
@@ -216,6 +279,7 @@ var Proxyfile = Field{
 					{Name: "rpc", Doc: "The RPC routes: one exact-path route for each RPC method.", Kind: Map, Required: true,
 						Rule: "At most one rpc entry in a file. It needs methods from exactly one of `rpc.methods`, `rpc.proto` and `--rpc-methods`.", Fields: []Field{
 							retries("How many times an RPC call that never reached its service is tried again."),
+							withRule(RateLimit, "One limit for every RPC route of the entry, in every environment."),
 							{Name: "to", Doc: "The service the RPC methods of each package go to.", Kind: Dict, Required: true, Rule: "Not empty.",
 								Key: &Field{Name: "package pattern", Kind: Text,
 									Doc: "Which services' methods go to the value: * matches every service, a package name ending in .* every service " +
@@ -248,6 +312,7 @@ var Proxyfile = Field{
 					{Name: "auth", Doc: "off sends the route's requests to the service without the check.", Kind: Enum, Values: []string{"off"},
 						Rule: "Needs an `auth` key."},
 					retries("How many times a request that never reached the service is tried again."),
+					withRule(RateLimit, "One limit for the route's copy in every environment."),
 				}},
 			}}},
 		{Name: "rpc", Doc: "The RPC methods the gateway routes; the routes' rpc entry maps them to services.", Kind: Map,

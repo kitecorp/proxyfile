@@ -1,0 +1,34 @@
+# The rate limits, after CORS and before ext_authz and the Connect-gRPC bridge. The buckets live here, in descriptors,
+# one for each limited entry of routes: each route copy carries its bucket's id in its metadata, under the key client
+# or all, and the filter's own rate_limits read it from there (source: ROUTE_ENTRY). With client, the remote_address
+# entry, written without a value, gives each client address a bucket of its own; Envoy keeps at most
+# max_dynamic_descriptors of them for each such descriptor, 20 by default, dropping the least recently used
+# (local_rate_limit.proto). Both rate_limits entries are written whatever the routes use, because an entry no route's
+# metadata answers gives no descriptor and limits nothing.
+#
+# Measured on Envoy 1.40.2: every environment's copy of a route shares one bucket, and every RPC route of the rpc entry
+# shares the entry's; a route with no limit carries no id and, with no default bucket and
+# always_consume_default_token_bucket false, is never limited; a request over its limit is answered 429 without the
+# check being called; and a gRPC call over it gets grpc-status 8, RESOURCE_EXHAUSTED, through
+# rate_limited_as_resource_exhausted (without it UNAVAILABLE, local_rate_limit.proto). Route-level rate_limits are not
+# used: Envoy 1.40.2 warns that route configuration for local rate limits "will be ignored in the future".
+name: envoy.filters.http.local_ratelimit
+typed_config:
+  "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+  stat_prefix: rate_limit
+  filter_enabled: {default_value: {numerator: 100, denominator: HUNDRED}}
+  filter_enforced: {default_value: {numerator: 100, denominator: HUNDRED}}
+  rate_limited_as_resource_exhausted: true
+  always_consume_default_token_bucket: false
+  max_dynamic_descriptors: 65536
+  rate_limits:
+  - actions:
+    - metadata: {descriptor_key: bucket, metadata_key: {key: {{q .RateLimitNamespace}}, path: [{key: all}]}, source: ROUTE_ENTRY}
+  - actions:
+    - metadata: {descriptor_key: bucket, metadata_key: {key: {{q .RateLimitNamespace}}, path: [{key: client}]}, source: ROUTE_ENTRY}
+    - remote_address: {}
+  descriptors:
+{{- range .Buckets}}
+  - entries: [{key: bucket, value: {{q .ID}}}{{if .ByClient}}, {key: remote_address}{{end}}]
+    token_bucket: {max_tokens: {{.MaxTokens}}, tokens_per_fill: {{.TokensPerFill}}, fill_interval: {{.FillInterval}}}
+{{- end}}

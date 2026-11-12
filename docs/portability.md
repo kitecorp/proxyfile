@@ -24,6 +24,9 @@ is deprecated (it goes in 3.5).
 |---|---|---|---|---|
 | `listen` | the listener | `listen` | `bind` | core |
 | `admin` | the admin listener: `/ready`, `/stats`, `/server_info` | `stub_status` on its own port, other paths | the `stats` page or `monitor-uri`, other paths | core; the paths differ by proxy |
+| `tls.certificate`, `tls.key` | the listener's TLS transport socket, with ALPN `h2` and `http/1.1` | `listen <port> ssl`, `ssl_certificate`, `ssl_certificate_key` | `bind :<port> ssl crt <file>`, which reads the key from the certificate file or a `.key` file beside it | core |
+| `tls.clients.ca` | `validation_context.trusted_ca` with `require_client_certificate` | `ssl_client_certificate` with `ssl_verify_client on` | `verify required ca-file <ca>` | core |
+| `client_address` | `use_remote_address` `false` (`forwarded`) or `true` (`connection`) | `forwarded` is `set_real_ip_from 0.0.0.0/0`, `real_ip_header X-Forwarded-For` and `real_ip_recursive off`; `connection` writes nothing | `forwarded` is `http-request set-src hdr_ip(X-Forwarded-For,-1)`; `connection` writes nothing | core |
 | `limits.connections` | the overload manager | `worker_connections` | `maxconn` | core |
 | `envoy.heap` | the overload manager: shrink at 90%, refuse at 98% | none | none | envoy |
 | `limits.request_headers.size` | `max_request_headers_kb` | `large_client_header_buffers` | `tune.bufsize` | core |
@@ -32,6 +35,11 @@ is deprecated (it goes in 3.5).
 | `timeouts.idle` | the stream idle timeout | `proxy_read_timeout`, `client_body_timeout` | `timeout client`, `timeout server` | core |
 | `timeouts.upstream_idle` | the cluster idle timeout | `keepalive_timeout` in `upstream` | `pool-purge-delay`, which closes half the idle server connections each interval; no idle timeout per connection | core; HAProxy differs as its column says |
 | `services.<name>.http`, `.grpc`, `.address`, `.host_header` | clusters | `upstream` with `proxy_pass` or `grpc_pass`, `proxy_set_header Host` | `backend` with `server ... proto h2`, `http-request set-header Host` | core |
+| `services.<name>.addresses`, a DNS name in `.address` | one endpoint per address in a `STATIC` cluster; for a name, a `STRICT_DNS` cluster that looks it up every 5 seconds, IPv6 addresses first and IPv4 only when the name has none | `upstream` with one `server` per address; for a name, `server <name>:<port> resolve` with a `zone`, in open source from 1.27.3 | one `server` line per address; for a name, `server-template` with `resolvers` | core |
+| `services.<name>.balance` | `lb_policy` `ROUND_ROBIN`, `LEAST_REQUEST`, `RANDOM`, `RING_HASH` (`LEAST_REQUEST` compares two backends chosen at random) | round robin, `least_conn`, `random`, `hash ... consistent` | `balance roundrobin`, `leastconn`, `random`, `hash` | core |
+| `services.<name>.hash.header`, `.hash.client` | the cluster's `hash_policy`: `header`, or `connection_properties` with `source_ip` | `hash $http_<name> consistent`, `hash $binary_remote_addr consistent` | `balance hdr(<name>)`, `balance source` | core |
+| `services.<name>.health` | `health_checks` on the cluster, with the panic threshold at 0 | none in open source (nginx Plus's `health_check`), so it refuses the key | `option httpchk GET <path>` with `server ... check inter <interval> fall <unhealthy> rise <healthy>`; for `grpc`, an HTTP/2 check of the health RPC's path | core; nginx refuses it |
+| `dns.resolver` | c-ares `resolvers` on each `STRICT_DNS` cluster; the host's configuration without it | `resolver`; a name without `dns.resolver` is refused | a `resolvers` section, or `parse-resolv-conf` without it | core; nginx refuses a name without it |
 | `auth.ask`, `.timeout`, `.enabled`, `.send`, `.accept` | `ext_authz` in HTTP mode | `auth_request`, `proxy_set_header`, `auth_request_set` | the `haproxy-auth-request` script or an SPOE agent; nothing built in | core on Envoy and nginx; on HAProxy through the script |
 | `auth.when_unavailable = allow` | `failure_mode_allow` | in part: `error_page` on the check's 5xx | the script's option | core; partial on nginx |
 | `auth.only_with_header` | a header match on the filter | in part: a `map` and a second `location` | the script with an ACL | core; partial on nginx |
@@ -47,6 +55,7 @@ is deprecated (it goes in 3.5).
 | `routes[].rewrite` | a prefix rewrite | `rewrite`, or the URI on `proxy_pass` | `http-request replace-path` | core |
 | `routes[].auth = off` | the check turned off for the route | a `location` without `auth_request` | an ACL that skips the check | core |
 | `routes[].retries`, `rpc.retries` | a retry policy with Envoy's conditions | `proxy_next_upstream` and `proxy_next_upstream_tries` | `retries` and `retry-on` | core; what "never reached the service" means differs by proxy |
+| `routes[].rate_limit`, `routes[].rpc.rate_limit` | the local rate limit filter, before the check, with one token bucket for each route, which the route's metadata names | a `limit_req_zone` for each route, keyed by `$binary_remote_addr`, or by a constant for `all`, with `rate=<requests>r/s` or `r/m`, so a `per` other than `1s` or `1m` is refused; `limit_req ... burst=<requests + burst - 1> nodelay` and `limit_req_status 429`, which a gRPC client reads as UNAVAILABLE and may retry | a `stick-table` storing `http_req_rate(<per>)`, `http-request track-sc0`, and `http-request deny deny_status 429 if { sc_http_req_rate(0) gt <requests> }`, a sliding window, so a `burst` above 0 is refused | core; nginx and HAProxy differ as their columns say |
 | the `rpc` entry of `routes`, `rpc.to`, `rpc.methods`, `rpc.proto` | one exact-path route for each method | a `location = /<package>.<Service>/<Method>` with `grpc_pass` for each method | a `path` ACL for each method, to an HTTP/2 backend | core |
 | the action and the reports each RPC route tells the check | the route's own check settings | in part: an auth `location` for each method, or a `map` | the script's variables | core; partial on nginx |
 | `envoy.connect_bridge` | the Connect-gRPC bridge and the Lua status fix on RPC routes | none | none | envoy |
@@ -64,9 +73,9 @@ Envoy. [Defaults](defaults.md) says what each does.
 
 | What | In the Envoy configuration | Class |
 |---|---|---|
-| The runtime switches | `gateway.ext_authz.enabled`, `gateway.request_log.min_status`, `gateway.request_log.sample` and `gateway.local_reply.origin_refused_status` | envoy |
+| The runtime switches | `gateway.ext_authz.enabled`, `gateway.request_log.min_status`, `gateway.request_log.sample`, `gateway.local_reply.origin_refused_status` and, with a `rate_limit`, `gateway.local_reply.rate_limited_status` | envoy |
 | The retry conditions | `connect-failure,reset-before-request` | envoy |
-| The local replies | `502` with an empty body when a service cannot be reached, and `403` with `Invalid CORS request` for a refused origin | envoy |
+| The local replies | `502` with an empty body when a service cannot be reached, `403` with `Invalid CORS request` for a refused origin, and, with a `rate_limit`, the Connect error `resource_exhausted` for a Connect call over a limit | envoy |
 | The Lua status fix | the Lua filter that sets Connect's current status on the bridge's errors, with `envoy.connect_bridge` | envoy |
 | The auth check's mode | `ext_authz` in HTTP mode | envoy |
 

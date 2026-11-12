@@ -2,6 +2,8 @@ package read
 
 import (
 	"cmp"
+	"math"
+	"net"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -13,13 +15,16 @@ import (
 )
 
 // decoder fills the model from a tree format.Check accepted, so every key it finds has the kind and the form the
-// description asks for, and a key it does not find was not written. Four things the check cannot see are left to
-// it: an address that is not an IP literal, a size or a time that matches its pattern but does not fit in an int64
-// (ParseSize and ParseTime both refuse one; 9999999999999h is a time of that kind), a size or a time above the
-// largest value Envoy accepts in the field it is written to, which Envoy refuses when it loads the file, and a tracing
-// agent that matches its pattern but is not an IPv4 address and a port from 1 to 65535 (300.1.2.3:2000 is one). A
-// pattern cannot say how large a number with a unit may be; the whole numbers' limits are each field's Max in the
-// description, which the check applies.
+// description asks for, and a key it does not find was not written. What the check cannot see is left to it: a
+// service's address that is neither an IP address nor a DNS name, address and addresses written together, addresses
+// with fewer than two items, an item of addresses that is not an IP address or is written twice, hash.client or
+// health.grpc written false, a dns.resolver that is not an IP address with an optional port, a size or a time that
+// matches its pattern but does not fit in an int64 (ParseSize and ParseTime both refuse one; 9999999999999h is a time
+// of that kind), a size or a time above the largest value Envoy accepts in the field it is written to, which Envoy
+// refuses when it loads the file, a tracing agent that matches its pattern but is not an IPv4 address and a port from 1
+// to 65535 (300.1.2.3:2000 is one), and a rate limit whose per is below 1s or whose requests and burst together are
+// above a uint32. A pattern cannot say how large a number with a unit may be; the whole numbers' limits are each
+// field's Max in the description, which the check applies.
 type decoder struct {
 	model.Problems
 }
@@ -45,13 +50,17 @@ var lowerTimeBounds = map[string]int64{"auth.timeout": largestAuthTimeoutSeconds
 
 func decode(root *tree.Node) (*model.Gateway, []model.Problem) {
 	d := decoder{}
+	tls := listenerTLS(root.Get("tls"))
 	g := &model.Gateway{
 		Listen:            *port(root.Get("listen")),
 		Admin:             port(root.Get("admin")),
+		TLS:               tls,
+		ClientAddress:     clientAddress(root.Get("client_address"), tls != nil),
 		Limits:            d.limits(root),
 		Timeouts:          d.timeouts(root),
 		Services:          d.services(root.Get("services")),
 		ServicesPos:       root.Entry("services").KeyPos,
+		Resolver:          d.resolver(root),
 		Auth:              d.auth(root),
 		RemoveFromClients: d.headers(root.Get("remove_from_clients")),
 		Origins:           textAt(root.Get("origins")),
@@ -64,6 +73,29 @@ func decode(root *tree.Node) (*model.Gateway, []model.Problem) {
 		return nil, problems
 	}
 	return g, nil
+}
+
+// listenerTLS is nil when tls is not written, so the public listener serves plain HTTP. The check has made each path
+// absolute and required certificate, key and, with clients, ca.
+func listenerTLS(n *tree.Node) *model.TLS {
+	if n == nil {
+		return nil
+	}
+	return &model.TLS{Certificate: n.GetText("certificate"), Key: n.GetText("key"), ClientsCA: n.Get("clients").GetText("ca")}
+}
+
+// clientAddress is the written client_address, else connection when the file writes tls and forwarded otherwise. A
+// gateway that terminates TLS usually faces its clients, and forwarded there would let each client choose its own
+// address by sending X-Forwarded-For; every file without tls keeps forwarded, 2.0's behaviour.
+func clientAddress(n *tree.Node, tls bool) model.ClientAddress {
+	switch {
+	case n != nil:
+		return model.ClientAddress(n.Text)
+	case tls:
+		return model.ClientConnection
+	default:
+		return model.ClientForwarded
+	}
 }
 
 func (d *decoder) limits(root *tree.Node) model.Limits {
@@ -105,7 +137,7 @@ func (d *decoder) services(n *tree.Node) []model.Service {
 		service := model.Service{
 			Name:       entry.Key,
 			Pos:        entry.KeyPos,
-			Address:    model.Text{Value: "127.0.0.1"},
+			Balance:    model.Text{Value: "round_robin"},
 			HostHeader: entry.Value.GetText("host_header"),
 		}
 		// Ranged rather than looked up, because the clusters follow the order the ports were written in.
@@ -114,15 +146,130 @@ func (d *decoder) services(n *tree.Node) []model.Service {
 				service.Ports = append(service.Ports, model.ServicePort{Protocol: model.Protocol(key.Key), Number: number(key.Value), Pos: key.Value.Pos})
 			}
 		}
-		if address := entry.Value.Get("address"); address != nil {
-			if _, err := netip.ParseAddr(address.Text); err != nil {
-				d.Add(address.Pos, "service %q: the address %q is not an IP address", entry.Key, address.Text)
-			}
-			service.Address = textAt(address)
+		service.Addresses, service.DNS = d.backends(entry)
+		if balance := entry.Value.Get("balance"); balance != nil {
+			service.Balance = textAt(balance)
 		}
+		if hash := entry.Value.Entry("hash"); hash != nil {
+			service.Hash = &model.Hash{Header: hash.Value.GetText("header"), Client: hash.Value.Get("client") != nil, Pos: hash.KeyPos}
+			if client := hash.Value.Get("client"); client != nil && client.Text != "true" {
+				d.Add(client.Pos, "%q must be true", "client")
+			}
+		}
+		service.Health = d.health(entry.Value.Entry("health"))
 		services = append(services, service)
 	}
 	return services
+}
+
+// health reads a service's checks with the defaults the description's Docs name: every 5s, within 2s, 2 passes in a
+// row to join the pool and 3 failures to leave it. Whether path or grpc is written, and fits the service's ports, is
+// the meaning rules' to say.
+func (d *decoder) health(entry *tree.Entry) *model.Health {
+	if entry == nil {
+		return nil
+	}
+	n := entry.Value
+	health := &model.Health{
+		Path:      optionalText(n.Get("path")),
+		GRPC:      optionalText(n.Get("grpc")),
+		Interval:  model.Time{Millis: 5000},
+		Timeout:   model.Time{Millis: 2000},
+		Healthy:   2,
+		Unhealthy: 3,
+		Pos:       entry.KeyPos,
+	}
+	if health.GRPC != nil && health.GRPC.Value != "true" {
+		d.Add(health.GRPC.Pos, "%q must be true", "grpc")
+	}
+	if interval := d.timeOf(n.Get("interval"), "health.interval", format.Health.Child("interval").Expect); interval != nil {
+		health.Interval = *interval
+	}
+	if timeout := d.timeOf(n.Get("timeout"), "health.timeout", format.Health.Child("timeout").Expect); timeout != nil {
+		health.Timeout = *timeout
+	}
+	if healthy := n.Get("healthy"); healthy != nil {
+		health.Healthy = number(healthy)
+	}
+	if unhealthy := n.Get("unhealthy"); unhealthy != nil {
+		health.Unhealthy = number(unhealthy)
+	}
+	return health
+}
+
+// backends reads a service's address or addresses: 127.0.0.1 when neither is written. dns is true when address is a
+// DNS name, which the proxy looks up while it runs. addresses holds IP addresses alone, because a name there would
+// give a backend list that changes under the others; they are compared as addresses, so two spellings of one address
+// are one backend written twice.
+func (d *decoder) backends(entry tree.Entry) (backends []model.Text, dns bool) {
+	address, addresses := entry.Value.Get("address"), entry.Value.Entry("addresses")
+	switch {
+	case address != nil && addresses != nil:
+		d.Add(addresses.KeyPos, "service %q: write address or addresses, not both", entry.Key)
+		return nil, false
+	case address != nil:
+		if _, err := netip.ParseAddr(address.Text); err == nil {
+			return []model.Text{textAt(address)}, false
+		}
+		if model.IsDNSName(address.Text) {
+			return []model.Text{textAt(address)}, true
+		}
+		if withPort(address.Text) {
+			d.Add(address.Pos, "service %q: the address %q has a port; the port goes in http or grpc", entry.Key, address.Text)
+			return nil, false
+		}
+		d.Add(address.Pos, "service %q: the address %q is not an IP address or a DNS name", entry.Key, address.Text)
+		return nil, false
+	case addresses != nil:
+		items := addresses.Value.Items
+		if len(items) < 2 {
+			d.Add(addresses.Value.Pos, "service %q: addresses needs two or more addresses; write one in address", entry.Key)
+		}
+		first := map[netip.Addr]model.Pos{}
+		for _, item := range items {
+			backends = append(backends, textAt(item))
+			addr, err := netip.ParseAddr(item.Text)
+			if err != nil && withPort(item.Text) {
+				d.Add(item.Pos, "service %q: %q in addresses has a port; the port goes in http or grpc", entry.Key, item.Text)
+				continue
+			}
+			if err != nil {
+				d.Add(item.Pos, "service %q: %q in addresses is not an IP address; a DNS name goes in address", entry.Key, item.Text)
+				continue
+			}
+			addr = addr.Unmap()
+			if earlier, twice := first[addr]; twice {
+				d.Add(item.Pos, "service %q: the address %q is written twice in addresses (the first %s)", entry.Key, item.Text, earlier.Where())
+				continue
+			}
+			first[addr] = item.Pos
+		}
+		return backends, false
+	default:
+		return []model.Text{{Value: "127.0.0.1"}}, false
+	}
+}
+
+// withPort says whether text is a host followed by a port, the form other proxies write a backend in. A service's
+// ports are its http and grpc keys, so the problem says where the port goes.
+func withPort(text string) bool {
+	host, port, err := net.SplitHostPort(text)
+	return err == nil && host != "" && port != ""
+}
+
+// resolver is nil when dns.resolver is not written, so each cluster that looks a name up asks the host's resolver
+// configuration.
+func (d *decoder) resolver(root *tree.Node) *model.Resolver {
+	n := root.Get("dns").Get("resolver")
+	if n == nil {
+		return nil
+	}
+	address, port, ok := model.ParseResolver(n.Text)
+	if !ok {
+		d.tooLarge(n, []string{"dns", "resolver"})
+		return nil
+	}
+	return &model.Resolver{Address: address, Port: port}
 }
 
 func (d *decoder) auth(root *tree.Node) *model.Auth {
@@ -152,17 +299,18 @@ func (d *decoder) routes(n *tree.Node) []model.Route {
 	var list []model.Route
 	for _, item := range n.Items {
 		if rpc := item.Get("rpc"); rpc != nil {
-			list = append(list, model.Route{Pos: item.Pos, RPC: rpcEntry(rpc)})
+			list = append(list, model.Route{Pos: item.Pos, RPC: d.rpcEntry(rpc)})
 			continue
 		}
 		route := model.Route{
-			Pos:     item.Pos,
-			Name:    textAt(item.Get("name")),
-			Method:  item.GetText("method"),
-			To:      textAt(item.Get("to")),
-			Rewrite: optionalText(item.Get("rewrite")),
-			AuthOff: optionalText(item.Get("auth")),
-			Retries: number(item.Get("retries")),
+			Pos:       item.Pos,
+			Name:      textAt(item.Get("name")),
+			Method:    item.GetText("method"),
+			To:        textAt(item.Get("to")),
+			Rewrite:   optionalText(item.Get("rewrite")),
+			AuthOff:   optionalText(item.Get("auth")),
+			Retries:   number(item.Get("retries")),
+			RateLimit: d.rateLimit(item.Get("rate_limit")),
 		}
 		// The check lets exactly one of them through.
 		for _, kind := range format.MatchKinds {
@@ -175,8 +323,32 @@ func (d *decoder) routes(n *tree.Node) []model.Route {
 	return list
 }
 
-func rpcEntry(n *tree.Node) *model.RPC {
-	rpc := &model.RPC{Retries: number(n.Get("retries")), ToPos: n.Entry("to").KeyPos}
+// The bucket holds requests + burst tokens, which the generator writes to the token bucket's max_tokens, a uint32 in
+// Envoy 1.40.2 (token_bucket.proto); the check holds each of the two alone to that limit.
+const largestBucketTokens = math.MaxUint32
+
+// rateLimit reads a route's or the rpc entry's limit with the defaults the description's Docs name: no burst, and each
+// client address counted on its own. A per below a second is refused, though Envoy takes a fill interval down to 50ms
+// (local_ratelimit_impl.cc): nginx's limit_req writes a rate per second or per minute, so it could not carry one.
+func (d *decoder) rateLimit(n *tree.Node) *model.RateLimit {
+	if n == nil {
+		return nil
+	}
+	limit := &model.RateLimit{Requests: number(n.Get("requests")), Burst: number(n.Get("burst")), ByClient: n.GetText("by") != "all"}
+	if per := d.timeOf(n.Get("per"), "rate_limit.per", format.RateLimit.Child("per").Expect); per != nil {
+		if per.Millis < 1000 {
+			d.Add(per.Pos, "rate_limit.per must be at least 1s")
+		}
+		limit.Per = *per
+	}
+	if burst := n.Get("burst"); burst != nil && limit.Requests+limit.Burst > largestBucketTokens {
+		d.Add(burst.Pos, "rate_limit: requests and burst together must be at most %d", largestBucketTokens)
+	}
+	return limit
+}
+
+func (d *decoder) rpcEntry(n *tree.Node) *model.RPC {
+	rpc := &model.RPC{Retries: number(n.Get("retries")), RateLimit: d.rateLimit(n.Get("rate_limit")), ToPos: n.Entry("to").KeyPos}
 	for _, entry := range n.Get("to").Entries {
 		// A target is a service name, or a mapping with the service and the routes' name.
 		service := entry.Value
@@ -280,20 +452,24 @@ func (d *decoder) size(root *tree.Node, path ...string) *model.Size {
 	return &model.Size{Bytes: bytes, Pos: n.Pos}
 }
 
-// time reads none as 0, which the model takes as no time limit. The one time that must not be none, auth's timeout,
-// has a pattern without none, so the check has already refused it there. Every time field is read here, and the bound
-// is chosen here from the path, so no caller can read a time without the bound of its field.
+// time reads the time at path, with the bound and the Expect of its field read from the path.
 func (d *decoder) time(root *tree.Node, path ...string) *model.Time {
-	n := at(root, path)
+	return d.timeOf(at(root, path), strings.Join(path, "."), expectAt(path))
+}
+
+// timeOf reads none as 0, which the model takes as no time limit. A time that must not be none has a pattern without
+// none, so the check has already refused it there. Every time field is read here, and name, the field's path joined by
+// dots, chooses its bound and starts the message of one above it, so no caller can read a time without the bound of
+// its field. expect completes the message for a time the parser refuses, as the check words one that does not match.
+func (d *decoder) timeOf(n *tree.Node, name, expect string) *model.Time {
 	if n == nil {
 		return nil
 	}
 	millis, ok := model.ParseTime(n.Text)
 	if !ok {
-		d.tooLarge(n, path)
+		d.Add(n.Pos, "%q must be %s", name[strings.LastIndex(name, ".")+1:], expect)
 		return nil
 	}
-	name := strings.Join(path, ".")
 	if largestSeconds := cmp.Or(lowerTimeBounds[name], largestTimeSeconds); millis > largestSeconds*1000 {
 		d.Add(n.Pos, "%s must be at most %ds", name, largestSeconds)
 	}
@@ -303,11 +479,16 @@ func (d *decoder) time(root *tree.Node, path ...string) *model.Time {
 // tooLarge reports a value the check accepted but the parser refused, in the words the check uses for a value that
 // does not match, read from the same description.
 func (d *decoder) tooLarge(n *tree.Node, path []string) {
+	d.Add(n.Pos, "%q must be %s", path[len(path)-1], expectAt(path))
+}
+
+// expectAt is the Expect of the key at path in the proxyfile's description.
+func expectAt(path []string) string {
 	spec := &format.Proxyfile
 	for _, key := range path {
 		spec = spec.Child(key)
 	}
-	d.Add(n.Pos, "%q must be %s", path[len(path)-1], spec.Expect)
+	return spec.Expect
 }
 
 func at(root *tree.Node, path []string) *tree.Node {

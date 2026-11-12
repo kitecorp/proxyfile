@@ -3,7 +3,9 @@
 #
 # With auth on, a plain route asks the check for authentication alone: it adds no x-gateway- header, and its empty
 # action is for the auth-unavailable log line. auth: off turns ext_authz off for this route alone
-# (ext_authz.proto, ExtAuthzPerRoute.disabled), and such a route carries no metadata.
+# (ext_authz.proto, ExtAuthzPerRoute.disabled), and such a route carries no action. A limited route also carries its
+# bucket under the rate-limit namespace (filter-local-ratelimit.yaml), so a route with auth off and a limit carries its
+# bucket alone, and a route with neither carries no metadata.
 name: {{q .Name}}
 match: {
 {{- if eq .Match "prefix"}}prefix: {{q .Value}}
@@ -12,8 +14,11 @@ match: {
 {{- end}}
 {{- with .Method}}, headers: [{name: ":method", string_match: {exact: {{q .}}}}]{{end -}}
 }
-{{- if .Metadata}}
-metadata: {filter_metadata: { {{- q .Namespace}}: {action: ""}}}
+{{- if or .Metadata .RateLimit}}
+metadata: {filter_metadata: { {{- if .Metadata}}{{q .Namespace}}: {action: ""}{{end}}
+{{- if and .Metadata .RateLimit}}, {{end}}
+{{- with .RateLimit}}{{q .Namespace}}: { {{- .By}}: {{q .ID}}}{{end -}}
+}}
 {{- end}}
 route: $action
 {{- if .AuthOff}}

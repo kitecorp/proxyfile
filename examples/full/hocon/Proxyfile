@@ -1,5 +1,6 @@
-# Every key but services.<name>.address, rpc.proto, envoy.tracing, nginx and haproxy, in HOCON, with invented values. It
-# gives the same envoy.yaml as ../yaml/proxyfile.yaml.
+# Every key but services.<name>.address, rpc.proto, envoy.tracing, nginx and haproxy, in HOCON, with invented values;
+# the keys of 2.1 (services.<name>.addresses, .balance, .hash, .health, dns, tls, client_address, rate_limit) are not
+# in it yet. It gives the same envoy.yaml as ../yaml/proxyfile.yaml.
 listen = 10000
 admin = 9901
 

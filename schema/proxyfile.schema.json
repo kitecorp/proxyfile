@@ -64,6 +64,13 @@
       ],
       "type": "object"
     },
+    "client_address": {
+      "description": "Which address counts as the client's: forwarded, the last address a proxy in front appended to X-Forwarded-For, or connection, the peer of the TCP connection.",
+      "enum": [
+        "forwarded",
+        "connection"
+      ]
+    },
     "cors": {
       "additionalProperties": false,
       "description": "The CORS settings every environment shares.",
@@ -83,6 +90,18 @@
         "max_age": {
           "description": "The value of Access-Control-Max-Age: how long a browser may keep a preflight answer.",
           "pattern": "^[0-9]+$",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "dns": {
+      "additionalProperties": false,
+      "description": "The name lookups of the services whose address is a DNS name.",
+      "properties": {
+        "resolver": {
+          "description": "The name server the proxy asks; the host's own resolver configuration when not written.",
+          "pattern": "^[^\\t\\n\\f\\r ]+$",
           "type": "string"
         }
       },
@@ -399,6 +418,41 @@
                 "additionalProperties": false,
                 "description": "The RPC routes: one exact-path route for each RPC method.",
                 "properties": {
+                  "rate_limit": {
+                    "additionalProperties": false,
+                    "description": "How many requests the route admits in a period; a request over the limit is answered 429 and never reaches the service.",
+                    "properties": {
+                      "burst": {
+                        "description": "Extra requests admitted above requests after a quiet spell; 0 when not written.",
+                        "maximum": 4294967295,
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "by": {
+                        "description": "client counts each client address on its own, all every client together; client when not written.",
+                        "enum": [
+                          "client",
+                          "all"
+                        ]
+                      },
+                      "per": {
+                        "description": "The period.",
+                        "pattern": "^[1-9][0-9]*(ms|s|m|h)$",
+                        "type": "string"
+                      },
+                      "requests": {
+                        "description": "Requests admitted per period.",
+                        "maximum": 4294967295,
+                        "minimum": 1,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "requests",
+                      "per"
+                    ],
+                    "type": "object"
+                  },
                   "retries": {
                     "description": "How many times an RPC call that never reached its service is tried again.",
                     "maximum": 4294967295,
@@ -504,6 +558,41 @@
                 "description": "Matches paths that start with this text.",
                 "pattern": "^/",
                 "type": "string"
+              },
+              "rate_limit": {
+                "additionalProperties": false,
+                "description": "How many requests the route admits in a period; a request over the limit is answered 429 and never reaches the service.",
+                "properties": {
+                  "burst": {
+                    "description": "Extra requests admitted above requests after a quiet spell; 0 when not written.",
+                    "maximum": 4294967295,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "by": {
+                    "description": "client counts each client address on its own, all every client together; client when not written.",
+                    "enum": [
+                      "client",
+                      "all"
+                    ]
+                  },
+                  "per": {
+                    "description": "The period.",
+                    "pattern": "^[1-9][0-9]*(ms|s|m|h)$",
+                    "type": "string"
+                  },
+                  "requests": {
+                    "description": "Requests admitted per period.",
+                    "maximum": 4294967295,
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "requests",
+                  "per"
+                ],
+                "type": "object"
               },
               "retries": {
                 "description": "How many times a request that never reached the service is tried again.",
@@ -613,18 +702,101 @@
     "services": {
       "additionalProperties": {
         "additionalProperties": false,
-        "description": "One service: a port per protocol, an optional Host header and an optional address.",
+        "description": "One service: a port per protocol, an optional Host header, its backends, how requests are spread over them and how they are checked.",
         "properties": {
           "address": {
-            "description": "The service's IP address; 127.0.0.1 when not written.",
+            "description": "The service's IP address, or a DNS name the proxy looks up again while it runs; 127.0.0.1 when not written.",
             "pattern": "^[^\\t\\n\\f\\r ]+$",
             "type": "string"
+          },
+          "addresses": {
+            "description": "The service's backends, by IP address, each on the service's ports.",
+            "items": {
+              "pattern": "^[^\\t\\n\\f\\r ]+$",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "balance": {
+            "description": "How requests are spread over the backends; round_robin when not written.",
+            "enum": [
+              "round_robin",
+              "least_requests",
+              "random",
+              "hash"
+            ]
           },
           "grpc": {
             "description": "The service's gRPC port.",
             "maximum": 65535,
             "minimum": 1,
             "type": "integer"
+          },
+          "hash": {
+            "additionalProperties": false,
+            "description": "What balance hash hashes, so that one client or one header value always reaches the same backend.",
+            "oneOf": [
+              {
+                "required": [
+                  "header"
+                ]
+              },
+              {
+                "required": [
+                  "client"
+                ]
+              }
+            ],
+            "properties": {
+              "client": {
+                "description": "true hashes the client's address, the one client_address names.",
+                "type": "boolean"
+              },
+              "header": {
+                "description": "The request header whose value is hashed; a request without it goes to a backend chosen at random.",
+                "pattern": "^[a-z0-9][a-z0-9-]*$",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "health": {
+            "additionalProperties": false,
+            "description": "Active checks of each backend: one that fails unhealthy checks in a row leaves the pool until it passes healthy checks in a row.",
+            "properties": {
+              "grpc": {
+                "description": "true checks the service's grpc port with the gRPC health protocol, grpc.health.v1.Health/Check.",
+                "type": "boolean"
+              },
+              "healthy": {
+                "description": "Checks in a row a backend must pass to join the pool; 2 when not written.",
+                "maximum": 255,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "interval": {
+                "description": "How often each backend is checked; 5s when not written.",
+                "pattern": "^[1-9][0-9]*(ms|s|m|h)$",
+                "type": "string"
+              },
+              "path": {
+                "description": "The path an HTTP GET must answer with a 2xx, on the service's http port.",
+                "pattern": "^/[^\\t\\n\\f\\r ]*$",
+                "type": "string"
+              },
+              "timeout": {
+                "description": "How long one check may take; 2s when not written.",
+                "pattern": "^[1-9][0-9]*(ms|s|m|h)$",
+                "type": "string"
+              },
+              "unhealthy": {
+                "description": "Checks in a row a backend must fail to leave the pool; 3 when not written.",
+                "maximum": 255,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "type": "object"
           },
           "host_header": {
             "description": "The Host header a request carries when a route sends it to this service.",
@@ -640,7 +812,7 @@
         },
         "type": "object"
       },
-      "description": "The services behind the gateway, on the same host, by name.",
+      "description": "The services behind the gateway, by name.",
       "propertyNames": {
         "pattern": "^[a-z][a-z0-9-]*$"
       },
@@ -666,6 +838,42 @@
           "type": "string"
         }
       },
+      "type": "object"
+    },
+    "tls": {
+      "additionalProperties": false,
+      "description": "The public listener serves HTTPS with this certificate and key; without it, plain HTTP.",
+      "properties": {
+        "certificate": {
+          "description": "The certificate chain, PEM, a file on the proxy's host.",
+          "pattern": "^/",
+          "type": "string"
+        },
+        "clients": {
+          "additionalProperties": false,
+          "description": "Require a client certificate on every connection (mutual TLS).",
+          "properties": {
+            "ca": {
+              "description": "The CA bundle, PEM, that a client's certificate must chain to.",
+              "pattern": "^/",
+              "type": "string"
+            }
+          },
+          "required": [
+            "ca"
+          ],
+          "type": "object"
+        },
+        "key": {
+          "description": "The private key, PEM, a file on the proxy's host.",
+          "pattern": "^/",
+          "type": "string"
+        }
+      },
+      "required": [
+        "certificate",
+        "key"
+      ],
       "type": "object"
     }
   },

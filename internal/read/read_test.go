@@ -70,8 +70,62 @@ func TestReadProblems(t *testing.T) {
 			want: []string{"g.yaml:7:26: route \"web\": the pattern does not compile: error parsing regexp: missing closing ): `^/(a`"}},
 		{name: "listen equals admin", document: b.Inserted(8, "admin: 8000"),
 			want: []string{`g.yaml:8:8: listen and admin are the same port 8000`}},
-		{name: "address", document: b.Replaced(3, 3, "  web: {http: 3000, address: localhost}"),
-			want: []string{`g.yaml:3:30: service "web": the address "localhost" is not an IP address`}},
+		{name: "address neither an IP address nor a DNS name", document: b.Replaced(3, 3, `  web: {http: 3000, address: "web_internal"}`),
+			want: []string{`g.yaml:3:30: service "web": the address "web_internal" is not an IP address or a DNS name`}},
+		{name: "address with a port", document: b.Replaced(3, 3, `  web: {http: 3000, address: "localhost:3000"}`),
+			want: []string{`g.yaml:3:30: service "web": the address "localhost:3000" has a port; the port goes in http or grpc`}},
+		{name: "addresses with a port", document: b.Replaced(3, 3, `  web: {http: 3000, addresses: ["10.0.0.2:3000", "[fd00::1]:3000"]}`),
+			want: []string{`g.yaml:3:33: service "web": "10.0.0.2:3000" in addresses has a port; the port goes in http or grpc`,
+				`g.yaml:3:50: service "web": "[fd00::1]:3000" in addresses has a port; the port goes in http or grpc`}},
+		{name: "address in the dotted form, not an IP address", document: b.Replaced(3, 3, `  web: {http: 3000, address: "10.0.0.256"}`),
+			want: []string{`g.yaml:3:30: service "web": the address "10.0.0.256" is not an IP address or a DNS name`}},
+		{name: "address and addresses", document: b.Replaced(3, 3, `  web: {http: 3000, address: "10.0.0.1", addresses: ["10.0.0.2", "10.0.0.3"]}`),
+			want: []string{`g.yaml:3:42: service "web": write address or addresses, not both`}},
+		{name: "addresses with one address", document: b.Replaced(3, 3, `  web: {http: 3000, addresses: ["10.0.0.2"]}`),
+			want: []string{`g.yaml:3:32: service "web": addresses needs two or more addresses; write one in address`}},
+		{name: "a name in addresses", document: b.Replaced(3, 3, `  web: {http: 3000, addresses: ["10.0.0.2", web.internal]}`),
+			want: []string{`g.yaml:3:45: service "web": "web.internal" in addresses is not an IP address; a DNS name goes in address`}},
+		{name: "an address twice", document: b.Replaced(3, 3, `  web: {http: 3000, addresses: ["10.0.0.2", "10.0.0.3", "10.0.0.2"]}`),
+			want: []string{`g.yaml:3:57: service "web": the address "10.0.0.2" is written twice in addresses (the first on line 3)`}},
+		{name: "an IPv6 address twice", document: b.Replaced(3, 3, `  web: {http: 3000, addresses: ["fd00::1", "fd00:0::1"]}`),
+			want: []string{`g.yaml:3:44: service "web": the address "fd00:0::1" is written twice in addresses (the first on line 3)`}},
+		{name: "an address twice, once as an IPv4-mapped IPv6 address", document: b.Replaced(3, 3, `  web: {http: 3000, addresses: ["10.0.0.2", "::ffff:10.0.0.2"]}`),
+			want: []string{`g.yaml:3:45: service "web": the address "::ffff:10.0.0.2" is written twice in addresses (the first on line 3)`}},
+		{name: "hash client false", document: b.Replaced(3, 3, `  web: {http: 3000, balance: hash, hash: {client: false}}`),
+			want: []string{`g.yaml:3:51: "client" must be true`}},
+		{name: "resolver not an IP address", document: b.Inserted(8, "dns: {resolver: ns.example}"),
+			want: []string{`g.yaml:8:17: "resolver" must be an IP address with an optional port, such as 10.0.0.2:53`}},
+		{name: "balance hash without hash", document: b.Replaced(3, 3, `  web: {http: 3000, balance: hash}`),
+			want: []string{`g.yaml:3:30: service "web": balance hash needs hash`}},
+		{name: "hash without balance hash", document: b.Replaced(3, 3, `  web: {http: 3000, hash: {header: x-user}}`),
+			want: []string{`g.yaml:3:21: service "web": hash is written, but balance is not hash`}},
+		{name: "health with neither path nor grpc", document: b.Replaced(3, 3, "  web: {http: 3000, health: {interval: 10s}}"),
+			want: []string{`g.yaml:3:21: service "web": health needs path or grpc`}},
+		{name: "health path without an http port", document: b.Replaced(4, 4, "  rpc-backend: {grpc: 5000, health: {path: /healthz}}"),
+			want: []string{`g.yaml:4:44: service "rpc-backend": health.path needs an http port`}},
+		{name: "health grpc without a grpc port", document: b.Replaced(3, 3, "  web: {http: 3000, health: {grpc: true}}"),
+			want: []string{`g.yaml:3:36: service "web": health.grpc needs a grpc port`}},
+		{name: "health grpc false", document: b.Replaced(3, 3, "  web: {http: 3000, health: {path: /healthz, grpc: false}}"),
+			want: []string{`g.yaml:3:52: "grpc" must be true`}},
+		{name: "health timeout as long as the interval", document: b.Replaced(3, 3, "  web: {http: 3000, health: {path: /healthz, interval: 2s, timeout: 2s}}"),
+			want: []string{`g.yaml:3:69: service "web": health.timeout 2s must be shorter than health.interval 2s`}},
+		// The default timeout, 2s, against a written interval: the message points at the interval.
+		{name: "health interval below the default timeout", document: b.Replaced(3, 3, "  web: {http: 3000, health: {path: /healthz, interval: 1s}}"),
+			want: []string{`g.yaml:3:56: service "web": health.timeout 2s must be shorter than health.interval 1s`}},
+		{name: "health interval too large", document: b.Replaced(3, 3, "  web: {http: 3000, health: {path: /healthz, interval: 9999999999999h}}"),
+			want: []string{`g.yaml:3:56: "interval" must be a time such as 5s`}},
+		// Envoy's smallest fill interval is 50ms; nginx writes a rate per second or per minute.
+		{name: "rate limit period below 1s", document: b.Replaced(7, 7, "  - {name: web, prefix: /, to: web, rate_limit: {requests: 10, per: 500ms}}"),
+			want: []string{`g.yaml:7:69: rate_limit.per must be at least 1s`}},
+		{name: "rate limit period below 1s on the rpc entry",
+			document: b.Replaced(7, 7, `  - rpc: {to: {"*": rpc-backend}, rate_limit: {requests: 10, per: 999ms}}`, "  - {name: web, prefix: /, to: web}"),
+			want:     []string{`g.yaml:7:67: rate_limit.per must be at least 1s`}},
+		// The bucket holds requests + burst tokens, a uint32 in Envoy.
+		{name: "requests and burst above Envoy's largest",
+			document: b.Replaced(7, 7, "  - {name: web, prefix: /, to: web, rate_limit: {requests: 4294967295, burst: 1, per: 1s}}"),
+			want:     []string{`g.yaml:7:79: rate_limit: requests and burst together must be at most 4294967295`}},
+		{name: "rate limit period too large", document: b.Replaced(7, 7, "  - {name: web, prefix: /, to: web, rate_limit: {requests: 10, per: 9999999999999h}}"),
+			want: []string{`g.yaml:7:69: "per" must be a time such as 1s or 1m`}},
 		{name: "cors with an origins file", document: b.Inserted(6, `cors: {max_age: "600"}`),
 			want: []string{`g.yaml:6:1: "cors" is written in the origins file when "origins" names a file`}},
 		// The origins are read in the meaning rules' stage, so one run names the problems of both, sorted.
@@ -176,7 +230,7 @@ func TestReadProblems(t *testing.T) {
 		{name: "HOCON: format check", file: "g.conf", document: strings.Replace(bHOCON, "listen = 8000", "liste = 8000", 1),
 			want: []string{
 				`g.conf: "listen" is required here`,
-				`g.conf: liste: unknown key "liste"; known here: admin, auth, cors, envoy, haproxy, limits, listen, log, nginx, origins, remove_from_clients, routes, rpc, services, timeouts`,
+				`g.conf: liste: unknown key "liste"; known here: admin, auth, client_address, cors, dns, envoy, haproxy, limits, listen, log, nginx, origins, remove_from_clients, routes, rpc, services, timeouts, tls`,
 			}},
 		// A 1.x file is refused at every key that moved into the envoy block, each named by its key path, in one run.
 		{name: "HOCON: every 1.x key at its 1.x place", file: "g.conf",
@@ -292,7 +346,57 @@ func ports(g *model.Gateway) []string {
 func addresses(g *model.Gateway) []string {
 	var lines []string
 	for _, s := range g.Services {
-		lines = append(lines, strings.TrimSpace(s.Name+" "+s.Address.Value+" "+s.HostHeader))
+		lines = append(lines, strings.TrimSpace(s.Name+" "+strings.Join(values(s.Addresses), ",")+" "+s.HostHeader))
+	}
+	return lines
+}
+
+func values(texts []model.Text) []string {
+	list := make([]string, len(texts))
+	for i, text := range texts {
+		list[i] = text.Value
+	}
+	return list
+}
+
+// backends writes one line per service: its backends, whether they are found by name, how requests are spread over
+// them and what is hashed.
+func backends(g *model.Gateway) []string {
+	var lines []string
+	for _, s := range g.Services {
+		kind := "static"
+		if s.DNS {
+			kind = "dns"
+		}
+		line := fmt.Sprintf("%s %s %s %s", s.Name, strings.Join(values(s.Addresses), ","), kind, s.Balance.Value)
+		if s.Hash != nil && s.Hash.Client {
+			line += " client"
+		} else if s.Hash != nil {
+			line += " header " + s.Hash.Header
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// health writes one line per service with health: what is checked, how often, how long a check may take and how many
+// checks in a row a backend must pass to join the pool and fail to leave it.
+func health(g *model.Gateway) []string {
+	var lines []string
+	for _, s := range g.Services {
+		h := s.Health
+		if h == nil {
+			continue
+		}
+		var what []string
+		if h.Path != nil {
+			what = append(what, "path "+h.Path.Value)
+		}
+		if h.GRPC != nil {
+			what = append(what, "grpc")
+		}
+		lines = append(lines, fmt.Sprintf("%s %s every %s within %s, %d to join, %d to leave", s.Name, strings.Join(what, " and "),
+			model.FormatSeconds(h.Interval.Millis), model.FormatSeconds(h.Timeout.Millis), h.Healthy, h.Unhealthy))
 	}
 	return lines
 }
@@ -537,4 +641,155 @@ func TestReadTracing(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The reader fills each service's backends, how requests are spread over them and the resolver, in both forms.
+func TestReadBackends(t *testing.T) {
+	balanced := []string{"shop 10.0.1.11,10.0.1.12,10.0.1.13 static least_requests", "orders 10.0.2.21,10.0.2.22 static random"}
+	dns := []string{"catalog catalog.internal.example dns hash header x-session-id", "search search.internal.example dns hash client"}
+	defaultBackend := "rpc-backend 127.0.0.1 static round_robin"
+	cases := []struct {
+		name, file, document string // file is an example read as it is; otherwise document is written to g.yaml
+		want                 []string
+		resolver             *model.Resolver
+	}{
+		{name: "balanced example, YAML", file: "../../examples/balanced/yaml/proxyfile.yaml", want: balanced},
+		{name: "balanced example, HOCON", file: "../../examples/balanced/hocon/Proxyfile", want: balanced},
+		{name: "dns example, YAML", file: "../../examples/dns/yaml/proxyfile.yaml", want: dns, resolver: &model.Resolver{Address: "10.0.0.2", Port: 53}},
+		{name: "dns example, HOCON", file: "../../examples/dns/hocon/Proxyfile", want: dns, resolver: &model.Resolver{Address: "10.0.0.2", Port: 53}},
+		// A Compose service name is a DNS name of one label.
+		{name: "a name of one label", document: b.Replaced(3, 3, "  web: {http: 3000, address: catalog}"),
+			want: []string{"web catalog dns round_robin", defaultBackend}},
+		{name: "IPv6 backends and resolver", document: b.Replaced(3, 3, `  web: {http: 3000, addresses: ["fd00::1", "fd00::2"]}`) + "dns: {resolver: \"fd00::53\"}\n",
+			want: []string{"web fd00::1,fd00::2 static round_robin", defaultBackend}, resolver: &model.Resolver{Address: "fd00::53", Port: 53}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := c.file
+			if path == "" {
+				path = filepath.Join(t.TempDir(), "g.yaml")
+				testsupport.WriteFile(t, path, c.document)
+			}
+			file, problems := Proxyfile(path)
+			if problems != nil {
+				t.Fatalf("problems = %q, want none", testsupport.ProblemStrings(problems))
+			}
+			if got := backends(file.Gateway); !slices.Equal(got, c.want) {
+				t.Errorf("backends = %q, want %q", got, c.want)
+			}
+			if !reflect.DeepEqual(file.Gateway.Resolver, c.resolver) {
+				t.Errorf("Resolver = %#v, want %#v", file.Gateway.Resolver, c.resolver)
+			}
+		})
+	}
+}
+
+// The reader fills each check and its defaults, in both forms.
+func TestReadHealth(t *testing.T) {
+	balanced := []string{"shop path /healthz every 5s within 2s, 2 to join, 3 to leave", "orders grpc every 10s within 1s, 1 to join, 2 to leave"}
+	cases := []struct {
+		name, file string
+		want       []string
+	}{
+		{"balanced example, YAML", "../../examples/balanced/yaml/proxyfile.yaml", balanced},
+		{"balanced example, HOCON", "../../examples/balanced/hocon/Proxyfile", balanced},
+		{"dns example, no health", "../../examples/dns/yaml/proxyfile.yaml", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			file, problems := Proxyfile(c.file)
+			if problems != nil {
+				t.Fatalf("problems = %q, want none", testsupport.ProblemStrings(problems))
+			}
+			if got := health(file.Gateway); !slices.Equal(got, c.want) {
+				t.Errorf("health = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// The reader fills each route's rate limit and its defaults, burst 0 and by client, in both forms.
+func TestReadRateLimits(t *testing.T) {
+	want := []string{"rpc 100 per 1s, burst 0, all", "login 5 per 60s, burst 5, client", "shop no limit"}
+	cases := []struct{ name, file string }{
+		{"limited example, YAML", "../../examples/limited/yaml/proxyfile.yaml"},
+		{"limited example, HOCON", "../../examples/limited/hocon/Proxyfile"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			file, problems := Proxyfile(c.file)
+			if problems != nil {
+				t.Fatalf("problems = %q, want none", testsupport.ProblemStrings(problems))
+			}
+			if got := limits(file.Gateway); !slices.Equal(got, want) {
+				t.Errorf("limits = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// limits writes one line per route, rpc for the rpc entry and the name otherwise: its requests per period, its burst
+// and whose requests are counted together, or no limit.
+func limits(g *model.Gateway) []string {
+	var lines []string
+	for _, r := range g.Routes {
+		name, limit := r.Name.Value, r.RateLimit
+		if r.RPC != nil {
+			name, limit = "rpc", r.RPC.RateLimit
+		}
+		if limit == nil {
+			lines = append(lines, name+" no limit")
+			continue
+		}
+		by := "all"
+		if limit.ByClient {
+			by = "client"
+		}
+		lines = append(lines, fmt.Sprintf("%s %d per %s, burst %d, %s", name, limit.Requests, model.FormatSeconds(limit.Per.Millis), limit.Burst, by))
+	}
+	return lines
+}
+
+// The reader fills tls, and the client's address, whose default follows tls: a gateway that terminates TLS usually
+// faces clients, and one left at forwarded would let each client choose its own address by sending X-Forwarded-For.
+func TestReadListener(t *testing.T) {
+	const tlsLine = "tls: {certificate: /etc/gateway/tls/certificate.pem, key: /etc/gateway/tls/key.pem}"
+	const withTLS = "tls /etc/gateway/tls/certificate.pem /etc/gateway/tls/key.pem"
+	const example = withTLS + " clients /etc/gateway/tls/clients-ca.pem; client connection"
+	cases := []struct{ name, file, document, want string }{
+		{name: "neither", document: b.String(), want: "plain HTTP; client forwarded"},
+		{name: "tls without client_address", document: b.Inserted(8, tlsLine), want: withTLS + "; client connection"},
+		{name: "tls behind a proxy", document: b.Inserted(8, tlsLine+"\nclient_address: forwarded"), want: withTLS + "; client forwarded"},
+		{name: "connection without tls", document: b.Inserted(8, "client_address: connection"), want: "plain HTTP; client connection"},
+		{name: "tls example, YAML", file: "../../examples/tls/yaml/proxyfile.yaml", want: example},
+		{name: "tls example, HOCON", file: "../../examples/tls/hocon/Proxyfile", want: example},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := c.file
+			if path == "" {
+				path = filepath.Join(t.TempDir(), "g.yaml")
+				testsupport.WriteFile(t, path, c.document)
+			}
+			file, problems := Proxyfile(path)
+			if problems != nil {
+				t.Fatalf("problems = %q, want none", testsupport.ProblemStrings(problems))
+			}
+			if got := listener(file.Gateway); got != c.want {
+				t.Errorf("listener = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// listener writes what the public listener serves and whose address counts as the client's, on one line.
+func listener(g *model.Gateway) string {
+	served := "plain HTTP"
+	if g.TLS != nil {
+		served = "tls " + g.TLS.Certificate + " " + g.TLS.Key
+		if g.TLS.ClientsCA != "" {
+			served += " clients " + g.TLS.ClientsCA
+		}
+	}
+	return served + "; client " + string(g.ClientAddress)
 }

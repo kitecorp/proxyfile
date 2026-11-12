@@ -6,7 +6,12 @@ names, the forms of sizes, times and percentages, the rules that compare keys wi
 
 `examples/full/yaml/proxyfile.yaml` holds every key a proxyfile can have except `services.<name>.address`,
 `envoy.tracing`, `rpc.proto` and the `nginx` and `haproxy` blocks, which take no key in this version, with invented
-values: `cors`, the `origins` by environment and `rpc.methods` are among them. `examples/partial` writes `address` and
+values: `cors`, the `origins` by environment and `rpc.methods` are among them. It does not write the keys of 2.1 yet:
+`services.<name>.addresses`, `.balance`, `.hash` and `.health`, `dns`, `tls`, `client_address` and `rate_limit`. Four
+examples write them: `examples/balanced` writes several `addresses`, `balance` and `health`; `examples/dns` a DNS name
+in `address`, `hash` and `dns.resolver`; `examples/tls` `tls` with `tls.clients`, and no `client_address`, which a file
+with `tls` takes as `connection`; and `examples/limited` `rate_limit` on a route and on the rpc entry.
+`examples/partial` writes `address` and
 gives its methods three ways, each in a folder of its own: `yaml/proxyfile.yaml` with `--rpc-methods ../methods.json`,
 `hocon/Proxyfile` through `include required("../rpc-methods.conf")`, and `proto-methods/Proxyfile` through `rpc.proto`
 and the `.proto` files under `proto/`. `examples/tracing/yaml/proxyfile.yaml` writes `envoy.tracing`, and
@@ -15,7 +20,7 @@ are required. The rest is left out when you do not need it.
 
 ```yaml
 # yaml-language-server: $schema=../../../schema/proxyfile.schema.json
-# Every key but services.<name>.address, rpc.proto, envoy.tracing, nginx and haproxy, with invented values.
+# Every key but services.<name>.address, rpc.proto, envoy.tracing, nginx and haproxy, with invented values; the keys of 2.1 (services.<name>.addresses, .balance, .hash, .health, dns, tls, client_address, rate_limit) are not in it yet.
 listen: 10000
 admin: 9901
 limits:
@@ -99,6 +104,10 @@ HOCON:
 - At least one service is declared, and each service has at least one port.
 - A route, `auth.ask` or an RPC mapping names a service that is declared and has a port of the protocol it needs: `http`
   for a route and for `auth.ask`, `grpc` for an RPC mapping.
+- A service writes `address` or `addresses`, not both, and `addresses` lists two or more addresses, none twice.
+- `hash` is written exactly when `balance` is `hash`.
+- `health` writes `path` or `grpc`; `path` needs an `http` port and `grpc` a `grpc` port; `health.timeout` is shorter
+  than `health.interval`, the defaults included.
 - `auth: off` on a route needs an `auth` key.
 - `cors` is not written when `origins` names a file, because the generator takes the CORS settings from that file and
   would ignore this key.

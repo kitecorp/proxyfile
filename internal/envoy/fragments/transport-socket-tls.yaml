@@ -1,0 +1,17 @@
+# The public listener's TLS, with tls. Measured on Envoy 1.40.2: a client gets TLS 1.3, and ALPN offers HTTP/2 and
+# HTTP/1.1, so a client chooses either over one port. With tls.clients, require_client_certificate and the trusted CA
+# refuse a connection during the handshake: one without a client certificate with the alert "certificate required",
+# one whose certificate another CA signed with "unknown ca". Envoy reads the three files when it starts, and its
+# validate mode refuses a missing file, one that is not PEM and a key that does not match its certificate.
+name: envoy.transport_sockets.tls
+typed_config:
+  "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+  common_tls_context:
+    alpn_protocols: [h2, http/1.1]
+    tls_certificates: [{certificate_chain: {filename: {{q .Certificate}}}, private_key: {filename: {{q .Key}}}}]
+{{- with .ClientsCA}}
+    validation_context: {trusted_ca: {filename: {{q .}}}}
+{{- end}}
+{{- if .ClientsCA}}
+  require_client_certificate: true
+{{- end}}

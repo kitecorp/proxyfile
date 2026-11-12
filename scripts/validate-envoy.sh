@@ -1,13 +1,32 @@
 #!/usr/bin/env bash
 # Runs Envoy's own validation on generated files, with the Envoy release proxyfile writes for. The tests prove that a
 # tree is the one written by hand; only Envoy proves that the file loads.
+#
+# Envoy's validate mode reads the files a tls key names and refuses a missing one, one that is not PEM and a key that
+# does not match its certificate. So every file is validated with a throwaway certificate, its key and a CA bundle
+# mounted at /etc/gateway/tls, the folder examples/tls names; they are made here for this run and removed after it,
+# and no key is ever committed.
 set -euo pipefail
 image='envoyproxy/envoy:distroless-v1.40.2@sha256:09ca6f2140a61ad8df11779a4a30d52b48433d444466328494f9188c9c35eded'
+tls=$(mktemp -d)
+trap 'rm -rf "$tls"' EXIT
+# openssl writes progress to stderr even when it succeeds, so its output is kept and shown only when it fails.
+if ! made=$(openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost \
+  -keyout "$tls/key.pem" -out "$tls/certificate.pem" 2>&1); then
+  printf '%s\n' "$made" >&2
+  echo "validate-envoy.sh: openssl could not make the throwaway certificate and key" >&2
+  exit 1
+fi
+cp "$tls/certificate.pem" "$tls/clients-ca.pem"
+# Envoy runs as an unprivileged user in its image, which must read the mounted folder and its files.
+chmod 755 "$tls"
+chmod 644 "$tls"/*.pem
 status=0
 for file in "$@"; do
   dir=$(cd "$(dirname "$file")" && pwd)
   name=$(basename "$file")
-  if out=$(docker run --rm --volume "${dir}:/config:ro" "$image" --mode validate -c "/config/$name" 2>&1) &&
+  if out=$(docker run --rm --volume "${dir}:/config:ro" --volume "${tls}:/etc/gateway/tls:ro" "$image" \
+    --mode validate -c "/config/$name" 2>&1) &&
     grep -qF "configuration '/config/$name' OK" <<<"$out"; then
     echo "valid: $file"
   else

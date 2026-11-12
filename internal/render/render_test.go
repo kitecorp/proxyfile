@@ -485,6 +485,154 @@ typed_per_filter_config:
 	}
 }
 
+// TestExampleParts pins the parts of the 2.1 examples' trees that are new in 2.1, each against a tree Envoy validated.
+func TestExampleParts(t *testing.T) {
+	manager := []any{"static_resources", "listeners", 0, "filter_chains", 0, "filters", 0, "typed_config"}
+	routes := slices.Concat(manager, []any{"route_config", "virtual_hosts", 0, "routes"}) // 0 and 1 the RPC routes, 2 login, 3 shop
+	cases := []struct {
+		name, dir string // dir is an example folder, <example>/<form>
+		at        []any  // the sub-tree the row compares, as valueAt's steps
+		want      string
+	}{
+		{name: "balanced, shop's cluster", dir: "balanced/yaml", at: []any{"static_resources", "clusters", 0}, want: `
+name: shop_http
+type: STATIC
+lb_policy: LEAST_REQUEST
+load_assignment:
+  cluster_name: shop_http
+  endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: 10.0.1.11, port_value: 8080}}}},
+    {endpoint: {address: {socket_address: {address: 10.0.1.12, port_value: 8080}}}},
+    {endpoint: {address: {socket_address: {address: 10.0.1.13, port_value: 8080}}}}]}]
+health_checks:
+- {timeout: 2s, interval: 5s, no_traffic_interval: 5s, healthy_threshold: 2, unhealthy_threshold: 3,
+   http_health_check: {path: /healthz, expected_statuses: [{start: 200, end: 300}], retriable_statuses: [{start: 100, end: 600}]}}
+common_lb_config: {healthy_panic_threshold: {value: 0}}
+typed_extension_protocol_options:
+  envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+    "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+    explicit_http_config: {http_protocol_options: {}}
+`},
+		{name: "balanced, orders' cluster", dir: "balanced/yaml", at: []any{"static_resources", "clusters", 1}, want: `
+name: orders_grpc
+type: STATIC
+lb_policy: RANDOM
+load_assignment:
+  cluster_name: orders_grpc
+  endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: 10.0.2.21, port_value: 9000}}}},
+    {endpoint: {address: {socket_address: {address: 10.0.2.22, port_value: 9000}}}}]}]
+health_checks:
+- {timeout: 1s, interval: 10s, no_traffic_interval: 10s, healthy_threshold: 1, unhealthy_threshold: 2,
+   grpc_health_check: {}}
+common_lb_config: {healthy_panic_threshold: {value: 0}}
+typed_extension_protocol_options:
+  envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+    "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+    explicit_http_config: {http2_protocol_options: {}}
+`},
+		{name: "dns, catalog's cluster", dir: "dns/yaml", at: []any{"static_resources", "clusters", 0}, want: `
+name: catalog_http
+type: STRICT_DNS
+lb_policy: RING_HASH
+typed_dns_resolver_config:
+  name: envoy.network.dns_resolver.cares
+  typed_config:
+    "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+    resolvers: [{socket_address: {address: 10.0.0.2, port_value: 53}}]
+load_assignment:
+  cluster_name: catalog_http
+  endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: catalog.internal.example, port_value: 8080}}}}]}]
+typed_extension_protocol_options:
+  envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+    "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+    hash_policy: [{header: {header_name: x-session-id}}]
+    explicit_http_config: {http_protocol_options: {}}
+`},
+		{name: "dns, search's cluster", dir: "dns/yaml", at: []any{"static_resources", "clusters", 1}, want: `
+name: search_http
+type: STRICT_DNS
+lb_policy: RING_HASH
+typed_dns_resolver_config:
+  name: envoy.network.dns_resolver.cares
+  typed_config:
+    "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+    resolvers: [{socket_address: {address: 10.0.0.2, port_value: 53}}]
+load_assignment:
+  cluster_name: search_http
+  endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: search.internal.example, port_value: 8090}}}}]}]
+typed_extension_protocol_options:
+  envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+    "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+    hash_policy: [{connection_properties: {source_ip: true}}]
+    explicit_http_config: {http_protocol_options: {}}
+`},
+		{name: "tls, the transport socket", dir: "tls/yaml", at: []any{"static_resources", "listeners", 0, "filter_chains", 0, "transport_socket"}, want: `
+name: envoy.transport_sockets.tls
+typed_config:
+  "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+  common_tls_context:
+    alpn_protocols: [h2, http/1.1]
+    tls_certificates: [{certificate_chain: {filename: /etc/gateway/tls/certificate.pem}, private_key: {filename: /etc/gateway/tls/key.pem}}]
+    validation_context: {trusted_ca: {filename: /etc/gateway/tls/clients-ca.pem}}
+  require_client_certificate: true
+`},
+		// The example writes no client_address; tls makes it connection.
+		{name: "tls, the client's address", dir: "tls/yaml",
+			at: []any{"static_resources", "listeners", 0, "filter_chains", 0, "filters", 0, "typed_config", "use_remote_address"}, want: "true"},
+		{name: "limited, the filter after CORS", dir: "limited/yaml", at: slices.Concat(manager, []any{"http_filters", 3}), want: `
+name: envoy.filters.http.local_ratelimit
+typed_config:
+  "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+  stat_prefix: rate_limit
+  filter_enabled: {default_value: {numerator: 100, denominator: HUNDRED}}
+  filter_enforced: {default_value: {numerator: 100, denominator: HUNDRED}}
+  rate_limited_as_resource_exhausted: true
+  always_consume_default_token_bucket: false
+  max_dynamic_descriptors: 65536
+  rate_limits:
+  - actions:
+    - metadata: {descriptor_key: bucket, metadata_key: {key: proxyfile.rate_limit, path: [{key: all}]}, source: ROUTE_ENTRY}
+  - actions:
+    - metadata: {descriptor_key: bucket, metadata_key: {key: proxyfile.rate_limit, path: [{key: client}]}, source: ROUTE_ENTRY}
+    - remote_address: {}
+  descriptors:
+  - entries: [{key: bucket, value: rpc}]
+    token_bucket: {max_tokens: 100, tokens_per_fill: 100, fill_interval: 1s}
+  - entries: [{key: bucket, value: login}, {key: remote_address}]
+    token_bucket: {max_tokens: 10, tokens_per_fill: 5, fill_interval: 60s}
+`},
+		{name: "limited, an RPC route's bucket", dir: "limited/yaml", at: slices.Concat(routes, []any{1, "metadata"}),
+			want: `{filter_metadata: {proxyfile.rate_limit: {all: rpc}}}`},
+		{name: "limited, login's bucket", dir: "limited/yaml", at: slices.Concat(routes, []any{2, "metadata"}),
+			want: `{filter_metadata: {proxyfile.rate_limit: {client: login}}}`},
+		{name: "limited, the route with no limit", dir: "limited/yaml", at: slices.Concat(routes, []any{3}),
+			want: `{name: shop, match: {prefix: /}, route: {cluster: shop_http}}`},
+		{name: "limited, the Connect answer", dir: "limited/yaml", at: slices.Concat(manager, []any{"local_reply_config", "mappers", 2}), want: `
+filter:
+  and_filter:
+    filters:
+    - status_code_filter:
+        comparison: {op: EQ, value: {default_value: 429, runtime_key: gateway.local_reply.rate_limited_status}}
+    - header_filter:
+        header: {name: connect-protocol-version, present_match: true}
+body: {inline_string: '{"code":"resource_exhausted","message":"local_rate_limited"}'}
+body_format_override:
+  text_format_source: {inline_string: "%LOCAL_REPLY_BODY%"}
+  content_type: application/json
+`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			files, problems := render(requestFor(t, c.dir, "envoy.yaml"))
+			if problems != nil {
+				t.Fatalf("render problems = %q, want none", testsupport.ProblemStrings(problems))
+			}
+			if d := firstDifference(decode(t, []byte(c.want)), valueAt(decode(t, files[0].Bytes), c.at...), ""); d != "" {
+				t.Error(d)
+			}
+		})
+	}
+}
+
 // Each row holds a combination no example has, so it is the only proof of the part it names: an rpc entry without auth
 // adds the Lua filter and the bridge but not set_metadata or ext_authz, and its RPC routes carry no metadata and no
 // question; a gateway with auth and no rpc entry has no Lua filter and no bridge; connections without heap watch
@@ -515,6 +663,31 @@ routes:
 `
 	// bridgeOff turns the Connect bridge off; the rows append it to a gateway with an rpc entry.
 	const bridgeOff = "envoy: {connect_bridge: false}\n"
+	// limitedWithAuth limits the rpc entry for every client together and two routes by client, one with auth off, in a
+	// gateway with auth, two environments and its own namespace.
+	const limitedWithAuth = `listen: 8000
+services:
+  shop: {http: 8080, grpc: 8081}
+auth: {ask: shop /check, timeout: 1s, enabled: true, when_unavailable: deny}
+origins:
+  live: {hosts: [live.example]}
+  test: {hosts: [test.example]}
+routes:
+  - rpc: {to: {"*": shop}, rate_limit: {requests: 40, per: 1s, by: all}}
+  - {name: login, path: /login, to: shop, auth: off, rate_limit: {requests: 5, per: 1m}}
+  - {name: shop, prefix: /, to: shop, rate_limit: {requests: 100, per: 1s, burst: 50}}
+rpc:
+  methods:
+    - {service: example.shop.v1.CartService, method: AddItem, action: buy}
+envoy: {namespace: edge}
+`
+	// limiter is the rate limit filter's typed_config in limitedWithAuth: the fifth filter, after CORS and before the
+	// check.
+	limiter := slices.Concat(manager, []any{"http_filters", 4, "typed_config"})
+	// healthGateway is rpcWithoutAuth with its service q written as given.
+	healthGateway := func(service string) string {
+		return strings.Replace(rpcWithoutAuth, "q: {http: 3000, grpc: 3001}", service, 1)
+	}
 	cases := []struct {
 		name, proxyfile, methods string // methods is written to methods.json and given to render when not empty
 		origins                  string // written to origins.json; testdata/origins.json when empty
@@ -738,6 +911,154 @@ envoy.filters.http.cors:
   "@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.CorsPolicy
   allow_origin_string_match: []
   forward_not_matching_preflights: false
+`},
+		// A balance written as its default renders 2.0's cluster, with no lb_policy.
+		{name: "balance round_robin written", proxyfile: strings.Replace(tracingBase, "q: {http: 3000}", "q: {http: 3000, balance: round_robin}", 1),
+			at: []any{"static_resources", "clusters", 0}, want: `
+name: q_http
+type: STATIC
+load_assignment:
+  cluster_name: q_http
+  endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: 127.0.0.1, port_value: 3000}}}}]}]
+typed_extension_protocol_options:
+  envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+    "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+    explicit_http_config: {http_protocol_options: {}}
+`},
+		// The hash policy sits on the cluster, so the gRPC cluster of an RPC route carries it too; with no dns.resolver
+		// the cluster asks the host's resolver configuration and writes no typed_dns_resolver_config.
+		{name: "hash on a gRPC service found by name",
+			proxyfile: `listen: 8000
+services:
+  q: {grpc: 3001, address: q.internal, balance: hash, hash: {header: x-user}}
+origins: origins.json
+routes:
+  - rpc: {to: {"*": q}}
+`,
+			methods: rpcMethod, at: []any{"static_resources", "clusters", 0}, want: `
+name: q_grpc
+type: STRICT_DNS
+lb_policy: RING_HASH
+load_assignment:
+  cluster_name: q_grpc
+  endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: q.internal, port_value: 3001}}}}]}]
+typed_extension_protocol_options:
+  envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+    "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+    hash_policy: [{header: {header_name: x-user}}]
+    explicit_http_config: {http2_protocol_options: {}}
+`},
+		// A resolver is written only on a cluster that looks a name up, so a gateway with no name renders 2.0's cluster.
+		{name: "a resolver with no name", proxyfile: tracingBase + "dns: {resolver: \"10.0.0.2\"}\n",
+			at: []any{"static_resources", "clusters", 0}, want: `
+name: q_http
+type: STATIC
+load_assignment:
+  cluster_name: q_http
+  endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: 127.0.0.1, port_value: 3000}}}}]}]
+typed_extension_protocol_options:
+  envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+    "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+    explicit_http_config: {http_protocol_options: {}}
+`},
+		// Measured on Envoy 1.40.2: without ignore_health_on_host_removal a backend that left the name's answer stayed in
+		// the pool while it passed its checks. A STATIC cluster never writes the key: the balanced rows of
+		// TestExampleParts compare the whole cluster.
+		{name: "health on a named service", proxyfile: healthGateway("q: {http: 3000, grpc: 3001, address: q.internal, health: {path: /healthz}}"),
+			methods: rpcMethod, at: []any{"static_resources", "clusters", 0, "ignore_health_on_host_removal"}, want: `true`},
+		{name: "health with host_header, the HTTP check",
+			proxyfile: healthGateway("q: {http: 3000, grpc: 3001, host_header: q.internal, health: {path: /healthz, grpc: true}}"),
+			methods:   rpcMethod, at: []any{"static_resources", "clusters", 0, "health_checks"}, want: `[{timeout: 2s, interval: 5s,
+  no_traffic_interval: 5s, healthy_threshold: 2, unhealthy_threshold: 3, http_health_check: {path: /healthz,
+  expected_statuses: [{start: 200, end: 300}], retriable_statuses: [{start: 100, end: 600}], host: q.internal}}]`},
+		{name: "health with host_header, the gRPC check",
+			proxyfile: healthGateway("q: {http: 3000, grpc: 3001, host_header: q.internal, health: {path: /healthz, grpc: true}}"),
+			methods:   rpcMethod, at: []any{"static_resources", "clusters", 1, "health_checks"}, want: `[{timeout: 2s, interval: 5s,
+  no_traffic_interval: 5s, healthy_threshold: 2, unhealthy_threshold: 3, grpc_health_check: {authority: q.internal}}]`},
+		// A service with both ports and only path checks its HTTP side alone; its gRPC cluster is 2.0's.
+		{name: "health path only, the gRPC cluster", proxyfile: healthGateway("q: {http: 3000, grpc: 3001, health: {path: /healthz}}"),
+			methods: rpcMethod, at: []any{"static_resources", "clusters", 1}, want: `
+name: q_grpc
+type: STATIC
+load_assignment:
+  cluster_name: q_grpc
+  endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: 127.0.0.1, port_value: 3001}}}}]}]
+typed_extension_protocol_options:
+  envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+    "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+    explicit_http_config: {http2_protocol_options: {}}
+`},
+		{name: "tls without clients", proxyfile: tracingBase + "tls: {certificate: /c.pem, key: /k.pem}\n",
+			at: []any{"static_resources", "listeners", 0, "filter_chains", 0, "transport_socket"}, want: `
+name: envoy.transport_sockets.tls
+typed_config:
+  "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+  common_tls_context:
+    alpn_protocols: [h2, http/1.1]
+    tls_certificates: [{certificate_chain: {filename: /c.pem}, private_key: {filename: /k.pem}}]
+`},
+		{name: "tls behind a proxy", proxyfile: tracingBase + "tls: {certificate: /c.pem, key: /k.pem}\nclient_address: forwarded\n",
+			at: slices.Concat(manager, []any{"use_remote_address"}), want: `false`},
+		{name: "connection without tls", proxyfile: tracingBase + "client_address: connection\n",
+			at: slices.Concat(manager, []any{"use_remote_address"}), want: `true`},
+		// The limiter runs before the check, so a request over a limit never reaches it.
+		{name: "rate limits with auth, its filters", proxyfile: limitedWithAuth, at: slices.Concat(manager, []any{"http_filters"}), names: true,
+			want: `[envoy.filters.http.set_metadata, envoy.filters.http.header_mutation, envoy.filters.http.rbac, envoy.filters.http.cors,
+  envoy.filters.http.local_ratelimit, envoy.filters.http.ext_authz, envoy.filters.http.lua, envoy.filters.http.connect_grpc_bridge,
+  envoy.filters.http.router]`},
+		{name: "rate limits with auth, the namespace", proxyfile: limitedWithAuth, at: slices.Concat(limiter, []any{"rate_limits"}), want: `
+- actions:
+  - metadata: {descriptor_key: bucket, metadata_key: {key: edge.rate_limit, path: [{key: all}]}, source: ROUTE_ENTRY}
+- actions:
+  - metadata: {descriptor_key: bucket, metadata_key: {key: edge.rate_limit, path: [{key: client}]}, source: ROUTE_ENTRY}
+  - remote_address: {}
+`},
+		// One bucket for each limited entry of routes, in the written order, whatever the number of environments.
+		{name: "rate limits with auth, one bucket list", proxyfile: limitedWithAuth, at: slices.Concat(limiter, []any{"descriptors"}), want: `
+- entries: [{key: bucket, value: rpc}]
+  token_bucket: {max_tokens: 40, tokens_per_fill: 40, fill_interval: 1s}
+- entries: [{key: bucket, value: login}, {key: remote_address}]
+  token_bucket: {max_tokens: 5, tokens_per_fill: 5, fill_interval: 60s}
+- entries: [{key: bucket, value: shop}, {key: remote_address}]
+  token_bucket: {max_tokens: 150, tokens_per_fill: 100, fill_interval: 1s}
+`},
+		{name: "rate limits with auth, an RPC route", proxyfile: limitedWithAuth,
+			at:   slices.Concat(manager, []any{"route_config", "virtual_hosts", 0, "routes", 0, "metadata"}),
+			want: `{filter_metadata: {edge: {action: buy}, edge.rate_limit: {all: rpc}}}`},
+		// A route with auth off carries its bucket alone.
+		{name: "rate limits with auth, a route with auth off, second environment", proxyfile: limitedWithAuth,
+			at:   slices.Concat(manager, []any{"route_config", "virtual_hosts", 1, "routes", 1, "metadata"}),
+			want: `{filter_metadata: {edge.rate_limit: {client: login}}}`},
+		{name: "rate limits with auth, a checked route, second environment", proxyfile: limitedWithAuth,
+			at:   slices.Concat(manager, []any{"route_config", "virtual_hosts", 1, "routes", 2, "metadata"}),
+			want: `{filter_metadata: {edge: {action: ""}, edge.rate_limit: {client: shop}}}`},
+		// The first mapper that matches decides, so the one on UAEX, which changes nothing, comes before the Connect
+		// answer: a 429 the check itself answers to a Connect call keeps the body the check wrote.
+		{name: "rate limits with auth, the mappers in order", proxyfile: limitedWithAuth,
+			at: slices.Concat(manager, []any{"local_reply_config", "mappers"}), want: `
+- filter: {response_flag_filter: {flags: [UF, UH, UC, URX]}}
+  status_code: 502
+  body: {inline_string: ""}
+- filter:
+    and_filter:
+      filters:
+      - status_code_filter:
+          comparison: {op: EQ, value: {default_value: 403, runtime_key: gateway.local_reply.origin_refused_status}}
+      - header_filter:
+          header: {name: origin, present_match: true}
+  body: {inline_string: "Invalid CORS request"}
+- filter: {response_flag_filter: {flags: [UAEX]}}
+- filter:
+    and_filter:
+      filters:
+      - status_code_filter:
+          comparison: {op: EQ, value: {default_value: 429, runtime_key: gateway.local_reply.rate_limited_status}}
+      - header_filter:
+          header: {name: connect-protocol-version, present_match: true}
+  body: {inline_string: '{"code":"resource_exhausted","message":"local_rate_limited"}'}
+  body_format_override:
+    text_format_source: {inline_string: "%LOCAL_REPLY_BODY%"}
+    content_type: application/json
 `},
 	}
 	defaultOrigins := string(testsupport.ReadFile(t, "testdata/origins.json"))

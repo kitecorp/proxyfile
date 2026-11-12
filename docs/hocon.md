@@ -24,7 +24,8 @@ routes = [
 Each example writes its HOCON form as `hocon/Proxyfile`, in a folder of its own beside `yaml/`, because `render` and
 `check` given no file refuse a folder that holds two of the names they read.
 [`examples/full/hocon/Proxyfile`](../examples/full/hocon/Proxyfile) writes every key but `services.<name>.address`,
-`envoy.tracing`, `rpc.proto` and the `nginx` and `haproxy` blocks, and gives the same file as
+`envoy.tracing`, `rpc.proto`, the `nginx` and `haproxy` blocks and the keys of 2.1 (`services.<name>.addresses`,
+`.balance`, `.hash`, `.health`, `dns`, `tls`, `client_address` and `rate_limit`), and gives the same file as
 [`examples/full/yaml/proxyfile.yaml`](../examples/full/yaml/proxyfile.yaml).
 [`examples/tracing/hocon/Proxyfile`](../examples/tracing/hocon/Proxyfile) writes `envoy.tracing`, as its YAML twin,
 [`examples/tracing/yaml/proxyfile.yaml`](../examples/tracing/yaml/proxyfile.yaml), does.
@@ -64,7 +65,7 @@ The rules of the form:
   `listen = ${HOME}` is a problem. The key a substitution reads is a key of the format like any other, so a
   substitution copies one proxyfile value into another, such as `accept = ${auth.send}`. A key of your own, such as
   `port = 3000` for `http = ${port}`, is refused as an unknown key:
-  `Proxyfile: port: unknown key "port"; known here: admin, auth, cors, ...`.
+  `Proxyfile: port: unknown key "port"; known here: admin, auth, client_address, cors, ...`.
 - **The order you write is kept.** The generated file lists the services, their ports and the environments as written.
   When an object is written twice, the merged object lists the keys of the later one first.
 - **An empty file is an empty object**, so the problems name each required key.

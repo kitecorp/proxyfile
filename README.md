@@ -81,9 +81,9 @@ origin; the committed one is [`examples/minimal/yaml/envoy.yaml`](examples/minim
 are the targets the format reserves ([`docs/portability.md`](docs/portability.md) says which keys each will take);
 their generators are [issue 25](https://github.com/kitecorp/proxyfile/issues/25) and
 [issue 26](https://github.com/kitecorp/proxyfile/issues/26). The other directories under [`examples/`](examples/) add
-an auth check, RPC routes read from `.proto` files, tracing and nearly every key. Each example keeps each form in a
-folder of its own, under the names above and beside the files it renders, so `render` and `check` find the proxyfile
-in any of them with no file given.
+an auth check, RPC routes read from `.proto` files, tracing, several backends, health checks, TLS, rate limits and
+nearly every key. Each example keeps each form in a folder of its own, under the names above and beside the files it
+renders, so `render` and `check` find the proxyfile in any of them with no file given.
 
 ## Install
 
@@ -149,9 +149,10 @@ A proxyfile is written in YAML or in HOCON, with the same keys in both, and both
 `Proxyfile` or ending in `.conf` is HOCON, and one ending in `.yaml` or `.yml` is YAML. With no file named, proxyfile
 reads `Proxyfile`, `proxyfile.conf`, `proxyfile.yaml` or `proxyfile.yml` from the working directory. Only `listen`,
 `services`, `origins` and `routes` are required. [docs/format.md](docs/format.md) holds a file with every key but
-`envoy.tracing`, `services.<name>.address`, `rpc.proto` and the `nginx` and `haproxy` blocks, and the rules across keys,
-[docs/hocon.md](docs/hocon.md) the HOCON form, and [docs/defaults.md](docs/defaults.md) what the Envoy generator
-writes with no key. [docs/portability.md](docs/portability.md) says which keys every proxy can carry and which belong
+`envoy.tracing`, `services.<name>.address`, `rpc.proto`, the `nginx` and `haproxy` blocks and the keys of 2.1
+(`services.<name>.addresses`, `.balance`, `.hash`, `.health`, `dns`, `tls`, `client_address` and `rate_limit`), and
+the rules across keys, [docs/hocon.md](docs/hocon.md) the HOCON form, and [docs/defaults.md](docs/defaults.md) what
+the Envoy generator writes with no key. [docs/portability.md](docs/portability.md) says which keys every proxy can carry and which belong
 to Envoy alone, and [From 1.x to 2.0](docs/format.md#from-1x-to-20) which keys a 1.x file moves.
 
 ## Keys
@@ -162,9 +163,12 @@ whose block holds it ([docs/portability.md](docs/portability.md)).
 
 - [`listen`](docs/listener.md) (core): The port of the public listener, on 0.0.0.0.
 - [`admin`](docs/listener.md) (core): The port of the admin listener, on 127.0.0.1; no admin listener when not written.
+- [`tls`](docs/tls.md) (core): The public listener serves HTTPS with this certificate and key; without it, plain HTTP.
+- [`client_address`](docs/listener.md) (core): Which address counts as the client's: forwarded, the last address a proxy in front appended to X-Forwarded-For, or connection, the peer of the TCP connection.
 - [`limits`](docs/limits.md) (core): Limits on connections and request headers.
 - [`timeouts`](docs/timeouts.md) (core): How long a request, an idle request and an idle connection to a service may last.
-- [`services`](docs/services.md) (core): The services behind the gateway, on the same host, by name.
+- [`services`](docs/services.md) (core): The services behind the gateway, by name.
+- [`dns`](docs/services.md) (core): The name lookups of the services whose address is a DNS name.
 - [`auth`](docs/auth.md) (core): The external check every request goes through before it reaches a service.
 - [`remove_from_clients`](docs/listener.md) (core): Headers removed from every client request before routing and before any filter; a name ending in \* is a prefix.
 - [`cors`](docs/cors.md) (core): The CORS settings every environment shares.
