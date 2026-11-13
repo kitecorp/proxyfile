@@ -68,7 +68,9 @@ func FromYAML(file string, data []byte) (*Node, []model.Problem) {
 	}
 	// go-yaml skips a leading byte order mark without counting a column for it (yaml_parser_determine_encoding in
 	// readerc.go), so the lines a column is counted in start after it.
-	c := converter{file: file, lines: bytes.Split(bytes.TrimPrefix(data, []byte("\uFEFF")), []byte("\n"))}
+	c := converter{file: file, lines: bytes.Split(bytes.TrimPrefix(data, []byte("\uFEFF")), []byte("\n")),
+		written: map[[2]int]bool{}, tagged: map[model.Pos]bool{}}
+	c.markWritten(document.Content[0])
 	root := c.node(document.Content[0], 0)
 	if problems := c.Sorted(); problems != nil {
 		return nil, problems
@@ -80,12 +82,38 @@ func FromYAML(file string, data []byte) (*Node, []model.Problem) {
 type converter struct {
 	model.Problems
 	file string
-	// lines are the file's lines, where bareTag looks for a tag go-yaml leaves no mark of.
+	// lines are the file's lines, where tagAt looks for a tag go-yaml leaves no mark of.
 	lines [][]byte
+	// written holds the line and column of every node that is not unwritten (see unwritten), so a value that is not
+	// written can tell that another node starts at its place.
+	written map[[2]int]bool
+	// tagged holds the places a tag was reported at, so each is reported once. Two nodes that are both not written can
+	// start at one place, as the value of "? a" and the empty key of the "! : 1" after it, and written tells neither
+	// that the other is there.
+	tagged map[model.Pos]bool
+}
+
+// markWritten adds the place of n, and of every node under it, to written, unless the node is unwritten.
+func (c *converter) markWritten(n *yaml.Node) {
+	if !unwritten(n) {
+		c.written[[2]int{n.Line, n.Column}] = true
+	}
+	for _, child := range n.Content {
+		c.markWritten(child)
+	}
+}
+
+// unwritten reports whether n may be a value the file does not write, as after "? a": go-yaml gives such a value the
+// place of the token that follows (yaml_parser_process_empty_scalar in parserc.go), which is often the next node's. It
+// is a plain scalar with no text, no anchor and no written tag; a null written as ~ or null has text, and an anchor or
+// a tag of its own starts it at that property. A bare tag leaves no mark (refuseTag), so "v: !" is one too, and is
+// told apart by its place, where no other node starts.
+func unwritten(n *yaml.Node) bool {
+	return n.Kind == yaml.ScalarNode && n.Style == 0 && n.Value == "" && n.Anchor == ""
 }
 
 // node converts n. indent is the column a later line of n must start after, which tells a tag on such a line that is
-// n's from one that starts the next key (bareTag); 0 lets a later line start anywhere.
+// n's from one that starts the next key (tagAt); 0 lets a later line start anywhere.
 func (c *converter) node(n *yaml.Node, indent int) *Node {
 	c.refuseTag(n, indent)
 	switch n.Kind {
@@ -192,11 +220,15 @@ func (c *converter) refuseTag(n *yaml.Node, indent int) {
 	if n.Style&yaml.TaggedStyle == 0 && !written {
 		return
 	}
+	pos := position(c.file, n)
 	if written && line != n.Line {
-		c.Add(model.Pos{File: c.file, Line: line, Column: column}, tagMessage)
+		pos = model.Pos{File: c.file, Line: line, Column: column}
+	}
+	if c.tagged[pos] {
 		return
 	}
-	c.problem(n, tagMessage)
+	c.tagged[pos] = true
+	c.Add(pos, tagMessage)
 }
 
 // tagAt returns the line and column of the tag written on n, and whether n's text has one there. A node's position is
@@ -211,6 +243,11 @@ func (c *converter) tagAt(n *yaml.Node, indent int) (int, int, bool) {
 	// starts at its first -. Without this rule "!!str a: 1" and "&a ! k: 1" would be reported twice, on the mapping and
 	// on its key.
 	if len(n.Content) > 0 && n.Content[0].Line == n.Line && n.Content[0].Column == n.Column {
+		return 0, 0, false
+	}
+	// A value that is not written takes the place of the node after it, so the properties there are that node's. Without
+	// this rule "? a" followed by "! b: 1" would be reported twice, on a's value and on the key b.
+	if unwritten(n) && c.written[[2]int{n.Line, n.Column}] {
 		return 0, 0, false
 	}
 	line, column := n.Line, n.Column

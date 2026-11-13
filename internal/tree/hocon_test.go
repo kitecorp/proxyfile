@@ -95,6 +95,9 @@ func TestFromHOCONRefuses(t *testing.T) {
 			want: []string{`g.conf: resolve error at path "HOME": unresolved substitution`}},
 		{name: "required include", input: "include required(\"nope.conf\")\n",
 			want: []string{`nope.conf: cannot read include file: open nope.conf: no such file or directory`}},
+		// The library writes the name as it is; the problem quotes the file and escapes the message, so it is one line.
+		{name: "required include whose name holds a newline", input: "include required(\"zq\\nqz.conf\")\n",
+			want: []string{`"zq\nqz.conf": cannot read include file: open zq\nqz.conf: no such file or directory`}},
 		{name: "syntax error in an include", input: "include \"broken.conf\"\nlisten = 8000\n",
 			others: map[string]string{"broken.conf": "a = {\n"},
 			want:   []string{`g.conf: parse error at line 2, col 1: unexpected EOF, expected '}'`}},

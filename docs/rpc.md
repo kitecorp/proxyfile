@@ -13,8 +13,8 @@ bucket ([Rate limits](routes.md#rate-limits)).
 | `rpc.methods` | One entry for each RPC method the gateway routes, as a build writes them from the gRPC descriptors. | A list; each item is a mapping. It may be empty. Which service a method goes to is decided by the rpc entry of `routes`. Exactly one of `methods` and `proto` is written. | core |
 | `rpc.methods[].service` | The full name of the method's service. | Required. A full service name such as shop.v1.CartService. | core |
 | `rpc.methods[].method` | The method's name. | Required. A method name such as AddItem. | core |
-| `rpc.methods[].action` | The action the check is told for this method. | Text. Sent to the check in `x-gateway-action`; empty when not written. It holds no NUL, newline or carriage return, which a header value cannot hold. | core |
-| `rpc.methods[].reports` | The reports the check is told for this method. | A list; each item is text. Sent to the check in `x-gateway-reports`. No report contains a comma, because the list is sent as one value joined by commas, nor NUL, a newline or a carriage return, which a header value cannot hold. | core |
+| `rpc.methods[].action` | The action the check is told for this method. | Text. Sent to the check in `x-gateway-action`; empty when not written. | core |
+| `rpc.methods[].reports` | The reports the check is told for this method. | A list; each item is text. Sent to the check in `x-gateway-reports`. No report contains a comma, because the list is sent as one value joined by commas. | core |
 | `rpc.proto` | The RPC methods, read from the .proto files under roots: each method that carries the method option named by option. | A mapping. Compiled each time proxyfile runs. Not given with `--rpc-methods`. Exactly one of `methods` and `proto` is written. | core |
 | `rpc.proto.roots` | The directories of .proto files, each an import root: relative to the proxyfile's directory, or absolute. | Required. A list; each item is text. Not empty, and no directory written twice. A root may not contain another, because the files under both would be compiled twice. Each is an import root, as protoc's `--proto_path` is: a file's import path is its path under its root, written with `/`. A relative directory is read from the proxyfile's own directory, as `origins: <file>` is, also when the key is written in an included file; an absolute one as written. | core |
 | `rpc.proto.option` | The full name of the method option that marks a method the gateway routes. | Required. An option's full name such as example.gateway.v1.route. Written `<package>.<name>`, with no leading dot. | core |
@@ -41,8 +41,8 @@ written as `rpc.methods`, it is the same list.
 |---|---|---|---|
 | `service` | The full name of the method's service. | Required. A full service name such as shop.v1.CartService. | core |
 | `method` | The method's name. | Required. A method name such as AddItem. | core |
-| `action` | The action the check is told for this method. | Text. Sent to the check in `x-gateway-action`; empty when not written. It holds no NUL, newline or carriage return, which a header value cannot hold. | core |
-| `reports` | The reports the check is told for this method. | A list; each item is text. Sent to the check in `x-gateway-reports`. No report contains a comma, because the list is sent as one value joined by commas, nor NUL, a newline or a carriage return, which a header value cannot hold. | core |
+| `action` | The action the check is told for this method. | Text. Sent to the check in `x-gateway-action`; empty when not written. | core |
+| `reports` | The reports the check is told for this method. | A list; each item is text. Sent to the check in `x-gateway-reports`. No report contains a comma, because the list is sent as one value joined by commas. | core |
 <!-- /keys -->
 
 A method listed twice is a problem.
@@ -161,13 +161,13 @@ its root, resolved against the proxyfile's directory, joined with its import pat
 | `rpc.proto` and `--rpc-methods` | the `proto` key | `rpc.proto is written here, so --rpc-methods must not be given` |
 | An empty `roots` | the `roots` key | `the roots list is empty` |
 | A root written twice | the second | `the root "proto" is written twice (the first on line 4)`; in HOCON `(the first at rpc.proto.roots[0])` |
-| A root inside another, or one directory written two ways, such as `proto` and `proto/` | the inner root, or the later of the two | `rpc.proto.roots: proto/example is inside proto` |
-| A root that cannot be read | the root | `the root examples/partial/proto cannot be read: no such file or directory`, the reason as the system words it |
-| A root that is not a directory | the root | `the root examples/partial/proto is not a directory` |
-| A root with no `.proto` file | the root | `the root examples/partial/proto holds no .proto file` |
-| One import path under two roots | the later file | `the import path a/v1/s.proto is also under the root first/proto, which comes first in rpc.proto.roots` |
+| A root inside another, or one directory written two ways, such as `proto` and `proto/`, or reached through a symbolic link | the inner root, or the later of the two | `rpc.proto.roots: "proto/example" is inside "proto"` |
+| A root that cannot be read, such as a symbolic link whose target is missing | the root | `the root "examples/partial/proto" cannot be read: no such file or directory`, the reason as the system words it |
+| A root that is not a directory | the root | `the root "examples/partial/proto" is not a directory` |
+| A root with no `.proto` file | the root | `the root "examples/partial/proto" holds no .proto file` |
+| One import path under two roots | the later file | `the import path "a/v1/s.proto" is also under the root "first/proto", which comes first in rpc.proto.roots` |
 | A syntax error | its file, line and column | protocompile's text, such as `syntax error: expecting ';'` |
-| An import that names no file | the import statement | `the import google/rpc/error_details.proto is under no root of rpc.proto.roots and is not a standard google/protobuf file` |
+| An import that names no file | the import statement | `the import "google/rpc/error_details.proto" is under no root of rpc.proto.roots and is not a standard google/protobuf file` |
 | A compile error | its file, line and column | protocompile's text, such as `method a.v1.S.M: unknown request type Missing`, or `symbol "a.v1.S.M" already defined at a/v1/s.proto:6:7`, which names the other place by its import path, as protocompile writes it |
 | No compiled file defines the option | the `option` key | `no compiled file defines the option example.gateway.v1.rout; the compiled files are those under the roots that declare a service, and the files they import` |
 | The name is not an option | the `option` key | `example.gateway.v1.Route is a message, not an option`, with the kind the name has |
@@ -175,6 +175,7 @@ its root, resolved against the proxyfile's directory, joined with its import pat
 | The option does not hold one message | the `option` key | `the option o.v1.route holds a string, not one message`, or `holds a list of messages, not one` |
 | No `action` that holds one string | the `option` key | `the option's message o.v1.Route has no field action that holds one string` |
 | A `reports` that is not a list of strings | the `option` key | `the field reports of the option's message o.v1.Route is not a list of strings` |
+| An `action` or a report that holds a control character other than tab | the method | `the action "a\nb" contains a newline; no key or value may hold a control character other than tab`, as for a key or a value of a file |
 
 `check` compiles the sources as `render` does, so a change to a routed method makes `check` fail until the next
 `render`. Every `.proto` file read is an input, so no output path may name one.

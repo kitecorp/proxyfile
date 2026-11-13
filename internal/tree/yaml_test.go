@@ -165,6 +165,22 @@ func TestFromYAMLProblems(t *testing.T) {
 			[]string{"g.yaml:2:3: tags are not read; write the value without the tag"}},
 		{"bare tag on the line after the anchor of an explicit key's value", "? k\n: &v\n  ! 1\n",
 			[]string{"g.yaml:3:3: tags are not read; write the value without the tag"}},
+		// go-yaml gives a value that is not written, as after "? a", the place of the next node, so the tag there is that
+		// node's and is reported once, for it.
+		{"an explicit key with no value, then a key's bare tag", "? a\n! b: 1\n",
+			[]string{"g.yaml:2:1: tags are not read; write the value without the tag"}},
+		{"an explicit key's anchor with no value, then a key's bare tag", "m:\n  ? &a\n  ! k: 1\n",
+			[]string{"g.yaml:3:3: tags are not read; write the value without the tag"}},
+		{"an explicit key with no value ending a mapping, then the next key's bare tag", "m:\n  ? a\n! n: 1\n",
+			[]string{"g.yaml:3:1: tags are not read; write the value without the tag"}},
+		{"an explicit key with no value, then a key's written tag", "? a\n!!str b: 1\n",
+			[]string{"g.yaml:2:1: tags are not read; write the value without the tag"}},
+		{"an explicit key with no value in a list, then a key's bare tag", "- ? a\n  ! b: 1\n",
+			[]string{"g.yaml:2:3: tags are not read; write the value without the tag"}},
+		// The empty key and the value not written are both at 2:1, both not written; the one tag there is reported once.
+		{"an explicit key with no value, then an empty key's bare tag", "? a\n! : 1\n",
+			[]string{"g.yaml:2:1: tags are not read; write the value without the tag"}},
+		{"an empty value's own bare tag", "v: !\nw: 1\n", []string{"g.yaml:1:4: tags are not read; write the value without the tag"}},
 		{"bare tag on a key", "! k: 1\n", []string{"g.yaml:1:1: tags are not read; write the value without the tag"}},
 		{"bare tag on a mapping", "v: !\n  a: 1\n", []string{"g.yaml:1:4: tags are not read; write the value without the tag"}},
 		// go-yaml counts no column for a byte order mark (yaml_parser_determine_encoding in readerc.go).

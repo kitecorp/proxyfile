@@ -29,7 +29,9 @@ target it is Envoy's `ext_authz` in HTTP mode. How the check works:
 - The check gets a request to the path of `ask`, never the client's path or query, because paths can carry links and
   tokens; only `send_request` tells it the client's path, in a header ([below](#what-the-check-is-told)). The headers
   it gets are the ones `send` names and the route's question below. HTTP mode adds the client's `Host`, the request's
-  method, `Authorization` and `Content-Length: 0`, whatever `send` says.
+  method, `Authorization` and `Content-Length: 0`, whatever `send` says, and with the envoy target Envoy's own client
+  adds `x-envoy-internal: true` and `x-envoy-expected-rq-timeout-ms`, the deadline in milliseconds (measured on Envoy
+  1.40.2).
 - Each RPC route adds its question to the check: `x-gateway-action` holds the method's `action` and `x-gateway-reports`
   its `reports` joined by commas. A plain route adds neither. The question is for the check alone, and no service sees
   it.
@@ -37,8 +39,9 @@ target it is Envoy's `ext_authz` in HTTP mode. How the check works:
   its own calls inside it.
 - The service answers `200` to let the request through. The headers of the answer named by `accept` are set on the
   request to the service, replacing any value there. A `5xx` counts as a failed call, which `when_unavailable` decides.
-  Any other status is sent to the client as a denial, a 2xx other than `200` as `403`
-  ([below](#a-check-that-answers-another-2xx)).
+  Any other status is sent to the client as a denial, with the check's body and headers, a 2xx other than `200` as
+  `403` ([below](#a-check-that-answers-another-2xx)). With the envoy target the denial carries no
+  `x-envoy-upstream-service-time`, which Envoy's own client for the check adds ([Defaults](defaults.md)).
 - With `when_unavailable: allow`, a request that could not be checked goes through with the header
   `x-envoy-auth-failure-mode-allowed` set, and the gateway writes a `gateway_auth_unavailable` log line for it. A
   client's own copy of that header is removed before anything reads it.

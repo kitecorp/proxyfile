@@ -16,7 +16,10 @@ How routes are matched:
 - Two routes with the same kind of match, the same text and the same `method` are a problem, because the later one is
   never reached.
 - A retry happens only when the request never reached the service (Envoy's `connect-failure` and
-  `reset-before-request` conditions), so a request that the service saw is never sent twice.
+  `reset-before-request` conditions), so a request that the service saw is never sent twice. It goes to a backend the
+  request has not tried yet when the service has one, so a backend that refuses connections does not get the retry
+  too, and a service with one backend is retried on it. Measured on Envoy 1.40.2: with one of two backends refusing
+  connections, every request with `retries: 1` was answered by the other; [Defaults](defaults.md) says how.
 
 The rpc entry (`- rpc:` in YAML, `{ rpc { ... } }` in HOCON) is a place in the list. It holds one route for each method
 of `rpc.methods`, of the `.proto` files `rpc.proto` reads, or of the methods file, matched on the exact path a call
@@ -49,7 +52,7 @@ pattern matches is a problem.
 | `routes[].pattern` | Matches paths by this regular expression, in RE2 syntax. | A regular expression that is not empty. It must compile. Exactly one of `prefix`, `path` and `pattern` is written. | core |
 | `routes[].method` | Matches only requests with this HTTP method. | An HTTP method in capitals, such as POST. | core |
 | `routes[].to` | The service the route goes to. | Required. Lower-case letters, digits and -, starting with a letter. A declared service with an `http` port. | core |
-| `routes[].rewrite` | Replaces the matched prefix or path before the request goes to the service. | A path starting with /. Not allowed with `pattern`. It holds no NUL, newline or carriage return, which a header value cannot hold. | core |
+| `routes[].rewrite` | Replaces the matched prefix or path before the request goes to the service. | A path starting with /. Not allowed with `pattern`. | core |
 | `routes[].auth` | off sends the route's requests to the service without auth's checks: no service is asked and no token is verified. | `off`. Needs an `auth` key. | core |
 | `routes[].retries` | How many times a request that never reached the service is tried again. | A whole number from 0 to 4294967295. | core |
 | `routes[].rate_limit` | How many requests the route admits in a period; a request over the limit is answered 429 and never reaches the service. | A mapping. One limit for the route's copy in every environment. | core |

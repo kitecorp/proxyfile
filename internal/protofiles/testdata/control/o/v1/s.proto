@@ -6,13 +6,14 @@ import "google/protobuf/descriptor.proto";
 
 message Route {
   string action = 1;
+  repeated string reports = 2;
 }
 
 extend google.protobuf.MethodOptions {
   Route route = 50000;
 }
 
-// Each action holds one of the three characters a header value may not hold.
+// Each method but Tab holds a control character in its action or in a report, which no value may hold; a tab is read.
 service S {
   rpc Newline(Empty) returns (Empty) {
     option (o.v1.route) = {action: "a\nb"};
@@ -22,6 +23,12 @@ service S {
   }
   rpc Nul(Empty) returns (Empty) {
     option (o.v1.route) = {action: "a\000b"};
+  }
+  rpc Other(Empty) returns (Empty) {
+    option (o.v1.route) = {action: "read", reports: ["export", "c\001d"]};
+  }
+  rpc Tab(Empty) returns (Empty) {
+    option (o.v1.route) = {action: "a\tb"};
   }
 }
 

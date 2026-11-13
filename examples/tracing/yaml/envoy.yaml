@@ -137,6 +137,7 @@ static_resources:
                 - append:
                     header: {key: vary, value: Origin}
                     append_action: APPEND_IF_EXISTS_OR_ADD
+                - remove: x-envoy-upstream-service-time
           - name: envoy.filters.http.rbac
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBAC

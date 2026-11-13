@@ -17,6 +17,16 @@ func TestProblemString(t *testing.T) {
 		{Problem{Pos{File: "g.yaml", Line: 0, Column: 0}, "x"}, "g.yaml: x"},
 		{Problem{Pos{File: "g.conf", Path: "services.api.http"}, "x"}, "g.conf: services.api.http: x"},
 		{Problem{Pos{File: "g.conf", Line: 3, Column: 5, Path: "a"}, "x"}, "g.conf:3:5: x"},
+		// A file's name may hold a control character, as a .proto file found under a root may, and written as it is a
+		// newline there would print the problem on two lines. Quoted, the problem keeps to one line.
+		{Problem{Pos{File: "a\nb.proto", Line: 3, Column: 5}, "x"}, `"a\nb.proto":3:5: x`},
+		{Problem{Pos{File: "a\rb.conf", Path: "listen"}, "x"}, `"a\rb.conf": listen: x`},
+		{Problem{Pos{File: "a\tb.yaml", Line: 3, Column: 5}, "x"}, "a\tb.yaml:3:5: x"},
+		// A message of a library, protocompile's or the HOCON library's, writes a file's name as it is, so a control
+		// character in it is written as its escape.
+		{Problem{Pos{File: "s.proto", Line: 4, Column: 9}, "symbol \"a.v1.E\" already defined at a/v1/x\ny.proto:3:9"},
+			`s.proto:4:9: symbol "a.v1.E" already defined at a/v1/x\ny.proto:3:9`},
+		{Problem{Pos{File: "g.conf"}, "open a\x00b\x7f\tc"}, "g.conf: open a\\x00b\\x7f\tc"},
 	}
 	for _, c := range cases {
 		if got := c.problem.String(); got != c.want {
@@ -37,6 +47,54 @@ func TestWhere(t *testing.T) {
 		if got := c.pos.Where(); got != c.want {
 			t.Errorf("%#v.Where() = %q, want %q", c.pos, got, c.want)
 		}
+	}
+}
+
+// The rule every reader applies to a key or a value: NUL to U+001F and U+007F are refused, tab is read, and the first
+// such character is named with the text quoted, so the problem stays on one line whatever the text holds.
+func TestRefuseControl(t *testing.T) {
+	const rule = "; no key or value may hold a control character other than tab"
+	const block = "; a YAML block keeps its final line break unless written |- or >-"
+	cases := []struct {
+		name, text, want string // want is the message, or "" for no problem
+	}{
+		{name: "plain text", text: "/a b"},
+		{name: "empty", text: ""},
+		{name: "a tab", text: "a\tb"},
+		{name: "text outside ASCII", text: "\u00e9\u2028"},
+		{name: "U+0085, outside the range", text: "a\u0085b"},
+		{name: "NUL", text: "a\x00b", want: `the value "a\x00b" contains NUL` + rule},
+		{name: "a newline", text: "a\nb", want: `the value "a\nb" contains a newline` + rule},
+		{name: "a carriage return", text: "a\rb", want: `the value "a\rb" contains a carriage return` + rule},
+		{name: "U+0001", text: "a\x01b", want: `the value "a\x01b" contains the control character U+0001` + rule},
+		{name: "U+001F", text: "a\x1fb", want: `the value "a\x1fb" contains the control character U+001F` + rule},
+		{name: "U+007F", text: "a\x7fb", want: `the value "a\x7fb" contains the control character U+007F` + rule},
+		{name: "the first of two", text: "a\r\nb", want: `the value "a\r\nb" contains a carriage return` + rule},
+		// A YAML block written | or > ends with a line break, so the message says how to write one without it.
+		{name: "one line break at the end", text: "GET\n", want: `the value "GET\n" ends with a line break` + rule + block},
+		{name: "only a line break", text: "\n", want: `the value "\n" ends with a line break` + rule + block},
+		{name: "two line breaks at the end", text: "a\n\n", want: `the value "a\n\n" contains a newline` + rule},
+		{name: "a line break inside and at the end", text: "a\nb\n", want: `the value "a\nb\n" contains a newline` + rule},
+		{name: "a carriage return before the line break at the end", text: "a\r\n",
+			want: `the value "a\r\n" contains a carriage return` + rule},
+		{name: "another character before the line break at the end", text: "a\x01b\n",
+			want: `the value "a\x01b\n" contains the control character U+0001` + rule},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var p Problems
+			p.RefuseControl(Pos{File: "g.yaml", Line: 1, Column: 4}, "the value", c.text)
+			var got, want []string
+			for _, problem := range p.Sorted() {
+				got = append(got, problem.String())
+			}
+			if c.want != "" {
+				want = []string{"g.yaml:1:4: " + c.want}
+			}
+			if !slices.Equal(got, want) {
+				t.Errorf("problems of %q = %q, want %q", c.text, got, want)
+			}
+		})
 	}
 }
 

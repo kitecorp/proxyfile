@@ -3,6 +3,7 @@ package read
 import (
 	"cmp"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -68,13 +69,22 @@ func TestReadProblems(t *testing.T) {
 		{name: "rewrite with pattern", document: b.Replaced(7, 7, `  - {name: web, pattern: "^/a", to: web, rewrite: /b}`),
 			want: []string{`g.yaml:7:51: route "web": rewrite works with prefix or path, not with pattern`}},
 		// The rewrite replaces the request's path, the :path header, and Envoy 1.40.2 refuses a file whose prefix_rewrite
-		// holds NUL, a newline or a carriage return.
+		// holds NUL, a newline or a carriage return. Each is refused where the file is read, at the value, as a control
+		// character in any key or value is.
 		{name: "rewrite with a newline", document: b.Replaced(7, 7, `  - {name: web, prefix: /, to: web, rewrite: "/a\nb"}`),
-			want: []string{`g.yaml:7:46: route "web": the rewrite "/a\nb" contains a newline, which the header :path cannot hold`}},
+			want: []string{`g.yaml:7:46: the value "/a\nb" contains a newline; no key or value may hold a control character other than tab`}},
 		{name: "rewrite with a carriage return", document: b.Replaced(7, 7, `  - {name: web, prefix: /, to: web, rewrite: "/a\rb"}`),
-			want: []string{`g.yaml:7:46: route "web": the rewrite "/a\rb" contains a carriage return, which the header :path cannot hold`}},
+			want: []string{`g.yaml:7:46: the value "/a\rb" contains a carriage return; no key or value may hold a control character other than tab`}},
 		{name: "rewrite with NUL", document: b.Replaced(7, 7, `  - {name: web, prefix: /, to: web, rewrite: "/a\0b"}`),
-			want: []string{`g.yaml:7:46: route "web": the rewrite "/a\x00b" contains NUL, which the header :path cannot hold`}},
+			want: []string{`g.yaml:7:46: the value "/a\x00b" contains NUL; no key or value may hold a control character other than tab`}},
+		// The cors values are sent in response headers, and the rule that refuses them is the same in the proxyfile as in
+		// an origins file; it comes before every other rule, such as cors written beside an origins file.
+		{name: "cors values a header cannot hold", document: b.Inserted(8, `cors: {allow_methods: "GET\nPOST", allow_headers: "a\rb", expose_headers: "x\0y"}`),
+			want: []string{
+				`g.yaml:8:23: the value "GET\nPOST" contains a newline; no key or value may hold a control character other than tab`,
+				`g.yaml:8:51: the value "a\rb" contains a carriage return; no key or value may hold a control character other than tab`,
+				`g.yaml:8:75: the value "x\x00y" contains NUL; no key or value may hold a control character other than tab`,
+			}},
 		{name: "pattern does not compile", document: b.Replaced(7, 7, `  - {name: web, pattern: "^/(a", to: web}`),
 			want: []string{"g.yaml:7:26: route \"web\": the pattern does not compile: error parsing regexp: missing closing ): `^/(a`"}},
 		{name: "listen equals admin", document: b.Inserted(8, "admin: 8000"),
@@ -287,20 +297,20 @@ func TestReadProblems(t *testing.T) {
 		// by whole segments of the cleaned paths, so a root written with ./ or a trailing / is the same directory, and
 		// one whose name only starts with another's is beside it.
 		{name: "root inside another", document: b.Inserted(8, "rpc: {proto: {roots: [proto, proto/example], option: o.v1.route}}"),
-			want: []string{`g.yaml:8:30: rpc.proto.roots: proto/example is inside proto`}},
+			want: []string{`g.yaml:8:30: rpc.proto.roots: "proto/example" is inside "proto"`}},
 		{name: "root inside a later one", document: b.Inserted(8, "rpc: {proto: {roots: [./proto/example/, proto], option: o.v1.route}}"),
-			want: []string{`g.yaml:8:23: rpc.proto.roots: ./proto/example/ is inside proto`}},
+			want: []string{`g.yaml:8:23: rpc.proto.roots: "./proto/example/" is inside "proto"`}},
 		{name: "one root written two ways", document: b.Inserted(8, "rpc: {proto: {roots: [proto, proto/], option: o.v1.route}}"),
-			want: []string{`g.yaml:8:30: rpc.proto.roots: proto/ is inside proto`}},
+			want: []string{`g.yaml:8:30: rpc.proto.roots: "proto/" is inside "proto"`}},
 		{name: "roots beside each other", document: b.Inserted(8, "rpc: {proto: {roots: [proto, proto2, ../proto, other/proto], option: o.v1.route}}")},
 		{name: "HOCON: root inside another", file: "g.conf", document: bHOCON + "rpc { proto { roots = [proto, proto/example], option = o.v1.route } }\n",
-			want: []string{`g.conf: rpc.proto.roots[1]: rpc.proto.roots: proto/example is inside proto`}},
+			want: []string{`g.conf: rpc.proto.roots[1]: rpc.proto.roots: "proto/example" is inside "proto"`}},
 		// A relative root is read from the proxyfile's directory, so it is inside an absolute root, or holds one, as the
 		// directories read are. <dir> stands for the proxyfile's directory.
 		{name: "absolute root inside a relative one", document: b.Inserted(8, "rpc: {proto: {roots: [proto, <dir>/proto/example], option: o.v1.route}}"),
-			want: []string{`g.yaml:8:30: rpc.proto.roots: <dir>/proto/example is inside proto`}},
+			want: []string{`g.yaml:8:30: rpc.proto.roots: "<dir>/proto/example" is inside "proto"`}},
 		{name: "relative root inside an absolute one", document: b.Inserted(8, "rpc: {proto: {roots: [proto/example, <dir>/proto], option: o.v1.route}}"),
-			want: []string{`g.yaml:8:23: rpc.proto.roots: proto/example is inside <dir>/proto`}},
+			want: []string{`g.yaml:8:23: rpc.proto.roots: "proto/example" is inside "<dir>/proto"`}},
 		{name: "a relative root and an absolute one beside it", document: b.Inserted(8, "rpc: {proto: {roots: [proto, <dir>/proto2], option: o.v1.route}}")},
 		{name: "tracing in both places", document: b.Replaced(7, 7, "  - {name: web, prefix: /, to: web}",
 			"tracing: {provider: {xray: {segment: s}}}", "envoy: {tracing: {provider: {xray: {segment: s}}}}"),
@@ -370,6 +380,48 @@ func TestReadProblems(t *testing.T) {
 			}
 			if gotModel, wantModel := file != nil, len(c.want) == 0; gotModel != wantModel {
 				t.Errorf("model returned = %t, want %t", gotModel, wantModel)
+			}
+		})
+	}
+}
+
+// A root is compared with the others as the directory it names, with every symbolic link in its path followed, so a
+// link into another root is inside that root: the compiler would read the files under it twice. A link that cannot be
+// followed is compared as written, and the compiler names it as a root that cannot be read.
+func TestReadProtoRootLinks(t *testing.T) {
+	cases := []struct {
+		name, roots string // roots is written as rpc.proto.roots, beside proto/example, other, and the links below
+		want        []string
+	}{
+		{name: "a link into another root", roots: "[proto, inner]",
+			want: []string{`g.yaml:8:30: rpc.proto.roots: "inner" is inside "proto"`}},
+		{name: "a link into a later root", roots: "[inner, proto]",
+			want: []string{`g.yaml:8:23: rpc.proto.roots: "inner" is inside "proto"`}},
+		{name: "a link to another root", roots: "[proto, same]",
+			want: []string{`g.yaml:8:30: rpc.proto.roots: "same" is inside "proto"`}},
+		{name: "a root under a link to another", roots: "[proto, same/example]",
+			want: []string{`g.yaml:8:30: rpc.proto.roots: "same/example" is inside "proto"`}},
+		{name: "a link beside the other root", roots: "[proto, beside]"},
+		{name: "a link that cannot be followed", roots: "[proto, broken]"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, made := range []string{"proto/example", "other"} {
+				if err := os.MkdirAll(filepath.Join(dir, made), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for link, target := range map[string]string{"inner": "proto/example", "same": "proto", "beside": "other", "broken": "missing"} {
+				if err := os.Symlink(target, filepath.Join(dir, link)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			path := filepath.Join(dir, "g.yaml")
+			testsupport.WriteFile(t, path, b.Inserted(8, "rpc: {proto: {roots: "+c.roots+", option: o.v1.route}}"))
+			_, problems := Proxyfile(path)
+			if got := testsupport.ProblemStringsIn(dir, problems); !slices.Equal(got, c.want) {
+				t.Errorf("problems = %q, want %q", got, c.want)
 			}
 		})
 	}

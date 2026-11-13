@@ -335,7 +335,7 @@ var Proxyfile = Field{
 					{Name: "method", Doc: "Matches only requests with this HTTP method.", Kind: Text, Pattern: `^[A-Z]+$`, Expect: "an HTTP method in capitals, such as POST"},
 					withRule(serviceName("to", "The service the route goes to.", true), "A declared service with an `http` port."),
 					withRule(path("rewrite", "Replaces the matched prefix or path before the request goes to the service."),
-						"Not allowed with `pattern`. "+headerValueRule),
+						"Not allowed with `pattern`."),
 					{Name: "auth", Doc: "off sends the route's requests to the service without auth's checks: no service is asked and no token is verified.", Kind: Enum, Values: []string{"off"},
 						Rule: "Needs an `auth` key."},
 					retries("How many times a request that never reached the service is tried again."),
@@ -523,18 +523,14 @@ var (
 		Rule: "Not with `tracing`.", Fields: tracingFields("a mapping with the one key xray", xrayProvider)}
 )
 
-// headerValueRule is the rule of a text proxyfile writes into a header value as written: the RPC action, each cors
-// value the CORS filter sends in a response, and a route's rewrite, which becomes the request's :path.
-const headerValueRule = "It holds no NUL, newline or carriage return, which a header value cannot hold."
-
 // corsField and environmentLists are written once and used by both places the origins may be written: the proxyfile,
 // where each environment is named by its key, and an origins file, where it is named by its name key. So a key means
 // the same in both places and is checked by the same rule.
 var (
 	corsField = Field{Name: "cors", Doc: "The CORS settings every environment shares.", Kind: Map, Fields: []Field{
-		{Name: "allow_methods", Doc: "The value of Access-Control-Allow-Methods.", Kind: Text, Rule: headerValueRule},
-		{Name: "allow_headers", Doc: "The value of Access-Control-Allow-Headers.", Kind: Text, Rule: headerValueRule},
-		{Name: "expose_headers", Doc: "The value of Access-Control-Expose-Headers.", Kind: Text, Rule: headerValueRule},
+		{Name: "allow_methods", Doc: "The value of Access-Control-Allow-Methods.", Kind: Text},
+		{Name: "allow_headers", Doc: "The value of Access-Control-Allow-Headers.", Kind: Text},
+		{Name: "expose_headers", Doc: "The value of Access-Control-Expose-Headers.", Kind: Text},
 		{Name: "max_age", Doc: "The value of Access-Control-Max-Age: how long a browser may keep a preflight answer.",
 			Kind: Text, Pattern: `^[0-9]+$`, Expect: "a number of seconds", Rule: "Written as text."},
 	}}
@@ -582,8 +578,7 @@ var methodField = Field{Doc: "One RPC method.", Kind: Map, Fields: []Field{
 	{Name: "method", Doc: "The method's name.", Kind: Text, Required: true,
 		Pattern: `^[A-Za-z_][A-Za-z0-9_]*$`, Expect: "a method name such as AddItem"},
 	{Name: "action", Doc: "The action the check is told for this method.", Kind: Text,
-		Rule: "Sent to the check in `x-gateway-action`; empty when not written. " + headerValueRule},
+		Rule: "Sent to the check in `x-gateway-action`; empty when not written."},
 	withRule(texts("reports", "The reports the check is told for this method.", false),
-		"Sent to the check in `x-gateway-reports`. No report contains a comma, because the list is sent as one value joined by commas, "+
-			"nor NUL, a newline or a carriage return, which a header value cannot hold."),
+		"Sent to the check in `x-gateway-reports`. No report contains a comma, because the list is sent as one value joined by commas."),
 }}

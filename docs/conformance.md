@@ -13,19 +13,19 @@ same requests get the answers the format promises.
 
 Each scenario covers one behaviour and names the core keys it exercises, and the battery fails when a scenario names a
 key that is not a core key of the format. A row checks only what every proxy must answer: the status, which service
-answered and what it received (port, protocol, method, path, host and headers), the response headers that matter,
-`grpc-status` and a time window. Every row's answer was measured on Envoy 1.40.2, and
+and which of its backends answered and what it received (port, protocol, method, path, host and headers), the
+response headers that matter, `grpc-status` and a time window. Every row's answer was measured on Envoy 1.40.2, and
 [`conformance/scenarios_test.go`](../conformance/scenarios_test.go) notes beside each scenario what Envoy also answers
-that no row checks. The scenarios run in this order, one request at a time, 44 rows in all:
+that no row checks. The scenarios run in this order, one request at a time, 48 rows in all:
 
 | Scenario | Keys | What its rows check |
 |---|---|---|
 | routing | `routes[].pattern`, `routes[].path`, `routes[].method`, `routes[].rewrite`, `routes[].prefix`, `routes[].to`, `services.<service name>.http`, `services.<service name>.addresses`, `services.<service name>.address`, `services.<service name>.host_header`, `dns.resolver`, `origins.<environment name>.hosts` | A pattern route, and a path its pattern misses going to the prefix route; a path and method route with its rewrite, and another method going to the prefix route; a service whose address the resolver gives; the prefix route over HTTP/1.1 and over HTTP/2, where the service still hears HTTP/1.1; the host each service hears, `host_header`'s value for `accounts`; a host of another environment; `404` for a host no environment names. Nine rows. |
 | mutual TLS | `tls.certificate`, `tls.key`, `tls.clients.ca` | A client with no certificate, and one whose certificate another CA signed, reach no service: the handshake fails, or the proxy refuses it. The other CA carries the clients CA's name, so a proxy that matched the issuer by name would let it through. Every other row sends a client certificate the clients CA signed. Two rows. |
-| CORS | `cors.allow_methods`, `cors.allow_headers`, `cors.expose_headers`, `cors.max_age`, `origins.<environment name>.origins`, `origins.<environment name>.patterns` | A preflight from a listed origin and one from an origin a pattern covers answer `200` with `access-control-allow-origin` and `access-control-max-age`; a preflight and a request from another origin answer `403`; a request from a listed origin reaches the service with its `origin` and is answered with `access-control-allow-origin` and `access-control-expose-headers`. The preflight from a listed origin and the request from another origin carry a token the check denies and one the token filter refuses, each answered `401` alone, so their `200` and `403` show that the origin is decided before the token and the check. Five rows. |
-| auth | `auth.ask`, `auth.only_with_header`, `auth.send`, `auth.accept`, `auth.send_request`, `auth.when_unavailable`, `routes[].auth`, `remove_from_clients`, `auth.jwt.claims` | A request with no `authorization` header reaches the service, which it could not if the check were asked; when the check allows, the service receives the check's headers `auth.accept` admits and not another, and what the check was told (the method, the path with its query, `x-country`), never the `x-forwarded-uri` and `x-forwarded-method` the client sent; the check's `401` and `403` reach the client; a check that answers `503` lets the request through, as `when_unavailable = allow` says; a route with `auth = off` is not checked; a client's own copies of the headers `remove_from_clients` names, of the check's headers and question, and of the headers `auth.jwt.claims` sets never reach the service. Seven rows. |
-| timeout | `auth.timeout`, `auth.when_unavailable` | The check holds the request for 3 s, past `auth.timeout`'s 1500 ms, and the request reaches the service after at least 1.5 s and in under 3 s. One row. |
-| retry | `routes[].retries`, `routes[].rpc.retries` | A request that reached the service is never tried again: a first try the service closes before any answer gives `502`, a gRPC call whose first try is reset gives `grpc-status` `14`, and a `503` from the service is passed on from its first try. Three rows. |
+| CORS | `cors.allow_methods`, `cors.allow_headers`, `cors.expose_headers`, `cors.max_age`, `origins.<environment name>.origins`, `origins.<environment name>.patterns` | A preflight from a listed origin and one from an origin a pattern covers answer `200` with `access-control-allow-origin` and `access-control-max-age`; a preflight and a request from another origin answer `403`; a request from a listed origin reaches the service with its `origin` and is answered with `access-control-allow-origin` and `access-control-expose-headers`. The preflight from a listed origin and the request from another origin carry a token the check denies and one the token filter refuses, each answered `401` alone, so their `200` and `403` show that the origin is decided before the token and the check. An origin on the environment's own host that neither list holds, `https://api.example.org` to `api.example.org`, is admitted without `access-control-allow-origin`: its request reaches the service and its preflight answers `200`. Seven rows. |
+| auth | `auth.ask`, `auth.only_with_header`, `auth.send`, `auth.accept`, `auth.send_request`, `auth.when_unavailable`, `routes[].auth`, `remove_from_clients`, `auth.jwt.claims` | A request with no `authorization` header reaches the service, which it could not if the check were asked; when the check allows, the service receives the check's headers `auth.accept` admits and not another, and what the check was told (the method, the path with its query, `x-country`), never the `x-forwarded-uri` and `x-forwarded-method` the client sent; the check's `401` and `403` reach the client, without the `x-envoy-upstream-service-time` Envoy's client for the check adds; a check that answers `503` lets the request through, as `when_unavailable = allow` says; a route with `auth = off` is not checked; a client's own copies of the headers `remove_from_clients` names, of the check's headers and question, and of the headers `auth.jwt.claims` sets never reach the service. Seven rows. |
+| timeout | `auth.timeout`, `auth.when_unavailable` | The check holds the request for 3 s, past `auth.timeout`'s 1500 ms, and the request reaches the service after at least 1.45 s and in under 2.95 s, 50 ms inside the two times because the row reads a different clock from the proxy's and the check's (below). One row. |
+| retry | `routes[].retries`, `routes[].rpc.retries` | A request that reached the service is never tried again: a first try the service closes before any answer gives `502`, a gRPC call whose first try is reset gives `grpc-status` `14`, and a `503` from the service is passed on from its first try. A request whose connection a backend refused is tried again on the other: with one of the two shop backends refusing connections, 40 requests to the shop route and 40 gRPC calls to shop are each answered by the other backend. Five rows. |
 | gRPC | `routes[].rpc`, `routes[].rpc.to`, `routes[].rpc.to.<package pattern>`, `routes[].rpc.to.<package pattern>.service`, `rpc.methods`, `rpc.methods[].service`, `rpc.methods[].method`, `rpc.methods[].action`, `rpc.methods[].reports`, `services.<service name>.grpc`, `services.<service name>.health` | A method of a package mapped to `shop` reaches shop's gRPC port over HTTP/2 and answers `grpc-status` `0`; a method of any other package reaches `accounts`; the check is told a method's action and reports, and not an action the client sent, and the service receives neither. Four rows. |
 | path normalisation | none: it is written for every file ([Written with no key](portability.md#written-with-no-key)) | `..`, `.`, `//`, `%2F` and `%2e%2e` in a path are resolved before a route is picked, and the service hears the normalised path; so are `..` followed by an escaped slash (`..%2f`), by a backslash written as `%5C`, and by a written backslash; an exact path reached through `..`; a path that still holds a dot segment with a `;` parameter after normalisation, `/catalog/%2e%2e;/products/1`, answers `400`. Ten rows. |
 | rate limit | `routes[].rate_limit`, `routes[].rate_limit.requests`, `routes[].rate_limit.per`, `routes[].rate_limit.burst`, `routes[].rate_limit.by` | After 2.5 s with no request to the route, 60 requests to `/catalog/items` back to back: the first 30 (20 a second and a burst of 10) answer `200` and at least one of the rest `429`; then, of 10 requests over the limit that carry a token the check denies and one the token filter refuses, at least one is answered `429`, not `401`, so the limit is applied before the token and the check; another route is not limited. Three rows. |
@@ -58,8 +58,11 @@ a row can say which service answered and what reached it. The check decides by t
 (`Bearer allow`, `Bearer deny-401`, `Bearer deny-403`, `Bearer status-503` or `Bearer hang`), so each row chooses the
 check's answer; any other token, or none, is denied with `401`, so a row that wants the check not to be asked fails when
 the proxy asks it. The backends share the volume `proxyfile-conformance-state`: a request the stub closes on its first
-try is answered by whichever backend a second try reaches, so a retry would show. The stub is built with Go for the
-platform the Docker server runs and copied alone into the image `proxyfile-conformance-stub`.
+try is answered by whichever backend a second try reaches, so a retry would show. A backend refuses connections, as
+one that is down does, while a row needs it to: the battery sends its container `SIGUSR1`, which closes every port
+and connection of the stub, and waits until a connection made inside the container is refused; after the row,
+`SIGUSR2` opens the ports again, and the battery waits until each answers. The stub is built with Go for the platform
+the Docker server runs and copied alone into the image `proxyfile-conformance-stub`.
 
 Before the first request, the stub in `accounts`, which shares the proxy's network namespace, fetches the target's
 ready URL every 100 ms until it answers 200, for 30 s at most: Envoy's admin listener answers only on `127.0.0.1`, and
@@ -74,14 +77,15 @@ memory with their keys, so the proxy never sees them and no run writes them to d
 
 ## What it does not prove
 
-- Answers each proxy writes in its own words. No row checks a local reply's body or a header a proxy names after
-  itself, which [portability](portability.md) classes as that proxy's own: measured on Envoy 1.40.2, the `403` body
-  `Invalid CORS request`, the empty `502`, the `429` body `local_rate_limited`, `x-envoy-auth-failure-mode-allowed`,
-  and the `403` Envoy answers when the check answers `204`.
-- A retry after a connection failure. The generated retry policy picks a backend for a retry as it did for the first
-  try, so a retry can go to the backend that just failed: measured on Envoy 1.40.2, with one of the two shop backends
-  refusing connections, 13 of 40 requests with one retry answered `502`. The retry scenario checks only that a
-  request that reached the service is never tried again.
+- Answers each proxy writes in its own words. No row checks a local reply's body, or that an answer carries a header a
+  proxy names after itself, which [portability](portability.md) classes as that proxy's own: measured on Envoy 1.40.2,
+  the `403` body `Invalid CORS request`, the empty `502`, the `429` body `local_rate_limited`,
+  `x-envoy-auth-failure-mode-allowed`, and the `403` Envoy answers when the check answers `204`. A row may check such
+  a header absent, which holds for every proxy, as the two denial rows do.
+- A retry of a service with one backend. A row would need the backend to refuse exactly one connection and accept the
+  next, which the stub cannot time. Measured on Envoy 1.40.2 instead, with a firewall rule in the backend's own network
+  namespace that refused one connection: the retry went to the same backend and was answered `200`, five times of
+  five.
 - Keys no scenario names. The rendered file carries them, and the proxy loads it, but no row checks what they do:
   among others `auth.jwt` but its `claims`, `limits`, `timeouts`, `log` and `tracing`. No row sends a valid token, so
   of `auth.jwt.claims` only the removal of a client's own copy is checked. The table above names every key a
@@ -106,8 +110,12 @@ The first run pulls the proxy's image by the digest in [`scripts/envoy-image`](.
 [`scripts/validate-envoy.sh`](../scripts/validate-envoy.sh) also reads, so an Envoy upgrade changes one line for both.
 With the image already pulled, a run took about 12 s with an empty Go build cache and about 7 s after that, measured
 on one arm64 Mac. Two rows count on time: the rate limit's 60 requests must each take under 25 ms, and the timeout
-row's answer must come between 1.5 s and 3 s; on that Mac, over ten runs, the 60 took 0.02 to 0.03 s and the timeout
-row 1.50 to 1.51 s. A repeated row that fails says how long its requests took.
+row's answer must come between 1.45 s and 2.95 s; on that Mac, over ten runs, the 60 took 0.02 to 0.03 s and the
+timeout row 1.50 to 1.51 s. The timeout row times the request on the client's clock, while the proxy times
+`auth.timeout` on its own, so its bounds keep 50 ms from the 1.5 s timeout and from the check's answer at 3 s. Envoy
+counts the timeout from the time its event loop last read, from a clock that moves in 1 ms steps under Docker
+Desktop's kernel, and 2 of 30 runs on that Mac saw the answer at 1.4996 s and 1.4998 s, under 1 ms short of 1.5 s.
+A repeated row that fails says how long its requests took.
 
 The battery removes its own leftovers when it starts and everything it made when it ends: the containers named
 `proxyfile-conformance-<role>`, the network `proxyfile-conformance`, the volume `proxyfile-conformance-state`, the

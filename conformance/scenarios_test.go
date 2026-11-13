@@ -56,10 +56,13 @@ var mutualTLS = scenario{name: "mutual TLS", keys: []string{"tls.certificate", "
 			want: answer{refused: true}},
 	}}
 
-// cors: every value measured on Envoy 1.40.2. Envoy also answers, and no row asserts: access-control-allow-methods
-// with the method asked for and access-control-allow-headers with the headers asked for, or empty, because both keys
-// are "*"; access-control-expose-headers on the preflights too; vary: Origin on every answer; and the body Invalid
-// CORS request with content-type text/plain on both 403s. The preflight from a listed origin and the request from
+// cors: every value measured on Envoy 1.40.2. An origin on one of the environment's own hosts is admitted whether or
+// not a list holds it, and only a list gives it access-control-allow-origin: https://api.example.org, the request's
+// own host and port, is in neither list of the live environment, whose patterns cover api.example.com but not
+// api.example.org. Envoy also answers, and no row asserts: access-control-allow-methods with the method asked for and
+// access-control-allow-headers with the headers asked for, or empty, because both keys are "*";
+// access-control-expose-headers on the preflights from a listed origin too; vary: Origin on every answer; and the
+// body Invalid CORS request with content-type text/plain on both 403s. The preflight from a listed origin and the request from
 // another origin carry a token the check denies and one the token filter refuses, each answered 401 alone on the same
 // host and path: their 200 and 403 show that the origin is decided before the token and the check.
 var cors = scenario{name: "CORS", keys: []string{"cors.allow_methods", "cors.allow_headers", "cors.expose_headers", "cors.max_age",
@@ -82,14 +85,24 @@ var cors = scenario{name: "CORS", keys: []string{"cors.allow_methods", "cors.all
 		{name: "a request from another origin", send: request{proto: "http/1.1", method: "GET", host: "api.example.com", path: "/products/1",
 			headers: map[string]string{"origin": "https://evil.example.net", "authorization": "Bearer deny-401", "x-access-token": "not-a-token"}},
 			want: answer{status: 403}},
+		{name: "a request from the request's own origin that no list holds", send: request{proto: "http/1.1", method: "GET",
+			host: "api.example.org", path: "/products/1", headers: map[string]string{"origin": "https://api.example.org"}},
+			want: answer{status: 200, service: "shop", headers: map[string]string{"access-control-allow-origin": ""},
+				received: map[string]string{"origin": "https://api.example.org"}}},
+		{name: "a preflight from the request's own origin that no list holds", send: request{proto: "http/1.1", method: "OPTIONS",
+			host: "api.example.org", path: "/products/1", headers: map[string]string{"origin": "https://api.example.org",
+				"access-control-request-method": "POST"}},
+			want: answer{status: 200, headers: map[string]string{"access-control-allow-origin": ""}}},
 	}}
 
-// auth: every value measured on Envoy 1.40.2. Envoy also answers, and no row asserts: the check's own body and
-// headers on a denial, with x-envoy-upstream-service-time: 0 beside them, because the router's
-// suppress_envoy_headers does not cover the check's denial; 403 with an empty body when the check answers 204; and
+// auth: every value measured on Envoy 1.40.2. The two denial rows assert that no x-envoy-upstream-service-time comes
+// with the check's answer: Envoy's client for the check adds it, and the header mutation filter removes it (without the
+// removal both rows got "0"). A header that is absent is absent for every proxy. Envoy also answers, and no row
+// asserts: the check's own body and headers on a denial; 403 with an empty body when the check answers 204; and
 // x-envoy-auth-failure-mode-allowed: true to the service when the check answers 503, closes or times out. The check
 // itself receives authorization, x-country, x-forwarded-method, x-forwarded-uri with the query, x-forwarded-proto:
-// https, x-forwarded-host, x-gateway-timeout-ms: 1500, the original method and the host the client sent. The
+// https, x-forwarded-host, x-gateway-timeout-ms: 1500, Envoy's own x-envoy-internal: true and
+// x-envoy-expected-rq-timeout-ms: 1500, the original method and the host the client sent. The
 // stub's check denies a request with no token it knows, so the first row fails if the check is asked. A client's own
 // x-forwarded-uri and x-forwarded-method reach the service as sent, which the format allows, but never the check.
 // Of the headers a client may not send, x-client-id is removed by remove_from_clients alone, and x-subject and x-roles
@@ -104,9 +117,11 @@ var auth = scenario{name: "auth", keys: []string{"auth.ask", "auth.only_with_hea
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-id": "u-1", "x-tier-level": "gold",
 				"x-user-check": "GET /products/1?q=1 action= reports= country=RO", "authorization": "Bearer allow"}, absent: []string{"x-other"}}},
 		{name: "the check denies with 401", send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1?q=1",
-			headers: map[string]string{"authorization": "Bearer deny-401", "x-country": "RO"}}, want: answer{status: 401}},
+			headers: map[string]string{"authorization": "Bearer deny-401", "x-country": "RO"}},
+			want: answer{status: 401, headers: map[string]string{"x-envoy-upstream-service-time": ""}}},
 		{name: "the check denies with 403", send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1",
-			headers: map[string]string{"authorization": "Bearer deny-403"}}, want: answer{status: 403}},
+			headers: map[string]string{"authorization": "Bearer deny-403"}},
+			want: answer{status: 403, headers: map[string]string{"x-envoy-upstream-service-time": ""}}},
 		{name: "the check answers 503 and when_unavailable is allow", send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1",
 			headers: map[string]string{"authorization": "Bearer status-503"}}, want: answer{status: 200, service: "shop"}},
 		{name: "a route with auth off", send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/events/abc-123",
@@ -119,19 +134,31 @@ var auth = scenario{name: "auth", keys: []string{"auth.ask", "auth.only_with_hea
 	}}
 
 // timeout: measured on Envoy 1.40.2. The check holds the request for 3 s, past auth.timeout's 1500 ms, and
-// when_unavailable is allow, so the request goes on to the service when the timeout ends.
+// when_unavailable is allow, so the request goes on to the service when the timeout ends. The row times the request
+// on the client's clock, while the proxy times auth.timeout and the stub times its 3 s on clocks of their own, so
+// each bound keeps 50 ms from the time it tests. Envoy makes auth.timeout the deadline of its client for the check
+// (ext_authz_http_impl.cc, setTimeout; router.cc, Filter::onRequestComplete, enableTimer, which takes milliseconds),
+// and libevent counts that deadline from the time its event loop last read, which on Linux comes from
+// CLOCK_MONOTONIC_COARSE because Envoy does not set EVENT_BASE_FLAG_PRECISE_TIMER (libevent's evutil_time.c gives
+// that clock an accuracy of about 1 to 4 ms; under Docker Desktop's kernel, CONFIG_HZ=1000, it moves in 1 ms steps).
+// On one arm64 Mac running the proxy in Docker Desktop, 2 of 30 runs saw the answer at 1.499558542 s and
+// 1.499792084 s, 0.44 ms and 0.21 ms short of 1500 ms. 50 ms is fifty of those 1 ms steps and still far from both
+// wrong answers: a request answered at once takes a few milliseconds, and one that waited for the check's own answer
+// takes 3 s.
 var timeout = scenario{name: "timeout", keys: []string{"auth.timeout", "auth.when_unavailable"},
 	exchanges: []exchange{
 		{name: "the check answers after auth.timeout", send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1",
 			headers: map[string]string{"authorization": "Bearer hang"}},
-			want: answer{status: 200, service: "shop", atLeast: 1500 * time.Millisecond, below: 3 * time.Second}},
+			want: answer{status: 200, service: "shop", atLeast: 1450 * time.Millisecond, below: 2950 * time.Millisecond}},
 	}}
 
-// retry: every value measured on Envoy 1.40.2. A request that reached the service is never tried again. Envoy also
-// answers, and no row asserts: the 502 with an empty body, and the gRPC call with HTTP 200 and, in the headers,
-// grpc-status: 14 and grpc-message: upstream connect error or disconnect/reset before headers. reset reason: remote
-// reset. No row retries after a connect failure: the retry picks a backend as the first try did, so it can pick the
-// one that just failed (with one of the two shop backends refusing connections, 13 of 40 requests answered 502).
+// retry: every value measured on Envoy 1.40.2. A request that reached the service is never tried again, and one whose
+// connection a backend refused is tried again on a backend it has not tried: with shop-2 refusing connections, each of
+// 40 requests and of 40 gRPC calls is answered by shop-1, where a retry that picked its backend as the first try did
+// left 13 of the 40 requests answered 502 and 12 of the 40 calls with grpc-status 14. 40 requests send about 20 first
+// tries to shop-2, so a retry that still picked shop-2 now and then would fail the row. Envoy also answers, and no row
+// asserts: the 502 with an empty body, and the gRPC call with HTTP 200 and, in the headers, grpc-status: 14 and
+// grpc-message: upstream connect error or disconnect/reset before headers. reset reason: remote reset.
 var retry = scenario{name: "retry", keys: []string{"routes[].retries", "routes[].rpc.retries"},
 	exchanges: []exchange{
 		{name: "a first try closed after it reached the service is not tried again", send: request{proto: "http/1.1", method: "GET",
@@ -140,6 +167,10 @@ var retry = scenario{name: "retry", keys: []string{"routes[].retries", "routes[]
 			headers: map[string]string{"x-stub-status": "503"}}, want: answer{status: 503, service: "shop", attempt: 1}},
 		{name: "a gRPC call whose first try was reset is not tried again", send: request{proto: "grpc", method: "POST", host: "localhost",
 			path: "/example.shop.v1.CartService/GetCart", headers: map[string]string{"x-stub-fail-first": "cart-once"}}, want: answer{grpcStatus: "14"}},
+		{name: "a retry after a connection failure reaches the other backend", send: get("/products/1"), repeat: 40, every: true,
+			refusing: "shop-2", want: answer{status: 200, service: "shop", instance: "shop-1"}},
+		{name: "a gRPC call retried after a connection failure reaches the other backend", send: rpc("/example.shop.v1.CartService/GetCart"),
+			repeat: 40, every: true, refusing: "shop-2", want: answer{status: 200, grpcStatus: "0", service: "shop", instance: "shop-1"}},
 	}}
 
 // gRPC: every value measured on Envoy 1.40.2. The question the check is told, x-gateway-action and

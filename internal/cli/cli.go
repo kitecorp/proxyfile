@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"slices"
 	"strings"
@@ -71,7 +72,8 @@ func Run(args []string, stdout, stderr io.Writer, version string) int {
 			return exitDone
 		}
 		if err != nil {
-			fmt.Fprintf(stderr, "proxyfile %s: %v\n", command, err)
+			// The flag package writes an argument it does not know as it is given, which may hold a newline.
+			fmt.Fprintf(stderr, "proxyfile %s: %s\n", command, model.OneLine(err.Error()))
 			return exitUsage
 		}
 		files, problems, err := outputs(req)
@@ -205,11 +207,20 @@ func overwritesAnInput(req render.Request, inputs []string) bool {
 func write(files []render.File, stderr io.Writer) int {
 	for _, file := range files {
 		if err := os.WriteFile(file.Path, file.Bytes, 0o644); err != nil {
-			fmt.Fprintf(stderr, "proxyfile render: %v\n", err)
+			fmt.Fprintf(stderr, "proxyfile render: %s\n", writeFailure(err))
 			return exitProblem
 		}
 	}
 	return exitDone
+}
+
+// writeFailure is the text of an error os.WriteFile returned, as Go writes it ("open <path>: <reason>"), with the path
+// written as a problem's file is, so the message stays one line.
+func writeFailure(err error) string {
+	if pathErr, ok := errors.AsType[*fs.PathError](err); ok {
+		return fmt.Sprintf("%s %s: %s", pathErr.Op, model.OneLinePath(pathErr.Path), model.OneLine(pathErr.Err.Error()))
+	}
+	return model.OneLine(err.Error())
 }
 
 // compare reads each output on disk and writes nothing. A file it cannot read, such as one that does not exist,
@@ -218,7 +229,7 @@ func compare(files []render.File, stderr io.Writer) int {
 	exit := exitDone
 	for _, file := range files {
 		if onDisk, err := os.ReadFile(file.Path); err != nil || !bytes.Equal(onDisk, file.Bytes) {
-			fmt.Fprintf(stderr, "%s differs from what proxyfile render writes\n", file.Path)
+			fmt.Fprintf(stderr, "%s differs from what proxyfile render writes\n", model.OneLinePath(file.Path))
 			exit = exitProblem
 		}
 	}

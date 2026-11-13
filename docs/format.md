@@ -119,6 +119,14 @@ The examples on these pages are YAML, whose file name ends in `.yaml` or `.yml`;
 other names and the same keys in HOCON. An unknown key anywhere is a problem, and the message lists the keys that are
 known at that place.
 
+No key or value may hold a control character other than tab: NUL, a newline, a carriage return, any other character
+from U+0001 to U+001F but tab, or U+007F. Written into the generated file as it is, such a character would break the
+header value, the path or the name that holds it. It is written with an escape in quotes, such as `"a\nb"`, or as a
+line break inside a YAML block or a HOCON `"""` string; a YAML block keeps the line break at its end unless it is
+written `|-` or `>-`. Each such key or value is one problem, at its place, which names the first such character:
+`the value "a\nb" contains a newline; no key or value may hold a control character other than tab`. The origins file,
+the methods file and the `action` and reports read from `.proto` files follow the same rule.
+
 ## Sizes, times and percentages
 
 Sizes are a whole number with `KiB`, `MiB` or `GiB`, such as `192MiB`. Times are a whole number with `ms`, `s`, `m` or
