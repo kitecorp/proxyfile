@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kitecorp/proxyfile/v2/internal/format"
 	"github.com/kitecorp/proxyfile/v2/internal/testsupport"
 )
 
@@ -82,6 +83,41 @@ func TestRun(t *testing.T) {
 			stderr: "<tmp>/yaml/proxyfile.yaml:3:1: \"listen\" is required here\n" +
 				"<tmp>/yaml/proxyfile.yaml:3:1: unknown key \"liste\"; known here: admin, auth, client_address, cors, dns, envoy, haproxy, limits, listen, log, nginx, origins, remove_from_clients, routes, rpc, services, timeouts, tls, tracing\n",
 			also: nothingWritten("minimal")},
+		// No shipped target refuses a key, so these rows declare an Envoy that refuses some, and the refusal goes from
+		// the --target flag through the render to the printed lines and the exit code.
+		{name: "a key the target refuses", setup: func(t *testing.T, tmp string) {
+			copyMinimal(t, tmp)
+			declare(t, envoyRefusing("listen"))
+		}, args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/out.yaml --target envoy", exit: 1,
+			stderr: "<tmp>/yaml/proxyfile.yaml:3:1: \"listen\" is refused by --target envoy: refused by this test\n",
+			also:   nothingWritten("minimal")},
+		// A key of the proxyfile written in the origins file or the methods file is refused there, at its own line, by
+		// the path the proxyfile writes it at.
+		{name: "a key the target refuses in the origins file", setup: func(t *testing.T, tmp string) {
+			originsFileForm(t, tmp, "{\n"+
+				"  \"cors\": {\"max_age\": \"600\"},\n"+
+				"  \"environments\": [\n"+
+				"    {\"name\": \"all\", \"hosts\": [\"localhost\"], \"origins\": [\"http://localhost:3000\"]}\n"+
+				"  ]\n"+
+				"}\n")
+			declare(t, envoyRefusing("cors.max_age"))
+		}, args: "render <tmp>/proxyfile.yaml -o <tmp>/out.yaml", exit: 1,
+			stderr: "<tmp>/origins.json:2:12: \"cors.max_age\" is refused by --target envoy: refused by this test\n",
+			also:   nothingWritten("minimal")},
+		{name: "a key the target refuses in the methods file", setup: func(t *testing.T, tmp string) {
+			copyExample(t, tmp, "partial")
+			declare(t, envoyRefusing("rpc.methods[].action"))
+		}, args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/out.yaml --rpc-methods <tmp>/methods.json", exit: 1,
+			stderr: "<tmp>/methods.json:2:76: \"rpc.methods[].action\" is refused by --target envoy: refused by this test\n",
+			also:   nothingWritten("partial", "methods.json")},
+		{name: "the same keys in the proxyfile are refused once each", setup: func(t *testing.T, tmp string) {
+			testsupport.WriteFile(t, filepath.Join(tmp, "proxyfile.yaml"), string(testsupport.ReadFile(t, examples+"/partial/yaml/proxyfile.yaml"))+
+				"cors: {max_age: \"600\"}\n"+testsupport.PartialMethods)
+			declare(t, envoyRefusing("cors.max_age", "rpc.methods[].action"))
+		}, args: "render <tmp>/proxyfile.yaml -o <tmp>/out.yaml", exit: 1,
+			stderr: "<tmp>/proxyfile.yaml:28:8: \"cors.max_age\" is refused by --target envoy: refused by this test\n" +
+				"<tmp>/proxyfile.yaml:31:72: \"rpc.methods[].action\" is refused by --target envoy: refused by this test\n",
+			also: nothingWritten("partial")},
 		{name: "no arguments", exit: 2, stderr: usageText},
 		{name: "help", args: "--help", stdout: usageText},
 		{name: "unknown command", args: "rendr", exit: 2, stderr: "proxyfile: unknown command \"rendr\"\n" + usageText},
@@ -93,6 +129,11 @@ func TestRun(t *testing.T) {
 			stderr: "proxyfile render: --target nginx: no generator for nginx in this version; see docs/portability.md\n"},
 		{name: "target haproxy", args: "check a.yaml -o b.yaml --target haproxy", exit: 2,
 			stderr: "proxyfile check: --target haproxy: no generator for haproxy in this version; see docs/portability.md\n"},
+		// The targets with a generator are the ones format.Targets declares, the list render reads too, so a target it
+		// does not declare is refused before any file is read.
+		{name: "a target with no declaration", setup: func(t *testing.T, tmp string) { declare(t) },
+			args: "render a.yaml -o b.yaml --target envoy", exit: 2,
+			stderr: "proxyfile render: --target envoy: no generator for envoy in this version; see docs/portability.md\n"},
 		{name: "unknown target", args: "render a.yaml -o b.yaml --target Envoy", exit: 2,
 			stderr: "proxyfile render: --target must be envoy, nginx or haproxy, not \"Envoy\"\n"},
 		// With no file given, the file is the one default name in the working directory.
@@ -178,13 +219,7 @@ func TestRun(t *testing.T) {
 		// The origins file is named inside the proxyfile, not on the command line. The examples write their origins
 		// inline, so the row writes the minimal example in the file form beside the fixture it names.
 		{name: "output names the origins file", setup: func(t *testing.T, tmp string) {
-			text := string(testsupport.ReadFile(t, examples+"/minimal/yaml/proxyfile.yaml"))
-			if !strings.Contains(text, testsupport.MinimalInlineOrigins) {
-				t.Fatalf("the minimal example holds no %q to replace", testsupport.MinimalInlineOrigins)
-			}
-			testsupport.WriteFile(t, filepath.Join(tmp, "proxyfile.yaml"),
-				strings.Replace(text, testsupport.MinimalInlineOrigins, "origins: origins.json\n", 1))
-			testsupport.WriteFile(t, filepath.Join(tmp, "origins.json"), string(testsupport.ReadFile(t, originsFixture)))
+			originsFileForm(t, tmp, string(testsupport.ReadFile(t, originsFixture)))
 		}, args: "render <tmp>/proxyfile.yaml -o <tmp>/origins.json", exit: 2, stderr: overwrite,
 			also: func(t *testing.T, tmp string) {
 				nothingWritten("minimal")(t, tmp)
@@ -266,6 +301,37 @@ func TestCheckEveryExampleWithNoFile(t *testing.T) {
 			}
 		})
 	}
+}
+
+// originsFileForm writes into dir the minimal example in the file form, which no example writes: proxyfile.yaml,
+// whose origins name origins.json, and origins.json holding origins.
+func originsFileForm(t *testing.T, dir, origins string) {
+	t.Helper()
+	text := string(testsupport.ReadFile(t, examples+"/minimal/yaml/proxyfile.yaml"))
+	if !strings.Contains(text, testsupport.MinimalInlineOrigins) {
+		t.Fatalf("the minimal example holds no %q to replace", testsupport.MinimalInlineOrigins)
+	}
+	testsupport.WriteFile(t, filepath.Join(dir, "proxyfile.yaml"),
+		strings.Replace(text, testsupport.MinimalInlineOrigins, "origins: origins.json\n", 1))
+	testsupport.WriteFile(t, filepath.Join(dir, "origins.json"), origins)
+}
+
+// declare makes targets the declared targets for the row and puts the declared list back when the row ends. Swapping
+// format.Targets is safe only while no test of the package runs in parallel.
+func declare(t *testing.T, targets ...format.Target) {
+	t.Helper()
+	declared := format.Targets
+	t.Cleanup(func() { format.Targets = declared })
+	format.Targets = targets
+}
+
+// envoyRefusing is an Envoy that refuses keys, each with the note "refused by this test", and declares no other key.
+func envoyRefusing(keys ...string) format.Target {
+	refused := map[string]format.Support{}
+	for _, key := range keys {
+		refused[key] = format.Support{Level: format.Refused, Note: "refused by this test"}
+	}
+	return format.Target{Name: "envoy", Title: "Envoy", Keys: refused}
 }
 
 // copyExample copies examples/<name> into dir, its directories included.

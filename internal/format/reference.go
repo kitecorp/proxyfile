@@ -18,18 +18,34 @@ func Reference(f Field, path, class string) []byte {
 	var b strings.Builder
 	b.WriteString("| Key | Meaning | Rule | Class |\n|---|---|---|---|\n")
 	if path == "" {
-		under(&b, f, "", class)
+		under(row(&b), f, "", class)
 	} else {
-		key(&b, f, path, Field{}, class)
+		key(row(&b), f, path, Field{}, class)
 	}
 	return []byte(b.String())
 }
 
-// key writes the row of f, a key of the Map holder, and the rows under it. The key that selects a choice of an
+// CoreKeys returns the path of every key of class core under f, in Reference's order and spelling, so the support
+// each generator declares and the support table name a key as the key reference does.
+func CoreKeys(f Field) []string {
+	var keys []string
+	under(func(path, _, class string, _ ...string) {
+		if class == core {
+			keys = append(keys, path)
+		}
+	}, f, "", core)
+	return keys
+}
+
+// visit is given each row of the key reference in order: the key's path, its meaning, its class and the parts of its
+// rule. Reference writes the rows and CoreKeys collects the paths, so the two walk the keys in one way.
+type visit func(path, meaning, class string, rule ...string)
+
+// key visits the row of f, a key of the Map holder, and the rows under it. The key that selects a choice of an
 // Either is required by the choice, not by the file, so its row does not say Required. The OneOf sentence comes after
 // the key's Rule, so a Rule that starts with "It" still speaks of the key. class is the holder's class, which f takes
 // unless it names its own, and every key under f takes f's.
-func key(b *strings.Builder, f Field, path string, holder Field, class string) {
+func key(v visit, f Field, path string, holder Field, class string) {
 	class = cmp.Or(f.Class, class)
 	rule := []string{sentence(form(f))}
 	if f.Required && f.Name != holder.Select {
@@ -39,39 +55,53 @@ func key(b *strings.Builder, f Field, path string, holder Field, class string) {
 	if slices.Contains(holder.OneOf, f.Name) {
 		rule = append(rule, "Exactly one of "+codes(holder.OneOf, "and")+" is written.")
 	}
-	row(b, path, escape(f.Doc), class, rule...)
-	under(b, f, path, class)
+	v(path, escape(f.Doc), class, rule...)
+	under(v, f, path, class)
 }
 
-// under writes the rows of the keys in the value f at path; class is the class of the key that holds the value. A
+// under visits the rows of the keys in the value f at path; class is the class of the key that holds the value. A
 // list's items and an Either's choices are values, not keys, so they have no row; a Dict's value has one, at the key
 // its writer chooses, with that key's rule and the Dict's class.
-func under(b *strings.Builder, f Field, path, class string) {
+func under(v visit, f Field, path, class string) {
 	switch f.Kind {
 	case Map:
 		for _, field := range f.Fields {
-			key(b, field, join(path, field.Name), f, class)
+			key(v, field, join(path, field.Name), f, class)
 		}
 	case List:
-		items := path
-		if path != "" {
-			items += "[]"
-		}
-		under(b, *f.Item, items, class)
+		under(v, *f.Item, items(path), class)
 	case Dict:
-		value := join(path, "<"+f.Key.Name+">")
+		value := values(path, f)
 		meaning := strings.TrimSpace(escape(f.Key.Doc) + " " + escape(f.Item.Doc))
-		row(b, value, meaning, class, sentence(form(*f.Item)), "The "+escape(f.Key.Name)+" is "+escape(f.Key.Expect)+".", f.Item.Rule)
-		under(b, *f.Item, value, class)
+		v(value, meaning, class, sentence(form(*f.Item)), "The "+escape(f.Key.Name)+" is "+escape(f.Key.Expect)+".", f.Item.Rule)
+		under(v, *f.Item, value, class)
 	case Either:
 		for _, choice := range f.Choices {
-			under(b, choice, path, class)
+			under(v, choice, path, class)
 		}
 	}
 }
 
-func row(b *strings.Builder, path, meaning, class string, rule ...string) {
-	fmt.Fprintf(b, "| `%s` | %s | %s | %s |\n", path, meaning, strings.Join(slices.DeleteFunc(rule, func(s string) bool { return s == "" }), " "), class)
+// row returns the visit that writes each row into b.
+func row(b *strings.Builder) visit {
+	return func(path, meaning, class string, rule ...string) {
+		fmt.Fprintf(b, "| `%s` | %s | %s | %s |\n", path, meaning, strings.Join(slices.DeleteFunc(rule, func(s string) bool { return s == "" }), " "), class)
+	}
+}
+
+// items is the path of the items of the list at path: the list's path followed by [], or "" for a file whose root is
+// a list, whose items have no key above them.
+func items(path string) string {
+	if path == "" {
+		return ""
+	}
+	return path + "[]"
+}
+
+// values is the path of the values of the Dict dict at path: the name of its key in <>, which stands for each key a
+// writer chooses.
+func values(path string, dict Field) string {
+	return join(path, "<"+dict.Key.Name+">")
 }
 
 func join(path, name string) string {

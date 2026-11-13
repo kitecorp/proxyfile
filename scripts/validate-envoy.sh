@@ -10,7 +10,14 @@
 # set holding the throwaway key's public half, and a copy of the throwaway certificate as the CA bundle. Both folders
 # are made here for this run and removed after it, and no key is ever committed.
 set -euo pipefail
-image='envoyproxy/envoy:distroless-v1.40.2@sha256:09ca6f2140a61ad8df11779a4a30d52b48433d444466328494f9188c9c35eded'
+# The Envoy release proxyfile writes for, pinned by digest; the conformance battery reads the same file. An empty file
+# would otherwise reach docker run and read as Envoy refusing every file.
+pin="$(dirname "$0")/envoy-image"
+image=$(cat "$pin" 2>/dev/null) || true
+if [[ $image != *@sha256:* ]]; then
+  echo "validate-envoy.sh: $pin must hold the Envoy image pinned by digest (<image>@sha256:<digest>)" >&2
+  exit 1
+fi
 tls=$(mktemp -d)
 jwt=$(mktemp -d)
 trap 'rm -rf "$tls" "$jwt"' EXIT

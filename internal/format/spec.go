@@ -67,6 +67,12 @@ type Field struct {
 	// envoy, nginx or haproxy. A key that names none, held by none that does, is core: every proxy can carry it
 	// (docs/portability.md).
 	Class string
+	// Place is set in the origins file's and the methods file's descriptions where they write a key of the proxyfile at
+	// another path: on a key, the path the proxyfile writes that key at, and on a value no key holds, a file's root or
+	// a list's items, the path of the proxyfile's key whose value it is, which the keys under it continue. Both are
+	// spelled as CoreKeys spells them. Refusals reads it, so a key a target refuses is refused in whichever file
+	// writes it.
+	Place string
 }
 
 const (
@@ -543,7 +549,8 @@ var (
 )
 
 // The rules for hosts, origins and patterns belong to the origins reader, which names the environment in its
-// messages; this description checks only the keys and the kinds.
+// messages; this description checks only the keys and the kinds. environments has no Place: it is the proxyfile's
+// origins key, which names this file, so a target that refuses origins refuses the proxyfile before this file is read.
 var Origins = Field{
 	Doc:  "The origins file: the CORS settings and, for each environment, its hosts and the browser origins it admits.",
 	Kind: Map,
@@ -551,8 +558,8 @@ var Origins = Field{
 		corsField,
 		{Name: "environments", Doc: "The environments, each with its hosts and the browser origins it admits.", Kind: List, Required: true,
 			Rule: "At least one environment.",
-			Item: &Field{Doc: "One environment.", Kind: Map, Fields: slices.Concat([]Field{
-				{Name: "name", Doc: "The environment's name.", Kind: Text, Required: true,
+			Item: &Field{Doc: "One environment.", Kind: Map, Place: "origins.<environment name>", Fields: slices.Concat([]Field{
+				{Name: "name", Doc: "The environment's name.", Kind: Text, Required: true, Place: "origins.<environment name>",
 					Rule: "It names the environment's virtual host. Not empty, and not used by another environment."},
 			}, environmentLists)}},
 	},
@@ -561,9 +568,10 @@ var Origins = Field{
 // Methods describes the RPC methods file: one entry per method. Which service a method goes to is decided by the
 // rpc entry of the proxyfile, not here.
 var Methods = Field{
-	Doc:  "The RPC methods the gateway routes, each with what the check is told about it.",
-	Kind: List,
-	Item: &methodField,
+	Doc:   "The RPC methods the gateway routes, each with what the check is told about it.",
+	Kind:  List,
+	Item:  &methodField,
+	Place: "rpc.methods",
 }
 
 // methodField is written once and used by both places the RPC methods may be written: the methods file and the

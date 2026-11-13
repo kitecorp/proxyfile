@@ -16,8 +16,9 @@ import (
 
 const readmeFile = "../../README.md"
 
-// The key tables of the README and the pages under docs/ are written from the description, so a key added, renamed
-// or given another rule shows in them, and a table edited by hand fails here. -update rewrites every table.
+// The key tables of the README and the pages under docs/ are written from the description, and the support table
+// from it and the targets' declarations, so a key added, renamed, given another rule or declared otherwise shows in
+// them, and a table edited by hand fails here. -update rewrites every table.
 func TestDocsAreCurrent(t *testing.T) {
 	for _, file := range documentation(t) {
 		text := string(testsupport.ReadFile(t, file))
@@ -37,7 +38,7 @@ func TestDocsAreCurrent(t *testing.T) {
 				continue
 			}
 			if text[table.start:table.end] != want && !*update {
-				t.Errorf("%s: the table of %q differs from what Reference writes; rewrite it with "+
+				t.Errorf("%s: the table of %q differs from what Reference or SupportMatrix writes; rewrite it with "+
 					"go test ./internal/format -run TestDocsAreCurrent -update", file, table.name)
 			}
 			current.WriteString(want)
@@ -154,8 +155,9 @@ func keyTables(text string) ([]keyTable, error) {
 }
 
 // tableNamed returns the table a marker names: "." holds the keys at the top of a proxyfile that hold no keys of
-// their own, "origins file" and "methods file" the keys of those files, and any other name is the path of a key of
-// the proxyfile, whose table holds that key and every key under it, in the class of the key that holds it.
+// their own, "origins file" and "methods file" the keys of those files, "support by proxy" each target's support of
+// every core key, and any other name is the path of a key of the proxyfile, whose table holds that key and every key
+// under it, in the class of the key that holds it.
 func tableNamed(name string) (string, error) {
 	switch name {
 	case ".":
@@ -165,6 +167,8 @@ func tableNamed(name string) (string, error) {
 		return string(Reference(Origins, "", core)), nil
 	case "methods file":
 		return string(Reference(Methods, "", core)), nil
+	case "support by proxy":
+		return string(SupportMatrix(Proxyfile, Targets)), nil
 	}
 	spec, class := &Proxyfile, core
 	for _, key := range strings.Split(name, ".") {

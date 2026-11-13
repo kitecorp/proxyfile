@@ -55,11 +55,12 @@ var (
 )
 
 // Read reads the origins file at path, which is JSON read as YAML so that a problem names its line. It returns the
+// origins and the tree the format check accepted, in which render.Read finds the keys its target refuses, or the
 // problems of the first step that finds any: reading the file, its syntax, the format check, then the rules below.
-func Read(path string) (*File, []model.Problem) {
+func Read(path string) (*File, *tree.Node, []model.Problem) {
 	root, problems := input.Checked(path, format.Origins)
 	if problems != nil {
-		return nil, problems
+		return nil, nil, problems
 	}
 	holder := root.Get("environments")
 	var list []writtenEnvironment
@@ -67,7 +68,11 @@ func Read(path string) (*File, []model.Problem) {
 		name := item.Get("name")
 		list = append(list, writtenEnvironment{name: name.Text, namePos: name.Pos, pos: item.Pos, item: item})
 	}
-	return read(root.Get("cors"), holder, "the file names no environment", list)
+	file, problems := read(root.Get("cors"), holder, "the file names no environment", list)
+	if problems != nil {
+		return nil, nil, problems
+	}
+	return file, root, nil
 }
 
 // Inline reads the origins written in the proxyfile: environments is its origins mapping, which the format check
