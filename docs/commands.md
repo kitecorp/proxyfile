@@ -42,11 +42,13 @@ Each problem in the input is printed on standard error as `<file>:<line>:<column
 places nowhere, such as an unknown anchor after the first line, names the file alone), or as `<file>: <message>` when it
 is about the file as a whole, such as a file that cannot be read. A HOCON file gives a line and column only for a syntax
 error, and names every other problem by its key path instead, as `<file>: <key path>: <message>` (see [the HOCON
-form](hocon.md), which also says how a problem in an included file reads). The proxyfile is read first, and a run that
-finds problems in it reports all the problems of the first stage that finds any: reading and syntax, then the format of
-each key, then the rules that compare keys with each other. When the proxyfile is free of problems, the problems of the
-origins file, when `origins` names one, and of the methods are reported together. For example, a misspelled `listen` in
-a YAML file gives:
+form](hocon.md), which also says how a problem in an included file reads). Each problem is one line: a file whose name
+holds a control character is written in double quotes, and a control character in a message as its escape, such as
+`\n`. The proxyfile is read first, and a run that finds problems in it reports all the problems of the first stage
+that finds any: reading and syntax, then a key or a value that holds a control character, then the format of each key,
+then the rules that compare keys with each other. When the proxyfile is free of problems, the problems of the origins
+file, when `origins` names one, and of the methods are reported together. For example, a misspelled `listen` in a YAML
+file gives:
 
 ```
 proxyfile.yaml:3:1: "listen" is required here

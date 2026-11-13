@@ -47,7 +47,9 @@ of the two, or neither, which is the one backend `127.0.0.1`.
   takes the less busy one, so with three or more backends it is not always the least busy of all. It differs from
   `random` only while requests overlap: with one request at a time, every backend has none open.
 - `random` sends each request to a backend chosen at random.
-- `hash` sends the requests that share a value to one backend, so `hash` must name the value. `hash.header` hashes the
+- `hash` sends the requests that share a value to one backend, so `hash` must name the value. A retry after that
+  backend refused the connection goes to the next other backend along the ring, so with `retries` it leaves the hashed
+  backend when the service has another (measured on Envoy 1.40.2, [Defaults](defaults.md)). `hash.header` hashes the
   value of a request header: each value goes to one backend, and a request without the header goes to a backend
   chosen at random. `hash.client` hashes the client's address, the one `client_address` names; a gateway that faces
   clients over plain HTTP writes `client_address: connection`, so a client cannot choose its own address by sending an

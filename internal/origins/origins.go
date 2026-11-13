@@ -98,7 +98,6 @@ type writtenEnvironment struct {
 // each place words for itself.
 func read(cors, holder *tree.Node, none string, list []writtenEnvironment) (*File, []model.Problem) {
 	r := reader{names: map[string]bool{}, firstWithHost: map[string]int{}}
-	r.corsValues(cors)
 	file := &File{
 		CORS: CORS{
 			AllowMethods:  cors.GetText("allow_methods"),
@@ -112,28 +111,6 @@ func read(cors, holder *tree.Node, none string, list []writtenEnvironment) (*Fil
 		return nil, problems
 	}
 	return file, nil
-}
-
-// corsHeaders names the response header the CORS filter sends each cors value in. max_age is left out: its pattern
-// admits digits only.
-var corsHeaders = []struct{ key, header string }{
-	{"allow_methods", "Access-Control-Allow-Methods"},
-	{"allow_headers", "Access-Control-Allow-Headers"},
-	{"expose_headers", "Access-Control-Expose-Headers"},
-}
-
-// corsValues refuses a cors value holding NUL, a newline or a carriage return (model.HeaderValueRefused). Envoy 1.40.2
-// loads a file with one there (scripts/validate-envoy.sh), so without this the browser would be the first to meet it.
-func (r *reader) corsValues(cors *tree.Node) {
-	for _, c := range corsHeaders {
-		value := cors.Get(c.key)
-		if value == nil {
-			continue
-		}
-		for _, name := range model.HeaderValueRefused(value.Text) {
-			r.Add(value.Pos, "the value %q of cors.%s contains %s, which the header %s cannot hold", value.Text, c.key, name, c.header)
-		}
-	}
 }
 
 // reader applies the rules while it fills the File, because each problem names the position of a value and the

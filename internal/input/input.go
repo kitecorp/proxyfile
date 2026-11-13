@@ -17,7 +17,8 @@ func Checked(path string, spec format.Field) (*tree.Node, []model.Problem) {
 }
 
 // CheckedWith reads the file at path with front and returns its tree when spec accepts it. Otherwise it returns the
-// problems of the first step that finds any, sorted: reading the file, its syntax, then the check against spec.
+// problems of the first step that finds any, sorted: reading the file, its syntax, a key or a value that holds a
+// control character, then the check against spec.
 //
 // Each front reads its own file, rather than taking bytes read here, because the HOCON library resolves an include
 // relative to the including file only when it opens that file itself.
@@ -27,10 +28,38 @@ func CheckedWith(path string, spec format.Field,
 	if problems != nil {
 		return nil, problems
 	}
+	if problems := controlCharacters(root); problems != nil {
+		return nil, problems
+	}
 	if problems := format.Check(spec, root); problems != nil {
 		return nil, problems
 	}
 	return root, nil
+}
+
+// controlCharacters refuses every key and every value of the tree that holds a control character other than tab
+// (model.Problems.RefuseControl says why), whichever file and syntax it came from, so no key needs a rule of its own. It
+// runs before the format check, so a value that also breaks its key's pattern is reported once, for the character.
+func controlCharacters(root *tree.Node) []model.Problem {
+	var problems model.Problems
+	var walk func(n *tree.Node)
+	walk = func(n *tree.Node) {
+		switch n.Kind {
+		case tree.Scalar:
+			problems.RefuseControl(n.Pos, "the value", n.Text)
+		case tree.List:
+			for _, item := range n.Items {
+				walk(item)
+			}
+		case tree.Map:
+			for _, entry := range n.Entries {
+				problems.RefuseControl(entry.KeyPos, "the key", entry.Key)
+				walk(entry.Value)
+			}
+		}
+	}
+	walk(root)
+	return problems.Sorted()
 }
 
 // YAMLFile is the YAML front: it reads the file at path and builds its tree.

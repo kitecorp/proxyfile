@@ -2,7 +2,11 @@ package protofiles
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/kitecorp/proxyfile/v2/internal/model"
@@ -37,17 +41,22 @@ func TestMethods(t *testing.T) {
 			`/o.v1.S/Open action "" reports [] at testdata/linked/o/v1/s.proto:12:3`,
 			`/o.v1.S/Read action "read" reports ["export"] at testdata/linked/o/v1/s.proto:8:3`,
 		}},
+		// A root is quoted, as every value a problem writes, so a root whose directory's name holds a newline is still
+		// one line.
 		{name: "a root that cannot be read", roots: []string{"testdata/missing"}, option: "o.v1.route", want: []string{
-			"g.yaml:8:23: the root testdata/missing cannot be read: no such file or directory",
+			`g.yaml:8:23: the root "testdata/missing" cannot be read: no such file or directory`,
+		}},
+		{name: "a root that cannot be read, with a newline in its name", roots: []string{"testdata/zq\nqz"}, option: "o.v1.route", want: []string{
+			`g.yaml:8:23: the root "testdata/zq\nqz" cannot be read: no such file or directory`,
 		}},
 		{name: "a root that is not a directory", roots: []string{"testdata/forms/o/v1/s.proto"}, option: "o.v1.route", want: []string{
-			"g.yaml:8:23: the root testdata/forms/o/v1/s.proto is not a directory",
+			`g.yaml:8:23: the root "testdata/forms/o/v1/s.proto" is not a directory`,
 		}},
 		{name: "a root with no .proto file", roots: []string{"testdata/empty"}, option: "o.v1.route", want: []string{
-			"g.yaml:8:23: the root testdata/empty holds no .proto file",
+			`g.yaml:8:23: the root "testdata/empty" holds no .proto file`,
 		}},
 		{name: "one import path under two roots", roots: []string{"testdata/two/first", "testdata/two/second"}, option: "o.v1.route", want: []string{
-			"testdata/two/second/a/v1/s.proto: the import path a/v1/s.proto is also under the root testdata/two/first, which comes first in rpc.proto.roots",
+			`testdata/two/second/a/v1/s.proto: the import path "a/v1/s.proto" is also under the root "testdata/two/first", which comes first in rpc.proto.roots`,
 		}},
 		{name: "a syntax error", roots: []string{"testdata/syntax"}, option: "o.v1.route", want: []string{
 			"testdata/syntax/a/v1/s.proto:5:1: syntax error: expecting ';'",
@@ -55,12 +64,20 @@ func TestMethods(t *testing.T) {
 		// d/v1/loose.proto imports a file no root holds too, but it declares no service and no service file imports
 		// it, so it is not compiled and its import is not named.
 		{name: "imports that name no file", roots: []string{"testdata/imports"}, option: "o.v1.route", want: []string{
-			"testdata/imports/a/v1/s.proto:5:8: the import google/rpc/error_details.proto is under no root of rpc.proto.roots and is not a standard google/protobuf file",
-			"testdata/imports/a/v1/s.proto:7:8: the import c/v1/missing.proto is under no root of rpc.proto.roots and is not a standard google/protobuf file",
-			"testdata/imports/b/v1/types.proto:5:8: the import nowhere/y.proto is under no root of rpc.proto.roots and is not a standard google/protobuf file",
+			`testdata/imports/a/v1/s.proto:5:8: the import "google/rpc/error_details.proto" is under no root of rpc.proto.roots and is not a standard google/protobuf file`,
+			`testdata/imports/a/v1/s.proto:7:8: the import "c/v1/missing.proto" is under no root of rpc.proto.roots and is not a standard google/protobuf file`,
+			`testdata/imports/b/v1/types.proto:5:8: the import "nowhere/y.proto" is under no root of rpc.proto.roots and is not a standard google/protobuf file`,
 		}},
 		{name: "an unknown type", roots: []string{"testdata/unknown"}, option: "o.v1.route", want: []string{
 			"testdata/unknown/a/v1/s.proto:6:9: method a.v1.S.M: unknown request type Missing",
+		}},
+		// An option's action or report that holds a control character other than tab is refused at its method, each value
+		// once, as a key or a value of the proxyfile is; Tab, whose action holds a tab, is routed.
+		{name: "a control character in an action or a report", roots: []string{"testdata/control"}, option: "o.v1.route", want: []string{
+			`testdata/control/o/v1/s.proto:18:3: the action "a\nb" contains a newline; no key or value may hold a control character other than tab`,
+			`testdata/control/o/v1/s.proto:21:3: the action "a\rb" contains a carriage return; no key or value may hold a control character other than tab`,
+			`testdata/control/o/v1/s.proto:24:3: the action "a\x00b" contains NUL; no key or value may hold a control character other than tab`,
+			`testdata/control/o/v1/s.proto:27:3: the report "c\x01d" contains the control character U+0001; no key or value may hold a control character other than tab`,
 		}},
 		{name: "a method declared twice", roots: []string{"testdata/twice"}, option: "o.v1.route", want: []string{
 			`testdata/twice/a/v1/s.proto:7:7: symbol "a.v1.S.M" already defined at a/v1/s.proto:6:7`,
@@ -119,5 +136,39 @@ func TestMethods(t *testing.T) {
 				t.Errorf("methods and problems = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// A root that is a symbolic link whose target is missing cannot be read, as a missing directory cannot: the proxyfile's
+// reader compares it with the other roots by the text of its path and leaves it to this problem.
+func TestMethodsRootLinkToNothing(t *testing.T) {
+	link := filepath.Join(t.TempDir(), "broken")
+	if err := os.Symlink("missing", link); err != nil {
+		t.Fatal(err)
+	}
+	_, _, problems := Methods(Source{Roots: []Root{{Dir: link, Pos: model.Pos{File: "g.yaml", Line: 8, Column: 23}}}, Option: "o.v1.route"})
+	want := []string{"g.yaml:8:23: the root " + strconv.Quote(link) + " cannot be read: no such file or directory"}
+	if got := testsupport.ProblemStrings(problems); !slices.Equal(got, want) {
+		t.Errorf("problems = %q, want %q", got, want)
+	}
+}
+
+// protocompile names the other place of a symbol declared twice by its import path, as it is, so a .proto file whose
+// name holds a newline would print the problem on two lines; the problem quotes the file and escapes the message.
+func TestMethodsFileNameWithANewline(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "a", "v1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testsupport.WriteFile(t, filepath.Join(dir, "a", "v1", "x\ny.proto"),
+		"syntax = \"proto3\";\npackage a.v1;\nmessage E {}\nmessage E {}\nservice S { rpc M(E) returns (E); }\n")
+	_, _, problems := Methods(Source{Roots: []Root{{Dir: dir, Pos: model.Pos{File: "g.yaml", Line: 8, Column: 23}}}, Option: "o.v1.route"})
+	got := testsupport.ProblemStrings(problems)
+	for i := range got {
+		got[i] = strings.ReplaceAll(got[i], dir, "<dir>")
+	}
+	want := []string{`"<dir>/a/v1/x\ny.proto":4:9: symbol "a.v1.E" already defined at a/v1/x\ny.proto:3:9`}
+	if !slices.Equal(got, want) {
+		t.Errorf("problems = %q, want %q", got, want)
 	}
 }

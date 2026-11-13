@@ -34,7 +34,8 @@ var runFolder = filepath.Join(os.TempDir(), "proxyfile-conformance")
 
 // world is a running proxy among the stubs of the full example, reached from the host.
 type world struct {
-	listener string // the host and port Docker published the proxy's listener on
+	listener string            // the host and port Docker published the proxy's listener on
+	ports    map[string]string // each backend's ports by its role, as its -ports flag lists them
 	files    tlsFiles
 	// http1, http2, http1NoCertificate and http1OtherCA send the requests (client_test.go): they are made once, so
 	// the requests of a burst share their connections as a client's would.
@@ -85,9 +86,14 @@ func startWorld(t *testing.T, tg target, config string) *world {
 		mustDocker(t, append([]string{"run", "-d", "--name", "proxyfile-conformance-" + role, "--network", network,
 			"--ip", ip, "-v", state, image}, args...)...)
 	}
-	backend("shop-1", "10.0.1.11", "serve", "-service", "shop", "-instance", "shop-1", "-ports", "8080,8081")
-	backend("shop-2", "10.0.1.12", "serve", "-service", "shop", "-instance", "shop-2", "-ports", "8080,8081")
-	backend("catalog", "10.0.2.21", "serve", "-service", "catalog", "-instance", "catalog", "-ports", "8090")
+	ports := map[string]string{}
+	serve := func(role, ip, service, list string) {
+		backend(role, ip, "serve", "-service", service, "-instance", role, "-ports", list)
+		ports[role] = list
+	}
+	serve("shop-1", "10.0.1.11", "shop", "8080,8081")
+	serve("shop-2", "10.0.1.12", "shop", "8080,8081")
+	serve("catalog", "10.0.2.21", "catalog", "8090")
 	backend("resolver", "10.0.0.2", "dns", "-listen", ":53", "catalog.internal.example=10.0.2.21")
 	// The listener is published on a port Docker picks, so a run never meets a port another program holds.
 	mustDocker(t, append([]string{"run", "-d", "--name", proxy, "--network", network, "--ip", "10.0.0.10",
@@ -97,9 +103,51 @@ func startWorld(t *testing.T, tg target, config string) *world {
 		"-v", state, image, "serve", "-service", "accounts", "-instance", "accounts", "-ports", "7070")
 	waitReady(t, tg.ready)
 	listener := strings.TrimSpace(mustDocker(t, "port", proxy, "10000/tcp"))
-	w := &world{listener: listener, files: files}
+	w := &world{listener: listener, ports: ports, files: files}
 	w.http1, w.http2, w.http1NoCertificate, w.http1OtherCA = newClients(t, files)
 	return w
+}
+
+// refuse makes the backend role refuse connections on every port until the test ends, as a backend that is down
+// does: it signals the stub (serve in conformance/stub) and waits until each port refuses a connection made inside
+// the backend's container, and when the test ends it opens the ports again and waits until each answers. A row this
+// short never takes the backend out of the proxy's pool: the full example's health check needs three failures 10 s
+// apart, so the rows after it find both backends as before.
+func (w *world) refuse(t *testing.T, role string) {
+	ports, ok := w.ports[role]
+	if !ok {
+		// A role the world does not serve is a mistake in the scenario data, which panics, as send does.
+		panic(fmt.Sprintf("the battery serves no backend %q, so it cannot make it refuse connections", role))
+	}
+	container := "proxyfile-conformance-" + role
+	mustDocker(t, "kill", "--signal", "USR1", container)
+	waitPorts(t, container, ports, false)
+	t.Cleanup(func() {
+		mustDocker(t, "kill", "--signal", "USR2", container)
+		waitPorts(t, container, ports, true)
+	})
+}
+
+// waitPorts fetches /healthz on each of ports, a list such as 8080,8081, from inside container every 100 ms until
+// every port answers 200, when open, or refuses the connection, when not, for 10 s at most.
+func waitPorts(t testing.TB, container, ports string, open bool) {
+	want := "refuse connections"
+	if open {
+		want = "answer"
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for _, port := range strings.Split(ports, ",") {
+		for {
+			_, err := docker("exec", container, "/stub", "fetch", "http://127.0.0.1:"+port+"/healthz")
+			if open && err == nil || !open && err != nil && strings.Contains(err.Error(), "connection refused") {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("port %s of %s did not %s within 10s; the last try: %v", port, container, want, err)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
 }
 
 // waitReady fetches ready from inside the proxy's network namespace every 100 ms until it answers 200, for 30 s at

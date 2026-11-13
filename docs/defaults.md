@@ -34,8 +34,13 @@ what that is.
   call. It is the `request_id` of the request log. With `client_address: connection`, Envoy replaces a client's own id
   on a request it counts as external.
 - **The service's own `Server` header passes through**, and Envoy adds none of its own. The router adds no `x-envoy-*`
-  header to a request or a response. With `client_address: connection`, Envoy itself adds `x-envoy-external-address` to
-  the request ([The listener](listener.md#the-clients-address)).
+  header to a request it sends a service or to an answer. With `client_address: connection`, Envoy itself adds
+  `x-envoy-external-address` to the request ([The listener](listener.md#the-clients-address)). With `auth.ask`, Envoy's
+  own client for the check adds `x-envoy-upstream-service-time` to the check's answer, and a denial passes the check's
+  headers on, so the gateway removes that header from every answer, a service's own copy included; the check's other
+  headers still reach the client. That client also adds `x-envoy-internal: true` and `x-envoy-expected-rq-timeout-ms`
+  to the request the check receives, which the generated file does not remove ([`auth`](auth.md)). Measured on Envoy
+  1.40.2.
 - **`Vary: Origin` on every response**, added to a `Vary` the service sent, never replacing it.
 - **Every request's path is normalised before a route is picked.** `normalize_path: true`, `merge_slashes: true` and
   `path_with_escaped_slashes_action: UNESCAPE_AND_FORWARD` are always written: dot segments are resolved, repeated
@@ -69,7 +74,20 @@ what that is.
 - **No `auth.send_request`: the check sees the path of `ask` only.** [What the check is
   told](auth.md#what-the-check-is-told) says what the key adds.
 - **No `auth.jwt`: no token is verified at the proxy.** [Tokens](auth.md#tokens) says what the key adds.
-- **Retries** happen only on `connect-failure` and `reset-before-request`.
+- **Retries** happen only on `connect-failure` and `reset-before-request`, and go to a backend the request has not
+  tried yet when the service has one. The retry policy carries Envoy's `previous_hosts` predicate with
+  `host_selection_retry_max_attempts: 20`: a pick of a backend already tried is made again, at most 20 times, and then
+  the retry goes to the last backend picked, so a service with one backend is still retried on it. The count is 20
+  because a new pick can be a backend already tried: `least_requests` and `random` draw each pick anew, and `hash`
+  takes the next entry along its ring, the same entries for a value every time. Measured on Envoy 1.40.2 with two
+  backends and one refusing connections: with `random`, each count about halved the share of retries that reached the
+  refusing backend again, from 24.8% at 1 to 0.19% at 7 and at 8 (1000 requests for each count); with `hash` on a
+  header, 87 of 200 values hashed to the refusing backend, and 56, 27, 15, 5 and 3 of them still failed at counts 1 to
+  5, none at 6. At 6, the smallest count at which 200 requests in a row were all answered `200` with every `balance`,
+  `random` still failed 3 of 1000. At 20, by that halving, fewer than one in a million fail with `random`, and 5000
+  requests with each `balance` were all answered by the other backend. Without the predicate a retry picked its
+  backend as the first try did: with `least_requests`, 53 of 200 requests were answered `502`, and with `hash`, every
+  request whose hash chose the refusing backend. Round robin takes the other of two backends next, with or without it.
 - **The overload manager** checks every 0.25 seconds. It exists when `envoy.heap` or `limits.connections` is written.
 - **The Connect bridge.** Each route of the rpc entry turns a Connect call into gRPC for the service's gRPC port, and
   the answer back into Connect. Envoy's bridge still writes the HTTP status of an older Connect error-code table for

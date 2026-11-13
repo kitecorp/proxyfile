@@ -135,25 +135,26 @@ func TestResolve(t *testing.T) {
 		{name: "a lone low surrogate", proxyfile: single.String(),
 			methods: "[\n" + `  {"service": "example.shop.v1.C", "method": "M", "action": "a\ude00b"}` + "\n]\n",
 			want:    []string{"m.json:2: found invalid Unicode character escape code"}},
-		// The route writes the action and the reports into header values, which may not hold NUL, a newline or a
-		// carriage return, so each of the three is refused at its method, in the action and in a report alike.
+		// The route writes the action and the reports into header values as they are, and a header value may not hold
+		// NUL, a newline or a carriage return. Each is refused where the methods file is read, at the value, as a control
+		// character in any key or value of any file is.
 		{name: "a newline", proxyfile: single.String(),
 			methods: `[{"service": "example.shop.v1.C", "method": "M", "action": "a\nb", "reports": ["c\nd"]}]`,
 			want: []string{
-				`m.json:1:2: the action "a\nb" of example.shop.v1.C/M contains a newline, which the header x-gateway-action cannot hold`,
-				`m.json:1:2: the report "c\nd" of example.shop.v1.C/M contains a newline, which the header x-gateway-reports cannot hold`,
+				`m.json:1:60: the value "a\nb" contains a newline; no key or value may hold a control character other than tab`,
+				`m.json:1:80: the value "c\nd" contains a newline; no key or value may hold a control character other than tab`,
 			}},
 		{name: "a carriage return", proxyfile: single.String(),
 			methods: `[{"service": "example.shop.v1.C", "method": "M", "action": "a\rb", "reports": ["c\rd"]}]`,
 			want: []string{
-				`m.json:1:2: the action "a\rb" of example.shop.v1.C/M contains a carriage return, which the header x-gateway-action cannot hold`,
-				`m.json:1:2: the report "c\rd" of example.shop.v1.C/M contains a carriage return, which the header x-gateway-reports cannot hold`,
+				`m.json:1:60: the value "a\rb" contains a carriage return; no key or value may hold a control character other than tab`,
+				`m.json:1:80: the value "c\rd" contains a carriage return; no key or value may hold a control character other than tab`,
 			}},
 		{name: "NUL", proxyfile: single.String(),
 			methods: `[{"service": "example.shop.v1.C", "method": "M", "action": "a\u0000b", "reports": ["c\u0000d"]}]`,
 			want: []string{
-				`m.json:1:2: the action "a\x00b" of example.shop.v1.C/M contains NUL, which the header x-gateway-action cannot hold`,
-				`m.json:1:2: the report "c\x00d" of example.shop.v1.C/M contains NUL, which the header x-gateway-reports cannot hold`,
+				`m.json:1:60: the value "a\x00b" contains NUL; no key or value may hold a control character other than tab`,
+				`m.json:1:84: the value "c\x00d" contains NUL; no key or value may hold a control character other than tab`,
 			}},
 		{name: "no rpc entry", example: "../../examples/minimal/yaml/proxyfile.yaml", methods: `[]`,
 			want: []string{"../../examples/minimal/yaml/proxyfile.yaml:8:1: RPC methods are given, but the routes have no rpc entry"}},

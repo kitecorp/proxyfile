@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -325,13 +326,13 @@ func TestInlineMethods(t *testing.T) {
 	}
 	noProtoFile := partialYAML + "rpc:\n  proto: {roots: [" + emptyRoot + "], option: example.gateway.v1.route}\n"
 	noOption := partialYAML + "rpc:\n  proto:\n    roots: [" + protoRoot + "]\n    option: example.gateway.v1.nowhere\n"
-	// A tree whose actions each hold a character a header value may not hold, which the partial example's "*" mapping
+	// A tree whose methods hold a control character in an action or a report, which the partial example's "*" mapping
 	// routes.
-	headerRoot, err := filepath.Abs("../protofiles/testdata/header")
+	controlRoot, err := filepath.Abs("../protofiles/testdata/control")
 	if err != nil {
 		t.Fatal(err)
 	}
-	headerProto := partialYAML + "rpc:\n  proto: {roots: [" + headerRoot + "], option: o.v1.route}\n"
+	controlProto := partialYAML + "rpc:\n  proto: {roots: [" + controlRoot + "], option: o.v1.route}\n"
 	cases := []struct {
 		name, file, proxyfile string // proxyfile is written to file in a temporary directory
 		rpcMethods            string // given as --rpc-methods when set
@@ -350,13 +351,14 @@ func TestInlineMethods(t *testing.T) {
 			formsRoot + "/o/v1/s.proto:8:3: no rpc mapping matches o.v1.S",
 			formsRoot + "/o/v1/s.proto:12:3: no rpc mapping matches o.v1.S",
 		}},
-		{name: "rpc.proto: an action a header value may not hold, at its .proto line", file: "g.yaml", proxyfile: headerProto, want: []string{
-			headerRoot + `/o/v1/s.proto:17:3: the action "a\nb" of o.v1.S/Newline contains a newline, which the header x-gateway-action cannot hold`,
-			headerRoot + `/o/v1/s.proto:20:3: the action "a\rb" of o.v1.S/Return contains a carriage return, which the header x-gateway-action cannot hold`,
-			headerRoot + `/o/v1/s.proto:23:3: the action "a\x00b" of o.v1.S/Nul contains NUL, which the header x-gateway-action cannot hold`,
+		{name: "rpc.proto: a control character in an action or a report, at its .proto line", file: "g.yaml", proxyfile: controlProto, want: []string{
+			controlRoot + `/o/v1/s.proto:18:3: the action "a\nb" contains a newline; no key or value may hold a control character other than tab`,
+			controlRoot + `/o/v1/s.proto:21:3: the action "a\rb" contains a carriage return; no key or value may hold a control character other than tab`,
+			controlRoot + `/o/v1/s.proto:24:3: the action "a\x00b" contains NUL; no key or value may hold a control character other than tab`,
+			controlRoot + `/o/v1/s.proto:27:3: the report "c\x01d" contains the control character U+0001; no key or value may hold a control character other than tab`,
 		}},
 		{name: "rpc.proto: a root with no .proto file, at the root", file: "g.yaml", proxyfile: noProtoFile,
-			want: []string{"g.yaml:29:19: the root " + emptyRoot + " holds no .proto file"}},
+			want: []string{"g.yaml:29:19: the root " + strconv.Quote(emptyRoot) + " holds no .proto file"}},
 		{name: "rpc.proto: an option no file defines, at the option key", file: "g.yaml", proxyfile: noOption, want: []string{
 			"g.yaml:31:5: no compiled file defines the option example.gateway.v1.nowhere; the compiled files are those under " +
 				"the roots that declare a service, and the files they import"}},
@@ -740,6 +742,81 @@ typed_per_filter_config:
 	}
 }
 
+// A route's retries and the rpc entry's retries write one retry policy: retried only when the request never reached
+// the service, and to a backend not tried yet when the service has another (the previous_hosts predicate, whose count
+// route-action.yaml explains), so a retry after a backend refused the connection reaches another backend. The full
+// example writes retries: 1 on the shop route and on its rpc entry, whose routes go to shop's two backends and to
+// accounts' one; a route without retries writes no policy.
+func TestRetryPolicy(t *testing.T) {
+	const policy = `{retry_on: "connect-failure,reset-before-request", num_retries: 1,
+  retry_host_predicate: [{name: envoy.retry_host_predicates.previous_hosts,
+    typed_config: {"@type": type.googleapis.com/envoy.extensions.retry.host.previous_hosts.v3.PreviousHostsPredicate}}],
+  host_selection_retry_max_attempts: 20}`
+	// 0 the refusal, 1 accounts-events, 2 to 4 the RPC routes (accounts, then shop's two), 5 accounts-webhooks, 6
+	// catalog, 7 shop.
+	routes := []any{"static_resources", "listeners", 0, "filter_chains", 0, "filters", 0, "typed_config", "route_config",
+		"virtual_hosts", 0, "routes"}
+	cases := []struct {
+		name  string
+		route int
+		want  string // the route's action
+	}{
+		{name: "a route's retries, to a service with two backends", route: 7,
+			want: "{cluster: shop_http, timeout: 0s, idle_timeout: 90s, retry_policy: " + policy + "}"},
+		{name: "the rpc entry's retries, to a service with two backends", route: 4,
+			want: "{cluster: shop_grpc, timeout: 0s, idle_timeout: 90s, retry_policy: " + policy + "}"},
+		{name: "the rpc entry's retries, to a service with one backend", route: 2,
+			want: `{cluster: accounts_grpc, host_rewrite_literal: "127.0.0.1:7070", timeout: 0s, idle_timeout: 90s, retry_policy: ` + policy + "}"},
+		{name: "a route without retries", route: 6, want: "{cluster: catalog_http, timeout: 0s, idle_timeout: 90s}"},
+	}
+	files, problems := render(requestFor(t, "full/yaml", "envoy.yaml"))
+	if problems != nil {
+		t.Fatalf("render problems = %q, want none", testsupport.ProblemStrings(problems))
+	}
+	tree := decode(t, files[0].Bytes)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := valueAt(tree, slices.Concat(routes, []any{c.route, "route"})...)
+			if d := firstDifference(decode(t, []byte(c.want)), got, ""); d != "" {
+				t.Error(d)
+			}
+		})
+	}
+}
+
+// Every answer says that it depends on the Origin, and with auth.ask no answer carries x-envoy-upstream-service-time:
+// Envoy's client for the check adds it to the check's answer, which a denial passes on with the check's own headers
+// (measured on Envoy 1.40.2), so the header mutation filter removes it from every answer. A gateway without auth.ask
+// has no source of it, and its filter is as before.
+func TestResponseMutations(t *testing.T) {
+	const vary = `{append: {header: {key: vary, value: Origin}, append_action: APPEND_IF_EXISTS_OR_ADD}}`
+	cases := []struct {
+		dir  string // an example folder, <example>/<form>
+		want string
+	}{
+		{dir: "full/yaml", want: "[" + vary + ", {remove: x-envoy-upstream-service-time}]"},
+		{dir: "minimal/yaml", want: "[" + vary + "]"},
+	}
+	filters := []any{"static_resources", "listeners", 0, "filter_chains", 0, "filters", 0, "typed_config", "http_filters"}
+	for _, c := range cases {
+		t.Run(c.dir, func(t *testing.T) {
+			files, problems := render(requestFor(t, c.dir, "envoy.yaml"))
+			if problems != nil {
+				t.Fatalf("render problems = %q, want none", testsupport.ProblemStrings(problems))
+			}
+			list := listAt(t, decode(t, files[0].Bytes), filters...)
+			i := slices.IndexFunc(list, func(filter any) bool { return valueAt(filter, "name") == "envoy.filters.http.header_mutation" })
+			if i < 0 {
+				t.Fatal("no envoy.filters.http.header_mutation filter")
+			}
+			got := valueAt(list[i], "typed_config", "mutations", "response_mutations")
+			if d := firstDifference(decode(t, []byte(c.want)), got, ""); d != "" {
+				t.Error(d)
+			}
+		})
+	}
+}
+
 // The first route of every virtual host answers 400 to a path that still holds a dot segment with a ; parameter after
 // normalisation, so no route of the file takes such a path: in a file with one environment and in the full example,
 // whose three environments each start with it.
@@ -925,7 +1002,8 @@ routes:
 - name: envoy.filters.http.header_mutation
   typed_config:
     "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutation
-    mutations: {response_mutations: [{append: {header: {key: vary, value: Origin}, append_action: APPEND_IF_EXISTS_OR_ADD}}]}
+    mutations: {response_mutations: [{append: {header: {key: vary, value: Origin}, append_action: APPEND_IF_EXISTS_OR_ADD}},
+      {remove: x-envoy-upstream-service-time}]}
 - {name: envoy.filters.http.rbac, typed_config: {"@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBAC}}
 - {name: envoy.filters.http.cors, typed_config: {"@type": type.googleapis.com/envoy.extensions.filters.http.cors.v3.Cors}}
 - name: envoy.filters.http.ext_authz

@@ -56,7 +56,7 @@ is deprecated (it goes in 3.5).
 | `routes[].to` | the cluster | `proxy_pass` | `use_backend` | core |
 | `routes[].rewrite` | a prefix rewrite | `rewrite`, or the URI on `proxy_pass` | `http-request replace-path` | core |
 | `routes[].auth = off` | the check and the token filter turned off for the route | a `location` without `auth_request` | an ACL that skips the check | core |
-| `routes[].retries`, `rpc.retries` | a retry policy with Envoy's conditions | `proxy_next_upstream` and `proxy_next_upstream_tries` | `retries` and `retry-on` | core; what "never reached the service" means differs by proxy |
+| `routes[].retries`, `rpc.retries` | a retry policy with Envoy's conditions, to a backend not tried yet when the service has one (the `previous_hosts` predicate) | `proxy_next_upstream` and `proxy_next_upstream_tries` | `retries` and `retry-on` | core; what "never reached the service" means differs by proxy |
 | `routes[].rate_limit`, `routes[].rpc.rate_limit` | the local rate limit filter, before the check, with one token bucket for each route, which the route's metadata names | a `limit_req_zone` for each route, keyed by `$binary_remote_addr`, or by a constant for `all`, with `rate=<requests>r/s` or `r/m`, so a `per` other than `1s` or `1m` is refused; `limit_req ... burst=<requests + burst - 1> nodelay` and `limit_req_status 429`, which a gRPC client reads as UNAVAILABLE and may retry | a `stick-table` storing `http_req_rate(<per>)`, `http-request track-sc0`, and `http-request deny deny_status 429 if { sc_http_req_rate(0) gt <requests> }`, a sliding window, so a `burst` above 0 is refused | core; nginx and HAProxy differ as their columns say |
 | the `rpc` entry of `routes`, `rpc.to`, `rpc.methods`, `rpc.proto` | one exact-path route for each method | a `location = /<package>.<Service>/<Method>` with `grpc_pass` for each method | a `path` ACL for each method, to an HTTP/2 backend | core |
 | the action and the reports each RPC route tells the check | the route's own check settings | in part: an auth `location` for each method, or a `map` | the script's variables | core; partial on nginx |
@@ -231,7 +231,7 @@ The rest belong to Envoy:
 | What | In the Envoy configuration | Class |
 |---|---|---|
 | The runtime switches | `gateway.ext_authz.enabled`, `gateway.request_log.min_status`, `gateway.request_log.sample`, `gateway.local_reply.origin_refused_status` and, with a `rate_limit`, `gateway.local_reply.rate_limited_status` | envoy |
-| The retry conditions | `connect-failure,reset-before-request` | envoy |
+| The retry conditions and the backend a retry goes to | `connect-failure,reset-before-request`, and the `previous_hosts` predicate with `host_selection_retry_max_attempts: 20` | envoy |
 | The local replies | `502` with an empty body when a service cannot be reached, `403` with `Invalid CORS request` for a refused origin, with `auth.ask`, `403` for a check's 2xx other than `200`, and, with a `rate_limit`, the Connect error `resource_exhausted` for a Connect call over a limit | envoy |
 | The Lua status fix | the Lua filter that sets Connect's current status on the bridge's errors, with `envoy.connect_bridge` | envoy |
 | The auth check's mode | `ext_authz` in HTTP mode | envoy |

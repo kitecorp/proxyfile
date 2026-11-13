@@ -88,11 +88,11 @@ func find(roots []Root) (map[string]*source, []string, []model.Problem) {
 	for _, root := range roots {
 		info, err := os.Stat(root.Dir)
 		if err != nil {
-			problems.Add(root.Pos, "the root %s cannot be read: %s", root.Dir, model.Reason(err))
+			problems.Add(root.Pos, "the root %q cannot be read: %s", root.Dir, model.Reason(err))
 			continue
 		}
 		if !info.IsDir() {
-			problems.Add(root.Pos, "the root %s is not a directory", root.Dir)
+			problems.Add(root.Pos, "the root %q is not a directory", root.Dir)
 			continue
 		}
 		count := 0
@@ -105,7 +105,7 @@ func find(roots []Root) (map[string]*source, []string, []model.Problem) {
 			// An import of the path always reads the first root's file, so nothing would read this one.
 			if first, seen := found[name]; seen {
 				problems.Add(model.Pos{File: s.file(name)},
-					"the import path %s is also under the root %s, which comes first in rpc.proto.roots", name, first.root)
+					"the import path %q is also under the root %q, which comes first in rpc.proto.roots", name, first.root)
 				return nil
 			}
 			found[name] = s
@@ -114,9 +114,9 @@ func find(roots []Root) (map[string]*source, []string, []model.Problem) {
 		})
 		switch {
 		case err != nil:
-			problems.Add(root.Pos, "the root %s cannot be read: %s", root.Dir, model.Reason(err))
+			problems.Add(root.Pos, "the root %q cannot be read: %s", root.Dir, model.Reason(err))
 		case count == 0:
-			problems.Add(root.Pos, "the root %s holds no .proto file", root.Dir)
+			problems.Add(root.Pos, "the root %q holds no .proto file", root.Dir)
 		}
 	}
 	return found, read, problems.Sorted()
@@ -219,7 +219,7 @@ func missingImports(sources map[string]*source, chosen []string) []model.Problem
 			}
 			at := s.ast.NodeInfo(imp.Name).Start()
 			problems.Add(model.Pos{File: s.file(name), Line: at.Line, Column: at.Col},
-				"the import %s is under no root of rpc.proto.roots and is not a standard google/protobuf file", path)
+				"the import %q is under no root of rpc.proto.roots and is not a standard google/protobuf file", path)
 		}
 	}
 	return problems.Sorted()
@@ -280,13 +280,17 @@ func withImports(files linker.Files) linker.Files {
 	return all
 }
 
-// routed returns each method of the compiled services that carries the option, sorted by path.
+// routed returns each method of the compiled services that carries the option, sorted by path, or the problems of the
+// methods whose action or report holds a control character other than tab. Those are refused here, at the method, as
+// the reader refuses one in any key or value of a file (model.Problems.RefuseControl), because the action and the
+// reports are read from the .proto files and never pass through that reader.
 func routed(sources map[string]*source, files linker.Files, s Source) ([]rpc.Method, []model.Problem) {
 	types := withImports(files).AsResolver()
 	route, err := option(types, s.Option)
 	if err != nil {
 		return nil, []model.Problem{{Pos: s.OptionPos, Message: err.Error()}}
 	}
+	var problems model.Problems
 	var methods []rpc.Method
 	for _, f := range files {
 		services := f.Services()
@@ -305,15 +309,21 @@ func routed(sources map[string]*source, files linker.Files, s Source) ([]rpc.Met
 				}
 				found := rpc.Method{Service: string(service.FullName()), Method: string(m.Name()),
 					Action: value.Get(route.action).String(), Pos: pos}
+				problems.RefuseControl(pos, "the action", found.Action)
 				if route.reports != nil {
 					list := value.Get(route.reports).List()
 					for k := range list.Len() {
-						found.Reports = append(found.Reports, list.Get(k).String())
+						report := list.Get(k).String()
+						found.Reports = append(found.Reports, report)
+						problems.RefuseControl(pos, "the report", report)
 					}
 				}
 				methods = append(methods, found)
 			}
 		}
+	}
+	if problems := problems.Sorted(); problems != nil {
+		return nil, problems
 	}
 	// The loop gives the methods file by file, each in the order written; the path in byte order is how rpc.Resolve
 	// sorts the routes.

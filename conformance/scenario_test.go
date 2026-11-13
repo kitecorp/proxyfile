@@ -11,8 +11,8 @@ import (
 
 // A scenario asserts only what every proxy must answer for the core keys it names: the status, which stub answered
 // and what it received, the headers that matter, grpc-status and a time window. It never asserts a local reply's
-// body or a header a proxy names after itself, which docs/portability.md classes as the proxy's own, so a new target
-// changes nothing here.
+// body, or that an answer carries a header a proxy names after itself, which docs/portability.md classes as the
+// proxy's own, so a new target changes nothing here. A row may assert such a header absent, which every proxy answers.
 type scenario struct {
 	name      string
 	keys      []string      // core key paths of the format the scenario exercises (format.CoreKeys spelling)
@@ -28,7 +28,11 @@ type exchange struct {
 	// repeat sends the request this many times back to back, and at least one answer after the first admitted must be
 	// what want asks. "At least one" because a bucket that refills while the requests go out may admit one of them.
 	repeat   int
-	admitted int // with repeat, the first admitted answers must be 200
+	admitted int  // with repeat, the first admitted answers must be 200
+	every    bool // with repeat, every answer must be what want asks, instead of at least one
+	// refusing names a backend container by its role, such as shop-2, that refuses connections on every port while
+	// the row's requests go out, as a backend that is down does (world.refuse).
+	refusing string
 }
 
 // request is what the battery sends to the proxy's listener.
@@ -52,6 +56,7 @@ type answer struct {
 	headers                         map[string]string // response headers that must hold exactly these values
 	grpcStatus                      string            // grpc-status from the trailers, or from the headers of a trailers-only answer
 	service                         string            // the stub that answered; "" means none may have
+	instance                        string            // the backend of service that answered; "" is not compared
 	port, proto, method, path, host string            // what that stub received; "" is not compared
 	received                        map[string]string // headers the stub received, with these values
 	absent                          []string          // headers the stub must not have received
@@ -94,7 +99,7 @@ func compare(want answer, got result) []string {
 		differ("service: got %q, want %q", e.Service, want.service)
 	}
 	for _, field := range []struct{ name, got, want string }{
-		{"port", e.Port, want.port}, {"proto", e.Proto, want.proto}, {"method", e.Method, want.method},
+		{"instance", e.Instance, want.instance}, {"port", e.Port, want.port}, {"proto", e.Proto, want.proto}, {"method", e.Method, want.method},
 		{"path", e.Path, want.path}, {"host", e.Host, want.host},
 	} {
 		if field.want != "" && field.got != field.want {

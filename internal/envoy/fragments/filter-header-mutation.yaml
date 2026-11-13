@@ -5,6 +5,18 @@
 # the first encoder filter (filter_manager.cc, commonEncodePrefix with no filter): every encoder filter sees it, the
 # route's headers never do. APPEND_IF_EXISTS_OR_ADD adds to a Vary the service sent, never replacing it.
 #
+# With auth.ask it also removes x-envoy-upstream-service-time from every answer. The router writes none
+# (suppress_envoy_headers, filter-router.yaml), but the router of Envoy's own client for the check always does: it is
+# made with suppress_envoy_headers false (Envoy 1.40.2, cluster_manager_impl.cc, async_client_router_config_), so the
+# check's answer carries the header, with Envoy's value in place of any the check sent, and a denial passes the check's
+# headers on to the client. A denial is ext_authz's sendLocalReply, which every encoder filter sees (the paragraph
+# above), so this filter, before ext_authz, removes it there. Measured on Envoy 1.40.2: a denial with 401 or 403, the
+# 403 for a check's 204 and a gRPC call's denial carried x-envoy-upstream-service-time: 0 without it and nothing with
+# it, and the check's own headers, content-type included, reached the client either way. The check's
+# allowed_client_headers would remove it too, but only by naming every header a denial may pass on: with a list, Envoy
+# passes the names listed and four of its own, so the check's content-type was replaced by Envoy's. A service's own
+# x-envoy-upstream-service-time, which a service behind another Envoy may send, is removed with it.
+#
 # Each RPC route's own entry of this filter adds its question for the check (x-gateway-action, x-gateway-reports). It
 # runs before ext_authz, because in HTTP mode ext_authz builds the check from the request's headers as they are when
 # it runs (ext_authz.cc, decodeHeaders), so it copies only a header already there; header_mutation.cc decodeHeaders
@@ -19,3 +31,6 @@ typed_config:
     - append:
         header: {key: vary, value: Origin}
         append_action: APPEND_IF_EXISTS_OR_ADD
+{{- if .Check}}
+    - remove: x-envoy-upstream-service-time
+{{- end}}

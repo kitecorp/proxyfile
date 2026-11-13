@@ -12,9 +12,25 @@ part, so a local setup may reach the gateway on any port. A browser request is a
 
 Any other browser origin is refused with `403`, preflights, requests and WebSocket upgrades alike, before CORS, the auth
 check or any service sees it. For an admitted origin the gateway answers every preflight itself, so none reaches a
-service or the check. On every other answer it sets `Access-Control-Allow-Origin`, and `Access-Control-Expose-Headers`
-when `expose_headers` is written, replacing any the service sent. The `max_age` lets a browser keep an admitted
-preflight, so an origin removed from the file may keep working that long in a browser that cached its preflight.
+service or the check.
+
+Only an origin that `origins` or `patterns` holds gets `Access-Control-Allow-Origin` and
+`Access-Control-Expose-Headers`. To such an origin every answer, its preflight's included, carries
+`Access-Control-Allow-Origin` with that origin, and `Access-Control-Expose-Headers` when `expose_headers` is written,
+replacing any the service sent. An origin on one of the environment's own hosts that neither holds is admitted without
+those two headers, also when its host and port are the request's own `Host`: its requests reach the service, and its
+preflight is answered `200` with `Access-Control-Allow-Methods`, `Access-Control-Allow-Headers` and
+`Access-Control-Max-Age` from `cors` but no `Access-Control-Allow-Origin`, so a browser does not act on them (the Fetch
+standard, "CORS check"). A browser needs no CORS header for a page's own origin, which it sends with some requests,
+such as a `POST`, so the gateway admits it. A page on another port or scheme of the same host is another origin to the
+browser, which refuses an answer without `Access-Control-Allow-Origin`; to let it read answers, write its origin in
+`origins` or `patterns`. Measured on Envoy 1.40.2 with the full example's `live` environment and `cors`:
+`https://www.example.com` to `api.example.com`, listed in `origins`, got both headers on its request and its preflight;
+`https://api.example.org` to `api.example.org`, and `https://api.example.org:8443` to `api.example.org:8443`, in
+neither list, got neither, and their preflights carried the other three.
+
+The `max_age` lets a browser keep an admitted preflight, so an origin removed from the file may keep working that long
+in a browser that cached its preflight.
 
 Each list is sorted in byte order and holds no value twice, so adding or removing a value changes one line.
 
@@ -73,9 +89,9 @@ like this:
 | Key | Meaning | Rule | Class |
 |---|---|---|---|
 | `cors` | The CORS settings every environment shares. | A mapping. | core |
-| `cors.allow_methods` | The value of Access-Control-Allow-Methods. | Text. It holds no NUL, newline or carriage return, which a header value cannot hold. | core |
-| `cors.allow_headers` | The value of Access-Control-Allow-Headers. | Text. It holds no NUL, newline or carriage return, which a header value cannot hold. | core |
-| `cors.expose_headers` | The value of Access-Control-Expose-Headers. | Text. It holds no NUL, newline or carriage return, which a header value cannot hold. | core |
+| `cors.allow_methods` | The value of Access-Control-Allow-Methods. | Text. | core |
+| `cors.allow_headers` | The value of Access-Control-Allow-Headers. | Text. | core |
+| `cors.expose_headers` | The value of Access-Control-Expose-Headers. | Text. | core |
 | `cors.max_age` | The value of Access-Control-Max-Age: how long a browser may keep a preflight answer. | A number of seconds. Written as text. | core |
 | `environments` | The environments, each with its hosts and the browser origins it admits. | Required. A list; each item is a mapping. At least one environment. | core |
 | `environments[].name` | The environment's name. | Required. Text. It names the environment's virtual host. Not empty, and not used by another environment. | core |

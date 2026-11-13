@@ -65,6 +65,15 @@ func TestRun(t *testing.T) {
 			}
 		}, args: "check <tmp>/yaml/proxyfile.yaml -o <tmp>/yaml/envoy.yaml", exit: 1,
 			stderr: "<tmp>/yaml/envoy.yaml differs from what proxyfile render writes\n"},
+		// A path that holds a control character is written quoted, as a problem's file is, so each message is one line.
+		{name: "a checked path that holds a newline", setup: copyMinimal,
+			args: "check <tmp>/yaml/proxyfile.yaml -o <tmp>/a\nb.yaml", exit: 1,
+			stderr: "\"<tmp>/a\\nb.yaml\" differs from what proxyfile render writes\n"},
+		{name: "a written path that holds a newline", setup: copyMinimal,
+			args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/a\nb/out.yaml", exit: 1,
+			stderr: "proxyfile render: open \"<tmp>/a\\nb/out.yaml\": no such file or directory\n"},
+		{name: "a flag that holds a newline", args: "render -a\nb", exit: 2,
+			stderr: "proxyfile render: flag provided but not defined: -a\\nb\n"},
 		{name: "render", setup: copyMinimal, args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/out.yaml",
 			also: func(t *testing.T, tmp string) {
 				if !bytes.Equal(testsupport.ReadFile(t, filepath.Join(tmp, "out.yaml")), testsupport.ReadFile(t, examples+"/minimal/yaml/envoy.yaml")) {

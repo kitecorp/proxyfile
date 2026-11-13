@@ -70,6 +70,9 @@ func TestBattery(t *testing.T) {
 					time.Sleep(s.quiet)
 					for _, e := range s.exchanges {
 						t.Run(e.name, func(t *testing.T) {
+							if e.refusing != "" {
+								w.refuse(t, e.refusing)
+							}
 							for _, difference := range sendRepeated(w, e) {
 								t.Error(difference)
 							}
@@ -83,8 +86,9 @@ func TestBattery(t *testing.T) {
 
 // sendRepeated sends e's request e.repeat times back to back, or once, and returns each way the answers differ from
 // the row: each of the first e.admitted answers that is not 200, and, when no later answer is what e.want asks, the
-// last one's differences. Back to back, one after the other on the same client, is how a rate limit's burst is sent,
-// so a failure of a repeated row also says how long its requests took: a runner too slow for the burst shows there.
+// last one's differences, or with e.every each later answer's differences. Back to back, one after the other on the
+// same client, is how a rate limit's burst is sent, so a failure of a repeated row also says how long its requests
+// took: a runner too slow for the burst shows there.
 func sendRepeated(w *world, e exchange) []string {
 	count := max(e.repeat, 1)
 	if e.admitted >= count {
@@ -101,6 +105,10 @@ func sendRepeated(w *world, e exchange) []string {
 			differences = append(differences, fmt.Sprintf("answer %d: error: %v", i, got.err))
 		case i <= e.admitted && got.status != http.StatusOK:
 			differences = append(differences, fmt.Sprintf("answer %d: got %d, want 200", i, got.status))
+		case i > e.admitted && e.every:
+			for _, difference := range compare(e.want, got) {
+				differences = append(differences, fmt.Sprintf("answer %d: %s", i, difference))
+			}
 		case i > e.admitted && !matched:
 			last = compare(e.want, got)
 			matched = last == nil

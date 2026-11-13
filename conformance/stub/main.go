@@ -3,12 +3,14 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"time"
 )
@@ -40,7 +42,7 @@ func usageError(problem string) {
 	os.Exit(2)
 }
 
-// serve answers on every port of one backend with the same handler.
+// serve answers on every port of one backend with the same handler, until a signal tells it to refuse connections.
 func serve(args []string) {
 	flags := flag.NewFlagSet("serve", flag.ExitOnError)
 	service := flags.String("service", "", "the service the echo names: shop, catalog or accounts")
@@ -60,14 +62,50 @@ func serve(args []string) {
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
 	errs := make(chan error)
-	for _, port := range strings.Split(*ports, ",") {
-		server := &http.Server{Addr: ":" + port, Handler: handler, Protocols: &protocols}
-		go func() { errs <- server.ListenAndServe() }()
+	listen := func() []*http.Server {
+		var servers []*http.Server
+		for _, port := range strings.Split(*ports, ",") {
+			server := &http.Server{Addr: ":" + port, Handler: handler, Protocols: &protocols}
+			// Only a signal closes a server, so one that returns for another reason has failed, and a backend
+			// missing a port must not go on.
+			go func() {
+				if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+					errs <- err
+				}
+			}()
+			servers = append(servers, server)
+		}
+		return servers
 	}
+	servers := listen()
 	fmt.Fprintf(os.Stderr, "stub %s/%s on %s\n", *service, *instance, *ports)
-	// No server is ever closed, so a server that returns has failed, and a backend missing a port must not go on.
-	fmt.Fprintln(os.Stderr, <-errs)
-	os.Exit(1)
+	// A row that needs a backend to refuse connections, as one that is down does, signals the container:
+	// refuseSignal closes every port and every open connection, so the kernel refuses the next connection with a
+	// reset, and acceptSignal opens the ports again. A closed http.Server cannot serve again, so acceptSignal starts
+	// new ones.
+	signals := make(chan os.Signal, 1)
+	if refuseSignal != nil {
+		signal.Notify(signals, refuseSignal, acceptSignal)
+	}
+	for {
+		select {
+		case err := <-errs:
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		case s := <-signals:
+			switch {
+			case s == refuseSignal && servers != nil:
+				for _, server := range servers {
+					server.Close()
+				}
+				servers = nil
+				fmt.Fprintf(os.Stderr, "stub %s/%s refuses connections\n", *service, *instance)
+			case s == acceptSignal && servers == nil:
+				servers = listen()
+				fmt.Fprintf(os.Stderr, "stub %s/%s on %s again\n", *service, *instance, *ports)
+			}
+		}
+	}
 }
 
 // dns answers the queries the proxy's resolver sends, from the records on the command line.
