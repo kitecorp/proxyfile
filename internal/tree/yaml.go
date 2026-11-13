@@ -69,7 +69,7 @@ func FromYAML(file string, data []byte) (*Node, []model.Problem) {
 	// go-yaml skips a leading byte order mark without counting a column for it (yaml_parser_determine_encoding in
 	// readerc.go), so the lines a column is counted in start after it.
 	c := converter{file: file, lines: bytes.Split(bytes.TrimPrefix(data, []byte("\uFEFF")), []byte("\n"))}
-	root := c.node(document.Content[0])
+	root := c.node(document.Content[0], 0)
 	if problems := c.Sorted(); problems != nil {
 		return nil, problems
 	}
@@ -84,8 +84,10 @@ type converter struct {
 	lines [][]byte
 }
 
-func (c *converter) node(n *yaml.Node) *Node {
-	c.refuseTag(n)
+// node converts n. indent is the column a later line of n must start after, which tells a tag on such a line that is
+// n's from one that starts the next key (bareTag); 0 lets a later line start anywhere.
+func (c *converter) node(n *yaml.Node, indent int) *Node {
+	c.refuseTag(n, indent)
 	switch n.Kind {
 	case yaml.ScalarNode:
 		// go-yaml tags every scalar that is not plain as a string (parser.scalar in decode.go), so a literal (|) or
@@ -100,8 +102,10 @@ func (c *converter) node(n *yaml.Node) *Node {
 		return &Node{Kind: Scalar, Text: scalarText(n), Quoted: quoted, NumberOrBool: numberOrBool, Pos: position(c.file, n)}
 	case yaml.SequenceNode:
 		list := &Node{Kind: List, Pos: position(c.file, n)}
+		// In a block list the next item starts with -, never with a tag, so a later line of an item needs only to
+		// start after the column the list's own lines start after.
 		for _, item := range n.Content {
-			list.Items = append(list.Items, c.node(item))
+			list.Items = append(list.Items, c.node(item, inFlow(n, indent)))
 		}
 		return list
 	case yaml.MappingNode:
@@ -122,8 +126,11 @@ func (c *converter) mapping(n *yaml.Node) *Node {
 	firstLine := map[string]int{}
 	for i := 0; i+1 < len(n.Content); i += 2 {
 		keyNode, valueNode := n.Content[i], n.Content[i+1]
-		key, keyOK := c.key(keyNode, firstLine)
-		value := c.node(valueNode)
+		// Every entry of a block mapping starts at one column, an explicit one at its ?, so a line that starts there or
+		// before is not the key's or the value's.
+		entryIndent := inFlow(n, c.keyColumn(n, keyNode))
+		key, keyOK := c.key(keyNode, firstLine, entryIndent)
+		value := c.node(valueNode, entryIndent)
 		if keyOK {
 			mapping.Entries = append(mapping.Entries, Entry{Key: key, KeyPos: position(c.file, keyNode), Value: value})
 		}
@@ -131,12 +138,31 @@ func (c *converter) mapping(n *yaml.Node) *Node {
 	return mapping
 }
 
-func (c *converter) key(n *yaml.Node, firstLine map[string]int) (string, bool) {
+// keyColumn returns the column the entries of the block mapping n start at, for the entry whose key is key: the column
+// of an explicit key's ?, or the key's own. The key of an explicit entry starts after its ? on the same line, so the ?
+// is the last character before it there; a mapping that starts at key itself, as the key of "? a: 1" does, holds no ?
+// of its own on that line.
+func (c *converter) keyColumn(n, key *yaml.Node) int {
+	if key.Line == n.Line && key.Column == n.Column {
+		return key.Column
+	}
+	text := c.chars(key.Line)
+	i := min(key.Column-2, len(text)-1)
+	for i >= 0 && blank(text[i]) {
+		i--
+	}
+	if i >= 0 && text[i] == '?' {
+		return i + 1
+	}
+	return key.Column
+}
+
+func (c *converter) key(n *yaml.Node, firstLine map[string]int, indent int) (string, bool) {
 	if n.Kind == yaml.AliasNode {
 		c.problem(n, aliasMessage)
 		return "", false
 	}
-	c.refuseTag(n)
+	c.refuseTag(n, indent)
 	if n.Kind != yaml.ScalarNode {
 		c.problem(n, "a key must be a single value")
 		return "", false
@@ -156,44 +182,109 @@ func (c *converter) key(n *yaml.Node, firstLine map[string]int) (string, bool) {
 }
 
 // go-yaml marks a node whose tag was written out with TaggedStyle (parser.node in decode.go), except the bare tag !,
-// which bareTag finds. The node is still converted, so problems inside a tagged mapping or list are reported in the
-// same run.
-func (c *converter) refuseTag(n *yaml.Node) {
-	if n.Style&yaml.TaggedStyle != 0 || c.bareTag(n) {
-		c.problem(n, tagMessage)
+// which only the text shows: parser.node sets TaggedStyle only for a tag that is not "!" (decode.go line 172) and
+// resolves a plain scalar from its text, so "listen: ! 8000" reads as the number 8000, where the tag makes it text
+// (YAML 1.2.2, section 10.3.2). Either tag is reported at n when it is on n's first line, and at the tag when it is on
+// a later line, so the problem names the line the tag is on. The node is still converted, so problems inside a tagged
+// mapping or list are reported in the same run.
+func (c *converter) refuseTag(n *yaml.Node, indent int) {
+	line, column, written := c.tagAt(n, indent)
+	if n.Style&yaml.TaggedStyle == 0 && !written {
+		return
 	}
+	if written && line != n.Line {
+		c.Add(model.Pos{File: c.file, Line: line, Column: column}, tagMessage)
+		return
+	}
+	c.problem(n, tagMessage)
 }
 
-// bareTag reports whether n is written with the bare tag !, which go-yaml drops without a mark: parser.node sets
-// TaggedStyle only for a tag that is not "!" (decode.go line 172) and resolves a plain scalar from its text, so
-// "listen: ! 8000" reads as the number 8000, where the tag makes it text (YAML 1.2.2, section 10.3.2). A node's
-// position is the start of its properties (yaml_parser_parse_node in parserc.go), so the text there is read: no other
-// node can start with !, because a plain scalar may not (YAML 1.2.2, section 7.3.3) and a quoted one starts with its
-// quote.
-func (c *converter) bareTag(n *yaml.Node) bool {
-	// An untagged block mapping starts where its first key does, so a tag there is the key's; a block list starts at
-	// its first -. Without this rule "!!str a: 1" would be reported twice, on the mapping and on its key.
+// tagAt returns the line and column of the tag written on n, and whether n's text has one there. A node's position is
+// the start of its properties (yaml_parser_parse_node in parserc.go), so the text there is read: no other node can
+// start with !, because a plain scalar may not (YAML 1.2.2, section 7.3.3) and a quoted one starts with its quote.
+//
+// An anchor may come before the tag, on the same line or on an earlier one with comments and blank lines between
+// (YAML 1.2.2, section 6.7), each line starting after indent. A line that does not is the next key's, as in "a: &x"
+// followed by "! b: 1", or what follows the list n is in.
+func (c *converter) tagAt(n *yaml.Node, indent int) (int, int, bool) {
+	// An untagged block mapping starts where its first key does, so the properties there are the key's; a block list
+	// starts at its first -. Without this rule "!!str a: 1" and "&a ! k: 1" would be reported twice, on the mapping and
+	// on its key.
 	if len(n.Content) > 0 && n.Content[0].Line == n.Line && n.Content[0].Column == n.Column {
-		return false
+		return 0, 0, false
 	}
-	if n.Line < 1 || n.Line > len(c.lines) {
-		return false
+	line, column := n.Line, n.Column
+	text := c.chars(line)
+	if column < 1 || column > len(text) {
+		return 0, 0, false
 	}
-	// go-yaml counts a column in characters, not in bytes.
-	line := []rune(string(c.lines[n.Line-1]))
-	if n.Column < 1 || n.Column > len(line) {
-		return false
-	}
-	rest := string(line[n.Column-1:])
-	// An anchor may come before the tag: & and its name, which runs to the next space or tab.
-	if strings.HasPrefix(rest, "&") {
-		end := strings.IndexAny(rest, " \t")
-		if end < 0 {
-			return false
+	if text[column-1] == '&' {
+		// go-yaml reads an anchor's name as letters, digits, _ and - only (yaml_parser_scan_anchor and is_alpha), so in
+		// "[&a, ! 1]" the comma ends the item and the tag is the next item's.
+		end := column
+		for end < len(text) && anchorChar(text[end]) {
+			end++
 		}
-		rest = strings.TrimLeft(rest[end:], " \t")
+		if line, column = c.textAfter(line, end+1); line == 0 || (line != n.Line && column <= indent) {
+			return 0, 0, false
+		}
 	}
-	return strings.HasPrefix(rest, "!")
+	if c.chars(line)[column-1] != '!' {
+		return 0, 0, false
+	}
+	// A mapping's anchor may stand on a line of its own, and its first key's tag start the next one.
+	if len(n.Content) > 0 && n.Content[0].Line == line && n.Content[0].Column == column {
+		return 0, 0, false
+	}
+	return line, column, true
+}
+
+// textAfter returns the line and column of the first character from column of line on, on that line or a later one,
+// that is not a space, a tab or part of a comment, or 0, 0 when the file ends first. It starts right after an anchor's
+// name, which go-yaml accepts only when a space, a tab, the line's end or one of ? : , ] } % @ ` follows it
+// (yaml_parser_scan_anchor), so a # it meets stands after a space or at a line's start, and starts a comment.
+func (c *converter) textAfter(line, column int) (int, int) {
+lines:
+	for ; line <= len(c.lines); line, column = line+1, 1 {
+		text := c.chars(line)
+		for i := column - 1; i < len(text); i++ {
+			switch {
+			case text[i] == '#':
+				continue lines
+			case !blank(text[i]):
+				return line, i + 1
+			}
+		}
+	}
+	return 0, 0
+}
+
+// chars returns line number line of the file as characters, in which go-yaml counts a column, or nil for a line the
+// file does not have.
+func (c *converter) chars(line int) []rune {
+	if line < 1 || line > len(c.lines) {
+		return nil
+	}
+	return []rune(string(c.lines[line-1]))
+}
+
+// blank reports whether r separates two things on a line: a space, a tab, or the carriage return a CRLF line ends with.
+func blank(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\r'
+}
+
+// anchorChar reports whether go-yaml reads r as part of an anchor's name (is_alpha in yamlprivateh.go).
+func anchorChar(r rune) bool {
+	return r >= '0' && r <= '9' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r == '_' || r == '-'
+}
+
+// inFlow returns the indent the children of n are converted with: column, unless n is written in braces or brackets,
+// where only a comma or the closing bracket ends a child, so a later line of a child's properties may start anywhere.
+func inFlow(n *yaml.Node, column int) int {
+	if n.Style&yaml.FlowStyle != 0 {
+		return 0
+	}
+	return column
 }
 
 func (c *converter) problem(n *yaml.Node, format string, args ...any) {

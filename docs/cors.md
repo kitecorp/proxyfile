@@ -7,8 +7,8 @@ with them, and when `origins` names a file, that file holds the settings instead
 | Key | Meaning | Rule | Class |
 |---|---|---|---|
 | `cors` | The CORS settings every environment shares. | A mapping. Not written when `origins` names a file, which holds its own `cors`. | core |
-| `cors.allow_methods` | The value of Access-Control-Allow-Methods. | Text. | core |
-| `cors.allow_headers` | The value of Access-Control-Allow-Headers. | Text. | core |
-| `cors.expose_headers` | The value of Access-Control-Expose-Headers. | Text. | core |
+| `cors.allow_methods` | The value of Access-Control-Allow-Methods. | Text. It holds no NUL, newline or carriage return, which a header value cannot hold. | core |
+| `cors.allow_headers` | The value of Access-Control-Allow-Headers. | Text. It holds no NUL, newline or carriage return, which a header value cannot hold. | core |
+| `cors.expose_headers` | The value of Access-Control-Expose-Headers. | Text. It holds no NUL, newline or carriage return, which a header value cannot hold. | core |
 | `cors.max_age` | The value of Access-Control-Max-Age: how long a browser may keep a preflight answer. | A number of seconds. Written as text. | core |
 <!-- /keys -->

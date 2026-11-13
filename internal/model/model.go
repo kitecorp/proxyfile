@@ -204,6 +204,24 @@ func (h Header) Covers(other Header) bool {
 	return !other.Prefix && h.Name == other.Name
 }
 
+// headerValueRefused names the three characters RFC 9110, section 5.5 calls invalid and dangerous in a field value
+// (it calls the other control characters invalid too), which are the ones Envoy's header value pattern,
+// ^[^\x00\n\r]*$, refuses.
+var headerValueRefused = []struct{ char, name string }{{"\x00", "NUL"}, {"\n", "a newline"}, {"\r", "a carriage return"}}
+
+// HeaderValueRefused names, in that order, each of NUL, a newline and a carriage return that value holds, or returns nil
+// when it holds none. proxyfile writes the RPC action and reports, the cors values and a route's rewrite into header
+// values as they are written, so each reader refuses these where its problem can name the value.
+func HeaderValueRefused(value string) []string {
+	var names []string
+	for _, refused := range headerValueRefused {
+		if strings.Contains(value, refused.char) {
+			names = append(names, refused.name)
+		}
+	}
+	return names
+}
+
 type MatchKind string
 
 const (

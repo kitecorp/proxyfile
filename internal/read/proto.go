@@ -1,6 +1,8 @@
 package read
 
 import (
+	"path/filepath"
+
 	"github.com/kitecorp/proxyfile/v2/internal/model"
 	"github.com/kitecorp/proxyfile/v2/internal/tree"
 )
@@ -16,10 +18,13 @@ type Proto struct {
 }
 
 // readProto reads rpc.proto, or returns nil when it is not written. The check has already made it a mapping with a
-// list of texts under roots and an option's full name. This adds the two rules the description cannot hold, because an
-// empty list gives no method, and a root written twice would read the same files twice. A root written twice is named
-// at the later place, which Roots leaves out.
-func readProto(root *tree.Node) (*Proto, []model.Problem) {
+// list of texts under roots and an option's full name. This adds the three rules the description cannot hold: an empty
+// list gives no method, a root written twice would read the same files twice, and a root inside another would compile
+// the files under it twice, once under each root's import path, where the compiler names every symbol in them as
+// defined twice. A root written twice is named at the later place, which Roots leaves out; a root inside another is
+// named at its own place, with the root it is inside, each as written. path is the proxyfile's path, which a relative
+// root is read beside.
+func readProto(root *tree.Node, path string) (*Proto, []model.Problem) {
 	entry := root.Get("rpc").Entry("proto")
 	if entry == nil {
 		return nil, nil
@@ -37,7 +42,26 @@ func readProto(root *tree.Node) (*Proto, []model.Problem) {
 			continue
 		}
 		first[item.Text] = item.Pos
+		for _, other := range proto.Roots {
+			switch {
+			case inside(path, item.Text, other.Value):
+				problems.Add(item.Pos, insideMessage, item.Text, other.Value)
+			case inside(path, other.Value, item.Text):
+				problems.Add(other.Pos, insideMessage, other.Value, item.Text)
+			}
+		}
 		proto.Roots = append(proto.Roots, model.Text{Value: item.Text, Pos: item.Pos})
 	}
 	return proto, problems.Sorted()
+}
+
+const insideMessage = "rpc.proto.roots: %s is inside %s"
+
+// inside reports whether the root dir is the root parent or under it, both read beside the proxyfile at path as
+// render.Read reads them (tree.Beside), so a relative root and an absolute one compare as the directories they name.
+// filepath.Rel cleans both and compares them by whole segments, so proto/ and ./proto are proto, and proto2 is beside
+// proto, not inside it.
+func inside(path, dir, parent string) bool {
+	rel, err := filepath.Rel(tree.Absolute(tree.Beside(path, parent)), tree.Absolute(tree.Beside(path, dir)))
+	return err == nil && filepath.IsLocal(rel)
 }

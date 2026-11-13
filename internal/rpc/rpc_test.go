@@ -120,6 +120,41 @@ func TestResolve(t *testing.T) {
 				`m.json:1:2: the report "a/b,c" of example.shop.v1.C/M contains a comma, the separator of x-gateway-reports`,
 				"m.json:1:74: the method example.shop.v1.C/M is listed twice (first on line 1)",
 			}},
+		// A character outside the Basic Multilingual Plane written as a pair of \u escapes, as Python's json.dumps writes
+		// it, in either case, is read as the one character, and the method after it on the line keeps its column. Half a
+		// pair encodes no character, so the file is still refused, on its line, as every syntax error is.
+		{name: "escaped surrogate pairs", proxyfile: single.String(),
+			methods: `[{"service": "example.shop.v1.C", "method": "M", "reports": ["\ud83d\ude00\uD83D\uDE00,c"]}, {"service": "example.shop.v1.C", "method": "M"}]`,
+			want: []string{
+				`m.json:1:2: the report "😀😀,c" of example.shop.v1.C/M contains a comma, the separator of x-gateway-reports`,
+				"m.json:1:94: the method example.shop.v1.C/M is listed twice (first on line 1)",
+			}},
+		{name: "a lone high surrogate", proxyfile: single.String(),
+			methods: "[\n" + `  {"service": "example.shop.v1.C", "method": "M", "action": "a\ud83d"}` + "\n]\n",
+			want:    []string{"m.json:2: found invalid Unicode character escape code"}},
+		{name: "a lone low surrogate", proxyfile: single.String(),
+			methods: "[\n" + `  {"service": "example.shop.v1.C", "method": "M", "action": "a\ude00b"}` + "\n]\n",
+			want:    []string{"m.json:2: found invalid Unicode character escape code"}},
+		// The route writes the action and the reports into header values, which may not hold NUL, a newline or a
+		// carriage return, so each of the three is refused at its method, in the action and in a report alike.
+		{name: "a newline", proxyfile: single.String(),
+			methods: `[{"service": "example.shop.v1.C", "method": "M", "action": "a\nb", "reports": ["c\nd"]}]`,
+			want: []string{
+				`m.json:1:2: the action "a\nb" of example.shop.v1.C/M contains a newline, which the header x-gateway-action cannot hold`,
+				`m.json:1:2: the report "c\nd" of example.shop.v1.C/M contains a newline, which the header x-gateway-reports cannot hold`,
+			}},
+		{name: "a carriage return", proxyfile: single.String(),
+			methods: `[{"service": "example.shop.v1.C", "method": "M", "action": "a\rb", "reports": ["c\rd"]}]`,
+			want: []string{
+				`m.json:1:2: the action "a\rb" of example.shop.v1.C/M contains a carriage return, which the header x-gateway-action cannot hold`,
+				`m.json:1:2: the report "c\rd" of example.shop.v1.C/M contains a carriage return, which the header x-gateway-reports cannot hold`,
+			}},
+		{name: "NUL", proxyfile: single.String(),
+			methods: `[{"service": "example.shop.v1.C", "method": "M", "action": "a\u0000b", "reports": ["c\u0000d"]}]`,
+			want: []string{
+				`m.json:1:2: the action "a\x00b" of example.shop.v1.C/M contains NUL, which the header x-gateway-action cannot hold`,
+				`m.json:1:2: the report "c\x00d" of example.shop.v1.C/M contains NUL, which the header x-gateway-reports cannot hold`,
+			}},
 		{name: "no rpc entry", example: "../../examples/minimal/yaml/proxyfile.yaml", methods: `[]`,
 			want: []string{"../../examples/minimal/yaml/proxyfile.yaml:8:1: RPC methods are given, but the routes have no rpc entry"}},
 		// Without an rpc entry no method has a target, but the rules of the methods themselves still run, so one run

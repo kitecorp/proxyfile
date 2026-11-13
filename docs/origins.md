@@ -73,9 +73,9 @@ like this:
 | Key | Meaning | Rule | Class |
 |---|---|---|---|
 | `cors` | The CORS settings every environment shares. | A mapping. | core |
-| `cors.allow_methods` | The value of Access-Control-Allow-Methods. | Text. | core |
-| `cors.allow_headers` | The value of Access-Control-Allow-Headers. | Text. | core |
-| `cors.expose_headers` | The value of Access-Control-Expose-Headers. | Text. | core |
+| `cors.allow_methods` | The value of Access-Control-Allow-Methods. | Text. It holds no NUL, newline or carriage return, which a header value cannot hold. | core |
+| `cors.allow_headers` | The value of Access-Control-Allow-Headers. | Text. It holds no NUL, newline or carriage return, which a header value cannot hold. | core |
+| `cors.expose_headers` | The value of Access-Control-Expose-Headers. | Text. It holds no NUL, newline or carriage return, which a header value cannot hold. | core |
 | `cors.max_age` | The value of Access-Control-Max-Age: how long a browser may keep a preflight answer. | A number of seconds. Written as text. | core |
 | `environments` | The environments, each with its hosts and the browser origins it admits. | Required. A list; each item is a mapping. At least one environment. | core |
 | `environments[].name` | The environment's name. | Required. Text. It names the environment's virtual host. Not empty, and not used by another environment. | core |

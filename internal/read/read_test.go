@@ -39,7 +39,8 @@ routes = [
 func TestReadProblems(t *testing.T) {
 	cases := []struct {
 		name string
-		// file is the name the document is written to, in a directory of its own; g.yaml when empty.
+		// file is the name the document is written to, in a directory of its own; g.yaml when empty. <dir> in document
+		// or want stands for that directory.
 		file, document string
 		// absent writes nothing, so the file does not exist.
 		absent bool
@@ -66,6 +67,14 @@ func TestReadProblems(t *testing.T) {
 			want: []string{`g.yaml:7:43: route "web" turns auth off, but no auth is declared`}},
 		{name: "rewrite with pattern", document: b.Replaced(7, 7, `  - {name: web, pattern: "^/a", to: web, rewrite: /b}`),
 			want: []string{`g.yaml:7:51: route "web": rewrite works with prefix or path, not with pattern`}},
+		// The rewrite replaces the request's path, the :path header, and Envoy 1.40.2 refuses a file whose prefix_rewrite
+		// holds NUL, a newline or a carriage return.
+		{name: "rewrite with a newline", document: b.Replaced(7, 7, `  - {name: web, prefix: /, to: web, rewrite: "/a\nb"}`),
+			want: []string{`g.yaml:7:46: route "web": the rewrite "/a\nb" contains a newline, which the header :path cannot hold`}},
+		{name: "rewrite with a carriage return", document: b.Replaced(7, 7, `  - {name: web, prefix: /, to: web, rewrite: "/a\rb"}`),
+			want: []string{`g.yaml:7:46: route "web": the rewrite "/a\rb" contains a carriage return, which the header :path cannot hold`}},
+		{name: "rewrite with NUL", document: b.Replaced(7, 7, `  - {name: web, prefix: /, to: web, rewrite: "/a\0b"}`),
+			want: []string{`g.yaml:7:46: route "web": the rewrite "/a\x00b" contains NUL, which the header :path cannot hold`}},
 		{name: "pattern does not compile", document: b.Replaced(7, 7, `  - {name: web, pattern: "^/(a", to: web}`),
 			want: []string{"g.yaml:7:26: route \"web\": the pattern does not compile: error parsing regexp: missing closing ): `^/(a`"}},
 		{name: "listen equals admin", document: b.Inserted(8, "admin: 8000"),
@@ -274,6 +283,25 @@ func TestReadProblems(t *testing.T) {
 				`g.conf: rpc.proto.roots[1]: the root "proto" is written twice (the first at rpc.proto.roots[0])`,
 				`g.conf: rpc.proto.roots[2]: the root "proto" is written twice (the first at rpc.proto.roots[0])`,
 			}},
+		// A root inside another would compile the files under it twice, once under each root's import path. Inside goes
+		// by whole segments of the cleaned paths, so a root written with ./ or a trailing / is the same directory, and
+		// one whose name only starts with another's is beside it.
+		{name: "root inside another", document: b.Inserted(8, "rpc: {proto: {roots: [proto, proto/example], option: o.v1.route}}"),
+			want: []string{`g.yaml:8:30: rpc.proto.roots: proto/example is inside proto`}},
+		{name: "root inside a later one", document: b.Inserted(8, "rpc: {proto: {roots: [./proto/example/, proto], option: o.v1.route}}"),
+			want: []string{`g.yaml:8:23: rpc.proto.roots: ./proto/example/ is inside proto`}},
+		{name: "one root written two ways", document: b.Inserted(8, "rpc: {proto: {roots: [proto, proto/], option: o.v1.route}}"),
+			want: []string{`g.yaml:8:30: rpc.proto.roots: proto/ is inside proto`}},
+		{name: "roots beside each other", document: b.Inserted(8, "rpc: {proto: {roots: [proto, proto2, ../proto, other/proto], option: o.v1.route}}")},
+		{name: "HOCON: root inside another", file: "g.conf", document: bHOCON + "rpc { proto { roots = [proto, proto/example], option = o.v1.route } }\n",
+			want: []string{`g.conf: rpc.proto.roots[1]: rpc.proto.roots: proto/example is inside proto`}},
+		// A relative root is read from the proxyfile's directory, so it is inside an absolute root, or holds one, as the
+		// directories read are. <dir> stands for the proxyfile's directory.
+		{name: "absolute root inside a relative one", document: b.Inserted(8, "rpc: {proto: {roots: [proto, <dir>/proto/example], option: o.v1.route}}"),
+			want: []string{`g.yaml:8:30: rpc.proto.roots: <dir>/proto/example is inside proto`}},
+		{name: "relative root inside an absolute one", document: b.Inserted(8, "rpc: {proto: {roots: [proto/example, <dir>/proto], option: o.v1.route}}"),
+			want: []string{`g.yaml:8:23: rpc.proto.roots: proto/example is inside <dir>/proto`}},
+		{name: "a relative root and an absolute one beside it", document: b.Inserted(8, "rpc: {proto: {roots: [proto, <dir>/proto2], option: o.v1.route}}")},
 		{name: "tracing in both places", document: b.Replaced(7, 7, "  - {name: web, prefix: /, to: web}",
 			"tracing: {provider: {xray: {segment: s}}}", "envoy: {tracing: {provider: {xray: {segment: s}}}}"),
 			want: []string{`g.yaml:9:9: write tracing or envoy.tracing, not both`}},
@@ -330,10 +358,13 @@ func TestReadProblems(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, cmp.Or(c.file, "g.yaml"))
 			if !c.absent {
-				testsupport.WriteFile(t, path, c.document)
+				testsupport.WriteFile(t, path, strings.ReplaceAll(c.document, "<dir>", dir))
 			}
 			file, problems := Proxyfile(path)
 			got := testsupport.ProblemStringsIn(dir, problems)
+			for i := range got {
+				got[i] = strings.ReplaceAll(got[i], dir, "<dir>")
+			}
 			if !slices.Equal(got, c.want) {
 				t.Errorf("problems = %q, want %q", got, c.want)
 			}

@@ -108,6 +108,14 @@ func TestReadProblems(t *testing.T) {
 				`o.json:1:69: environment "a": the origin "https://a.example/" is not scheme://host[:port] in lower case`,
 				`o.json:1:94: environment "a": the origin "https://b.example/" is not scheme://host[:port] in lower case`,
 			}},
+		// The CORS filter sends each cors value in a response header, whose value may not hold NUL, a newline or a
+		// carriage return; Envoy 1.40.2 loads a file with one there, so the browser would be the first to meet it.
+		{name: "cors value with a newline", file: `{"cors": {"allow_methods": "GET\nPOST"}, "environments": [{"name": "a", "hosts": ["x.example"]}]}`,
+			want: []string{`o.json:1:28: the value "GET\nPOST" of cors.allow_methods contains a newline, which the header Access-Control-Allow-Methods cannot hold`}},
+		{name: "cors value with a carriage return", file: `{"cors": {"allow_headers": "a\rb"}, "environments": [{"name": "a", "hosts": ["x.example"]}]}`,
+			want: []string{`o.json:1:28: the value "a\rb" of cors.allow_headers contains a carriage return, which the header Access-Control-Allow-Headers cannot hold`}},
+		{name: "cors value with NUL", file: `{"cors": {"expose_headers": "x\u0000y"}, "environments": [{"name": "a", "hosts": ["x.example"]}]}`,
+			want: []string{`o.json:1:29: the value "x\x00y" of cors.expose_headers contains NUL, which the header Access-Control-Expose-Headers cannot hold`}},
 		{name: "file missing", absent: true,
 			want: []string{`o.json: the file cannot be read: no such file or directory`}},
 	}
@@ -210,6 +218,13 @@ func TestInline(t *testing.T) {
 			problems: []string{`g.yaml:1:10: "origins" names no environment`}},
 		{name: "host in two environments", document: "origins: {a: {hosts: [x.example]}, b: {hosts: [x.example]}}\n",
 			problems: []string{`g.yaml:1:48: environment "b": the host "x.example" is in two environments`}},
+		{name: "cors values a header cannot hold",
+			document: "cors: {allow_methods: \"GET\\nPOST\", allow_headers: \"a\\rb\", expose_headers: \"x\\0y\"}\norigins: {a: {hosts: [x.example]}}\n",
+			problems: []string{
+				`g.yaml:1:23: the value "GET\nPOST" of cors.allow_methods contains a newline, which the header Access-Control-Allow-Methods cannot hold`,
+				`g.yaml:1:51: the value "a\rb" of cors.allow_headers contains a carriage return, which the header Access-Control-Allow-Headers cannot hold`,
+				`g.yaml:1:75: the value "x\x00y" of cors.expose_headers contains NUL, which the header Access-Control-Expose-Headers cannot hold`,
+			}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
