@@ -127,6 +127,14 @@ func (r *rules) route(route *model.Route, earlier []*model.Route) {
 	if route.AuthOff != nil && r.g.Auth == nil && r.g.JWT == nil {
 		r.Add(route.AuthOff.Pos, "route %q turns auth off, but no auth is declared", name)
 	}
+	// The rewrite replaces the request's path, which Envoy holds as the :path header and refuses in a file when it holds
+	// NUL, a newline or a carriage return (RouteAction's prefix_rewrite, ^[^\x00\n\r]*$, measured on Envoy 1.40.2).
+	if route.Rewrite != nil {
+		for _, refused := range model.HeaderValueRefused(route.Rewrite.Value) {
+			r.Add(route.Rewrite.Pos, "route %q: the rewrite %q contains %s, which the header :path cannot hold",
+				name, route.Rewrite.Value, refused)
+		}
+	}
 	if route.Match != model.Pattern {
 		return
 	}

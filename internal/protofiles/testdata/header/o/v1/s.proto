@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package o.v1;
+
+import "google/protobuf/descriptor.proto";
+
+message Route {
+  string action = 1;
+}
+
+extend google.protobuf.MethodOptions {
+  Route route = 50000;
+}
+
+// Each action holds one of the three characters a header value may not hold.
+service S {
+  rpc Newline(Empty) returns (Empty) {
+    option (o.v1.route) = {action: "a\nb"};
+  }
+  rpc Return(Empty) returns (Empty) {
+    option (o.v1.route) = {action: "a\rb"};
+  }
+  rpc Nul(Empty) returns (Empty) {
+    option (o.v1.route) = {action: "a\000b"};
+  }
+}
+
+message Empty {}

@@ -40,8 +40,8 @@ func grpcPath(m Method) string {
 
 // ReadMethods reads the methods file at path, which is JSON read as YAML so that a problem names its line. It
 // returns the problems of the first step that finds any: reading the file, its syntax, then the format check. Every
-// rule of the methods is Resolve's, the two that need no proxyfile included (a report holding a comma, a method
-// listed twice), so one run names the problems of both kinds.
+// rule of the methods is Resolve's, those that need no proxyfile included (a report holding a comma, an action or a
+// report a header value cannot hold, a method listed twice), so one run names the problems of both kinds.
 func ReadMethods(path string) ([]Method, []model.Problem) {
 	root, problems := input.Checked(path, format.Methods)
 	if problems != nil {
@@ -100,6 +100,7 @@ func Resolve(g *model.Gateway, methods []Method) ([]Route, []model.Problem) {
 		} else {
 			first[path] = method.Pos
 		}
+		refuseHeaderCharacters(&problems, method, "action", method.Action, "x-gateway-action")
 		// The route sends the reports to the check as one header value, joined by commas, so a report holding a comma
 		// would arrive as two.
 		for _, report := range method.Reports {
@@ -107,6 +108,7 @@ func Resolve(g *model.Gateway, methods []Method) ([]Route, []model.Problem) {
 				problems.Add(method.Pos, "the report %q of %s/%s contains a comma, the separator of x-gateway-reports",
 					report, method.Service, method.Method)
 			}
+			refuseHeaderCharacters(&problems, method, "report", report, "x-gateway-reports")
 		}
 		if entry == nil {
 			continue
@@ -125,6 +127,17 @@ func Resolve(g *model.Gateway, methods []Method) ([]Route, []model.Problem) {
 	// No two routes share a path, because a method listed twice is refused above.
 	slices.SortFunc(routes, func(a, b Route) int { return strings.Compare(a.Path(), b.Path()) })
 	return routes, nil
+}
+
+// refuseHeaderCharacters adds a problem at the method for each of NUL, a newline and a carriage return that value
+// holds (model.HeaderValueRefused); what names the value, and header the header it is sent in. The route writes the action and the reports into header values
+// as they are, and Envoy refuses a file with one of these there (its HeaderValue pattern, ^[^\x00\n\r]*$), so they
+// are refused here, where the problem can name the method.
+func refuseHeaderCharacters(problems *model.Problems, method Method, what, value, header string) {
+	for _, name := range model.HeaderValueRefused(value) {
+		problems.Add(method.Pos, "the %s %q of %s/%s contains %s, which the header %s cannot hold",
+			what, value, method.Service, method.Method, name, header)
+	}
 }
 
 // targetOf tries the targets in the written order and keeps the best that matches service, or returns nil.

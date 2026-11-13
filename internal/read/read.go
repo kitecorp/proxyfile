@@ -52,7 +52,7 @@ func Proxyfile(path string) (*File, []model.Problem) {
 		return nil, problems
 	}
 	inline, originsProblems := readOrigins(root)
-	proto, protoProblems := readProto(root)
+	proto, protoProblems := readProto(root, path)
 	if problems := slices.Concat(meaning(g), originsProblems, protoProblems); len(problems) > 0 {
 		model.SortProblems(problems)
 		return nil, problems

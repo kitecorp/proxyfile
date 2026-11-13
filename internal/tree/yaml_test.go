@@ -134,6 +134,37 @@ func TestFromYAMLProblems(t *testing.T) {
 		// The bare tag ! leaves no mark on the node go-yaml returns (decode.go, parser.node), so it is found in the text.
 		{"bare tag", "v: ! 8000\n", []string{"g.yaml:1:4: tags are not read; write the value without the tag"}},
 		{"bare tag after an anchor", "v: &a ! x\n", []string{"g.yaml:1:4: tags are not read; write the value without the tag"}},
+		// A node's properties may go on over lines, past comments and blank lines, while each line starts past the
+		// column of the key or the - the node belongs to; a ! at that column or before is the next key's, reported once.
+		{"bare tag on the line after an anchor", "v: &a\n  ! 8000\n", []string{"g.yaml:2:3: tags are not read; write the value without the tag"}},
+		{"bare tag after an anchor, a comment and a blank line", "v: &a # c\n\n  ! 8000\n",
+			[]string{"g.yaml:3:3: tags are not read; write the value without the tag"}},
+		{"bare tag on the line after an anchor, in a list", "v:\n  - &a\n    ! 8000\n",
+			[]string{"g.yaml:3:5: tags are not read; write the value without the tag"}},
+		{"bare tag on the line after an anchor, in braces", "v: {a: &a\n  ! 8000}\n",
+			[]string{"g.yaml:2:3: tags are not read; write the value without the tag"}},
+		{"the next key's bare tag after an anchor", "a: &x\n! b: 1\n", []string{"g.yaml:2:1: tags are not read; write the value without the tag"}},
+		{"the next key's bare tag after an anchor in a list", "a:\n  - &x\n! b: 1\n",
+			[]string{"g.yaml:3:1: tags are not read; write the value without the tag"}},
+		{"the first key's bare tag after a mapping's anchor", "a: &x\n  ! b: 1\n",
+			[]string{"g.yaml:2:3: tags are not read; write the value without the tag"}},
+		// go-yaml ends an anchor's name at the first character that is not a letter, a digit, _ or -, so a comma there
+		// ends the item, and the ! after it is the next item's.
+		{"the next item's bare tag after an anchor in brackets", "v: [&a, ! 1]\n",
+			[]string{"g.yaml:1:9: tags are not read; write the value without the tag"}},
+		{"the next item's bare tag on the line after an anchor in brackets", "v: [&a,\n  ! 1]\n",
+			[]string{"g.yaml:2:3: tags are not read; write the value without the tag"}},
+		// A block mapping starts where its first key does, so an anchor and a tag there are the key's, reported once.
+		{"a key's anchor and bare tag", "&a ! k: 1\n", []string{"g.yaml:1:1: tags are not read; write the value without the tag"}},
+		{"a key's anchor and tag", "&a !!str k: 1\n", []string{"g.yaml:1:1: tags are not read; write the value without the tag"}},
+		{"a nested key's anchor and bare tag", "v:\n  &a ! k: 1\n", []string{"g.yaml:2:3: tags are not read; write the value without the tag"}},
+		// Every tag on a line after the anchor is reported at the tag, bare or not.
+		{"tag on the line after an anchor", "v: &a\n  !!str 8000\n", []string{"g.yaml:2:3: tags are not read; write the value without the tag"}},
+		// An explicit key, and its value, go on over lines past the column of the ?, not of the key.
+		{"bare tag on the line after an explicit key's anchor", "? &a\n  ! k\n: 1\n",
+			[]string{"g.yaml:2:3: tags are not read; write the value without the tag"}},
+		{"bare tag on the line after the anchor of an explicit key's value", "? k\n: &v\n  ! 1\n",
+			[]string{"g.yaml:3:3: tags are not read; write the value without the tag"}},
 		{"bare tag on a key", "! k: 1\n", []string{"g.yaml:1:1: tags are not read; write the value without the tag"}},
 		{"bare tag on a mapping", "v: !\n  a: 1\n", []string{"g.yaml:1:4: tags are not read; write the value without the tag"}},
 		// go-yaml counts no column for a byte order mark (yaml_parser_determine_encoding in readerc.go).

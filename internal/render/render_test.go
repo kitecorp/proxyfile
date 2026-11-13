@@ -320,6 +320,13 @@ func TestInlineMethods(t *testing.T) {
 	}
 	noProtoFile := partialYAML + "rpc:\n  proto: {roots: [" + emptyRoot + "], option: example.gateway.v1.route}\n"
 	noOption := partialYAML + "rpc:\n  proto:\n    roots: [" + protoRoot + "]\n    option: example.gateway.v1.nowhere\n"
+	// A tree whose actions each hold a character a header value may not hold, which the partial example's "*" mapping
+	// routes.
+	headerRoot, err := filepath.Abs("../protofiles/testdata/header")
+	if err != nil {
+		t.Fatal(err)
+	}
+	headerProto := partialYAML + "rpc:\n  proto: {roots: [" + headerRoot + "], option: o.v1.route}\n"
 	cases := []struct {
 		name, file, proxyfile string // proxyfile is written to file in a temporary directory
 		rpcMethods            string // given as --rpc-methods when set
@@ -337,6 +344,11 @@ func TestInlineMethods(t *testing.T) {
 		{name: "rpc.proto: a method no mapping matches, at its .proto line", file: "g.yaml", proxyfile: unmatched, want: []string{
 			formsRoot + "/o/v1/s.proto:8:3: no rpc mapping matches o.v1.S",
 			formsRoot + "/o/v1/s.proto:12:3: no rpc mapping matches o.v1.S",
+		}},
+		{name: "rpc.proto: an action a header value may not hold, at its .proto line", file: "g.yaml", proxyfile: headerProto, want: []string{
+			headerRoot + `/o/v1/s.proto:17:3: the action "a\nb" of o.v1.S/Newline contains a newline, which the header x-gateway-action cannot hold`,
+			headerRoot + `/o/v1/s.proto:20:3: the action "a\rb" of o.v1.S/Return contains a carriage return, which the header x-gateway-action cannot hold`,
+			headerRoot + `/o/v1/s.proto:23:3: the action "a\x00b" of o.v1.S/Nul contains NUL, which the header x-gateway-action cannot hold`,
 		}},
 		{name: "rpc.proto: a root with no .proto file, at the root", file: "g.yaml", proxyfile: noProtoFile,
 			want: []string{"g.yaml:29:19: the root " + emptyRoot + " holds no .proto file"}},

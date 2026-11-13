@@ -49,7 +49,7 @@ pattern matches is a problem.
 | `routes[].pattern` | Matches paths by this regular expression, in RE2 syntax. | A regular expression that is not empty. It must compile. Exactly one of `prefix`, `path` and `pattern` is written. | core |
 | `routes[].method` | Matches only requests with this HTTP method. | An HTTP method in capitals, such as POST. | core |
 | `routes[].to` | The service the route goes to. | Required. Lower-case letters, digits and -, starting with a letter. A declared service with an `http` port. | core |
-| `routes[].rewrite` | Replaces the matched prefix or path before the request goes to the service. | A path starting with /. Not allowed with `pattern`. | core |
+| `routes[].rewrite` | Replaces the matched prefix or path before the request goes to the service. | A path starting with /. Not allowed with `pattern`. It holds no NUL, newline or carriage return, which a header value cannot hold. | core |
 | `routes[].auth` | off sends the route's requests to the service without auth's checks: no service is asked and no token is verified. | `off`. Needs an `auth` key. | core |
 | `routes[].retries` | How many times a request that never reached the service is tried again. | A whole number from 0 to 4294967295. | core |
 | `routes[].rate_limit` | How many requests the route admits in a period; a request over the limit is answered 429 and never reaches the service. | A mapping. One limit for the route's copy in every environment. | core |
