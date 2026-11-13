@@ -541,14 +541,17 @@ typed_extension_protocol_options:
 `},
 		{name: "dns, catalog's cluster", dir: "dns/yaml", at: []any{"static_resources", "clusters", 0}, want: `
 name: catalog_http
-type: STRICT_DNS
-dns_lookup_family: ALL
-lb_policy: RING_HASH
-typed_dns_resolver_config:
-  name: envoy.network.dns_resolver.cares
+cluster_type:
+  name: envoy.cluster.dns
   typed_config:
-    "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
-    resolvers: [{socket_address: {address: 10.0.0.2, port_value: 53}}]
+    "@type": type.googleapis.com/envoy.extensions.clusters.dns.v3.DnsCluster
+    dns_lookup_family: ALL
+    typed_dns_resolver_config:
+      name: envoy.network.dns_resolver.cares
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+        resolvers: [{socket_address: {address: 10.0.0.2, port_value: 53}}]
+lb_policy: RING_HASH
 load_assignment:
   cluster_name: catalog_http
   endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: catalog.internal.example, port_value: 8080}}}}]}]
@@ -560,14 +563,17 @@ typed_extension_protocol_options:
 `},
 		{name: "dns, search's cluster", dir: "dns/yaml", at: []any{"static_resources", "clusters", 1}, want: `
 name: search_http
-type: STRICT_DNS
-dns_lookup_family: ALL
-lb_policy: RING_HASH
-typed_dns_resolver_config:
-  name: envoy.network.dns_resolver.cares
+cluster_type:
+  name: envoy.cluster.dns
   typed_config:
-    "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
-    resolvers: [{socket_address: {address: 10.0.0.2, port_value: 53}}]
+    "@type": type.googleapis.com/envoy.extensions.clusters.dns.v3.DnsCluster
+    dns_lookup_family: ALL
+    typed_dns_resolver_config:
+      name: envoy.network.dns_resolver.cares
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+        resolvers: [{socket_address: {address: 10.0.0.2, port_value: 53}}]
+lb_policy: RING_HASH
 load_assignment:
   cluster_name: search_http
   endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: search.internal.example, port_value: 8090}}}}]}]
@@ -650,8 +656,11 @@ provider:
 `},
 		{name: "otel, the collector's cluster", dir: "otel/yaml", at: []any{"static_resources", "clusters", 1}, want: `
 name: otel_collector
-type: STRICT_DNS
-dns_lookup_family: ALL
+cluster_type:
+  name: envoy.cluster.dns
+  typed_config:
+    "@type": type.googleapis.com/envoy.extensions.clusters.dns.v3.DnsCluster
+    dns_lookup_family: ALL
 load_assignment:
   cluster_name: otel_collector
   endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: otel-collector, port_value: 4317}}}}]}]
@@ -1033,7 +1042,7 @@ provider:
 		// The collector's name is asked of dns.resolver, as a service's address is.
 		{name: "otel endpoint by name, the resolver", proxyfile: tracingBase + "dns: {resolver: \"10.0.0.2:53\"}\n" +
 			`tracing: {provider: {otel: {endpoint: "collector.internal:4317", service: s}}}` + "\n",
-			at:   []any{"static_resources", "clusters", 1, "typed_dns_resolver_config", "typed_config", "resolvers"},
+			at:   []any{"static_resources", "clusters", 1, "cluster_type", "typed_config", "typed_dns_resolver_config", "typed_config", "resolvers"},
 			want: `[{socket_address: {address: 10.0.0.2, port_value: 53}}]`},
 		{name: "otel, an RPC route names its span", proxyfile: rpcWithoutAuth + `tracing: {provider: {otel: {endpoint: "127.0.0.1:4317", service: s}}}` + "\n",
 			methods: rpcMethod, at: slices.Concat(manager, []any{"route_config", "virtual_hosts", 0, "routes", 1}), want: `
@@ -1099,8 +1108,11 @@ routes:
 `,
 			methods: rpcMethod, at: []any{"static_resources", "clusters", 0}, want: `
 name: q_grpc
-type: STRICT_DNS
-dns_lookup_family: ALL
+cluster_type:
+  name: envoy.cluster.dns
+  typed_config:
+    "@type": type.googleapis.com/envoy.extensions.clusters.dns.v3.DnsCluster
+    dns_lookup_family: ALL
 lb_policy: RING_HASH
 load_assignment:
   cluster_name: q_grpc
@@ -1271,13 +1283,16 @@ rules:
 `},
 		{name: "jwt keys by URL, the keys' cluster", proxyfile: jwtByURL, at: []any{"static_resources", "clusters", 1}, want: `
 name: jwks
-type: STRICT_DNS
-dns_lookup_family: ALL
-typed_dns_resolver_config:
-  name: envoy.network.dns_resolver.cares
+cluster_type:
+  name: envoy.cluster.dns
   typed_config:
-    "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
-    resolvers: [{socket_address: {address: 10.0.0.2, port_value: 53}}]
+    "@type": type.googleapis.com/envoy.extensions.clusters.dns.v3.DnsCluster
+    dns_lookup_family: ALL
+    typed_dns_resolver_config:
+      name: envoy.network.dns_resolver.cares
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+        resolvers: [{socket_address: {address: 10.0.0.2, port_value: 53}}]
 load_assignment:
   cluster_name: jwks
   endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: login.example.com, port_value: 443}}}}]}]
