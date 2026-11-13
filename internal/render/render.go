@@ -3,7 +3,10 @@
 package render
 
 import (
+	"cmp"
+
 	"github.com/kitecorp/proxyfile/v2/internal/envoy"
+	"github.com/kitecorp/proxyfile/v2/internal/format"
 	"github.com/kitecorp/proxyfile/v2/internal/model"
 	"github.com/kitecorp/proxyfile/v2/internal/origins"
 	"github.com/kitecorp/proxyfile/v2/internal/protofiles"
@@ -12,7 +15,9 @@ import (
 	"github.com/kitecorp/proxyfile/v2/internal/tree"
 )
 
-type Request struct{ Proxyfile, Out, RPCMethods, RPCTable string } // RPCMethods, RPCTable "" when not given
+// Request is the files and the target of one run. RPCMethods and RPCTable are "" when not given, and a Target of "" is
+// envoy.
+type Request struct{ Proxyfile, Out, RPCMethods, RPCTable, Target string }
 
 type File struct {
 	Path  string
@@ -29,15 +34,25 @@ type Run struct {
 
 // Read reads every input of req and returns them ready to generate, or every problem it finds.
 //
-// The proxyfile is read first, because every other input is read against it. Then the origins file, when the
-// proxyfile names one instead of writing the origins, the RPC methods and the rpc-entry rule run together, so one run
-// names the problems of all three. The methods are the proxyfile's rpc.methods when it writes them, those of the
-// .proto files under the roots of rpc.proto when it writes that, and the --rpc-methods file otherwise; giving the
-// flag as well is a problem, because one list would be ignored. A relative origins path or root is read from the
-// proxyfile's own directory, and an absolute one as written (tree.Beside says why).
+// The proxyfile is read first, because every other input is read against it, and a key the target refuses ends the
+// run there, because no other input can make the target carry it. Then the origins file, when the proxyfile names
+// one instead of writing the origins, the RPC methods and the rpc-entry rule run together, so one run names the
+// problems of all three, the keys the target refuses in the origins file and the methods file among them. The methods
+// are the proxyfile's rpc.methods when it writes them, those of the .proto files under the roots of rpc.proto when it
+// writes that, and the --rpc-methods file otherwise; giving the flag as well is a problem, because one list would be
+// ignored. A relative origins path or root is read from the proxyfile's own directory, and an absolute one as written
+// (tree.Beside says why).
 func Read(req Request) (*Run, []model.Problem) {
+	name := cmp.Or(req.Target, "envoy")
+	target, known := format.TargetNamed(name)
+	if !known {
+		return nil, model.FileProblem(req.Proxyfile, "--target "+name+": "+format.NoGenerator(name))
+	}
 	proxyfile, problems := read.Proxyfile(req.Proxyfile)
 	if problems != nil {
+		return nil, problems
+	}
+	if problems := format.Refusals(format.Proxyfile, proxyfile.Tree, target); problems != nil {
 		return nil, problems
 	}
 	g, file := proxyfile.Gateway, proxyfile.Origins
@@ -45,7 +60,11 @@ func Read(req Request) (*Run, []model.Problem) {
 	var all []model.Problem
 	if file == nil {
 		originsPath := tree.Beside(req.Proxyfile, g.Origins.Value)
-		file, problems = origins.Read(originsPath)
+		var root *tree.Node
+		file, root, problems = origins.Read(originsPath)
+		if problems == nil {
+			problems = format.Refusals(format.Origins, root, target)
+		}
 		all = append(all, problems...)
 		inputPaths = append(inputPaths, originsPath)
 	}
@@ -74,9 +93,10 @@ func Read(req Request) (*Run, []model.Problem) {
 		}
 		all = append(all, problems...)
 	case req.RPCMethods != "":
-		methods, problems := rpc.ReadMethods(req.RPCMethods)
+		methods, root, problems := rpc.ReadMethods(req.RPCMethods)
 		if problems == nil {
 			routes, problems = rpc.Resolve(g, methods)
+			problems = append(problems, format.Refusals(format.Methods, root, target)...)
 		}
 		all = append(all, problems...)
 		inputPaths = append(inputPaths, req.RPCMethods)

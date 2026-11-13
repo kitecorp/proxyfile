@@ -27,8 +27,9 @@ const usage = `usage: proxyfile render [<file>] -o <output> [--target envoy] [--
 // the messages list them.
 var defaultNames = []string{"Proxyfile", "proxyfile.conf", "proxyfile.yaml", "proxyfile.yml"}
 
-// targets are the proxies --target names, in the order a message lists them. proxyfile has a generator for envoy alone
-// in this version, and refuses the other two by name rather than write an Envoy file for a gateway meant for them.
+// targets are the proxies --target names, in the order a message lists them. The ones with a generator are those
+// format.Targets declares, envoy alone in this version, and the others are refused by name rather than given an Envoy
+// file for a gateway meant for them.
 var targets = []string{"envoy", "nginx", "haproxy"}
 
 // The exit codes: done, a problem in the input or a difference check found, and wrong usage.
@@ -124,7 +125,7 @@ func request(command string, args []string) (render.Request, error) {
 		return render.Request{}, errors.New("give exactly one file")
 	case !slices.Contains(targets, *target):
 		return render.Request{}, fmt.Errorf("--target must be %s, not %q", orList(targets), *target)
-	case *target != "envoy":
+	case !hasGenerator(*target):
 		return render.Request{}, fmt.Errorf("--target %s: %s", *target, format.NoGenerator(*target))
 	}
 	if len(files) == 0 {
@@ -134,7 +135,14 @@ func request(command string, args []string) (render.Request, error) {
 		}
 		files = []string{file}
 	}
-	return render.Request{Proxyfile: files[0], Out: *out, RPCMethods: *methods, RPCTable: *table}, nil
+	return render.Request{Proxyfile: files[0], Out: *out, RPCMethods: *methods, RPCTable: *table, Target: *target}, nil
+}
+
+// hasGenerator reports whether format.Targets declares the target, the one list of the targets with a generator,
+// which render.Read reads too.
+func hasGenerator(target string) bool {
+	_, declared := format.TargetNamed(target)
+	return declared
 }
 
 // defaultFile returns the one name of defaultNames that is a regular file in the working directory. Two or more are

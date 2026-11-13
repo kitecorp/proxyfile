@@ -126,7 +126,7 @@ func TestReadProblems(t *testing.T) {
 			if !c.absent {
 				testsupport.WriteFile(t, path, c.file)
 			}
-			file, problems := Read(path)
+			file, _, problems := Read(path)
 			if got := testsupport.ProblemStringsIn(dir, problems); !slices.Equal(got, c.want) {
 				t.Errorf("problems = %q, want %q", got, c.want)
 			}
@@ -178,7 +178,7 @@ func TestRead(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "o.json")
 			testsupport.WriteFile(t, path, c.file)
-			got, problems := Read(path)
+			got, _, problems := Read(path)
 			if problems != nil {
 				t.Fatalf("problems = %q, want none", testsupport.ProblemStrings(problems))
 			}

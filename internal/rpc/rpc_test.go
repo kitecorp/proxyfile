@@ -186,7 +186,7 @@ func TestResolve(t *testing.T) {
 			g := file.Gateway
 			methodsFile := filepath.Join(dir, "m.json")
 			testsupport.WriteFile(t, methodsFile, c.methods)
-			methods, problems := rpc.ReadMethods(methodsFile)
+			methods, _, problems := rpc.ReadMethods(methodsFile)
 			if methods != nil && problems != nil {
 				t.Errorf("ReadMethods returned methods %v next to problems", methods)
 			}
@@ -222,7 +222,7 @@ func TestResolveKeepsTheMethod(t *testing.T) {
 		`    {"service": "example.accounts.v1.ProfileService", "method": "GetProfile"}`,
 		`]`,
 	}.String())
-	methods, problems := rpc.ReadMethods(path)
+	methods, _, problems := rpc.ReadMethods(path)
 	if problems != nil {
 		t.Fatalf("ReadMethods problems = %q, want none", testsupport.ProblemStrings(problems))
 	}

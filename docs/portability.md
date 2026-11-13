@@ -70,6 +70,150 @@ is deprecated (it goes in 3.5).
 Everything else in the format, such as the origins file form, the entries of `rpc.methods` and the `name` of an RPC
 mapping, is core. The cost of another proxy is its generator and the proof that it behaves as the Envoy one does.
 
+## Support by proxy, from the generators
+
+Each generator declares, for every core key, how it carries the key: `supported`, `partial` with the difference, or
+`refused` with what that proxy offers instead. `proxyfile render` and `proxyfile check` with `--target <proxy>` refuse
+a file that writes a key its target refuses, naming the key where it is written and what the proxy offers instead.
+This table is written from those declarations and has a column for each proxy with a generator, so it holds Envoy's
+alone in this version; the table above stays until the nginx and HAProxy columns are written here. The
+[conformance battery](conformance.md) sends the same requests to each proxy, and checks the refusal for a key the proxy
+refuses.
+
+<!-- keys: support by proxy -->
+| Key | Envoy |
+|---|---|
+| `listen` | supported |
+| `admin` | supported |
+| `tls` | supported |
+| `tls.certificate` | supported |
+| `tls.key` | supported |
+| `tls.clients` | supported |
+| `tls.clients.ca` | supported |
+| `client_address` | supported |
+| `limits` | supported |
+| `limits.connections` | supported |
+| `limits.request_headers` | supported |
+| `limits.request_headers.size` | supported |
+| `limits.request_headers.count` | supported |
+| `timeouts` | supported |
+| `timeouts.request` | supported |
+| `timeouts.idle` | supported |
+| `timeouts.upstream_idle` | supported |
+| `services` | supported |
+| `services.<service name>` | supported |
+| `services.<service name>.http` | supported |
+| `services.<service name>.grpc` | supported |
+| `services.<service name>.host_header` | supported |
+| `services.<service name>.address` | supported |
+| `services.<service name>.addresses` | supported |
+| `services.<service name>.balance` | supported |
+| `services.<service name>.hash` | supported |
+| `services.<service name>.hash.header` | supported |
+| `services.<service name>.hash.client` | supported |
+| `services.<service name>.health` | supported |
+| `services.<service name>.health.path` | supported |
+| `services.<service name>.health.grpc` | supported |
+| `services.<service name>.health.interval` | supported |
+| `services.<service name>.health.timeout` | supported |
+| `services.<service name>.health.healthy` | supported |
+| `services.<service name>.health.unhealthy` | supported |
+| `dns` | supported |
+| `dns.resolver` | supported |
+| `auth` | supported |
+| `auth.ask` | supported |
+| `auth.timeout` | supported |
+| `auth.enabled` | supported |
+| `auth.when_unavailable` | supported |
+| `auth.only_with_header` | supported |
+| `auth.send` | supported |
+| `auth.accept` | supported |
+| `auth.send_request` | supported |
+| `auth.jwt` | supported |
+| `auth.jwt.issuer` | supported |
+| `auth.jwt.audiences` | supported |
+| `auth.jwt.keys` | supported |
+| `auth.jwt.ca` | supported |
+| `auth.jwt.header` | supported |
+| `auth.jwt.optional` | supported |
+| `auth.jwt.claims` | supported |
+| `auth.jwt.claims.<header name>` | supported |
+| `remove_from_clients` | supported |
+| `cors` | supported |
+| `cors.allow_methods` | supported |
+| `cors.allow_headers` | supported |
+| `cors.expose_headers` | supported |
+| `cors.max_age` | supported |
+| `origins` | supported |
+| `origins.<environment name>` | supported |
+| `origins.<environment name>.hosts` | supported |
+| `origins.<environment name>.origins` | supported |
+| `origins.<environment name>.patterns` | supported |
+| `routes` | supported |
+| `routes[].rpc` | supported |
+| `routes[].rpc.retries` | supported |
+| `routes[].rpc.rate_limit` | supported |
+| `routes[].rpc.rate_limit.requests` | supported |
+| `routes[].rpc.rate_limit.per` | supported |
+| `routes[].rpc.rate_limit.burst` | supported |
+| `routes[].rpc.rate_limit.by` | supported |
+| `routes[].rpc.to` | supported |
+| `routes[].rpc.to.<package pattern>` | supported |
+| `routes[].rpc.to.<package pattern>.service` | supported |
+| `routes[].rpc.to.<package pattern>.name` | supported |
+| `routes[].name` | supported |
+| `routes[].prefix` | supported |
+| `routes[].path` | supported |
+| `routes[].pattern` | supported |
+| `routes[].method` | supported |
+| `routes[].to` | supported |
+| `routes[].rewrite` | supported |
+| `routes[].auth` | supported |
+| `routes[].retries` | supported |
+| `routes[].rate_limit` | supported |
+| `routes[].rate_limit.requests` | supported |
+| `routes[].rate_limit.per` | supported |
+| `routes[].rate_limit.burst` | supported |
+| `routes[].rate_limit.by` | supported |
+| `rpc` | supported |
+| `rpc.methods` | supported |
+| `rpc.methods[].service` | supported |
+| `rpc.methods[].method` | supported |
+| `rpc.methods[].action` | supported |
+| `rpc.methods[].reports` | supported |
+| `rpc.proto` | supported |
+| `rpc.proto.roots` | supported |
+| `rpc.proto.option` | supported |
+| `log` | supported |
+| `log.status_from` | supported |
+| `log.sample` | supported |
+| `tracing` | supported |
+| `tracing.provider` | supported |
+| `tracing.provider.xray` | supported |
+| `tracing.provider.xray.agent` | supported |
+| `tracing.provider.xray.segment` | supported |
+| `tracing.provider.xray.sample` | supported |
+| `tracing.provider.xray.sample.first` | supported |
+| `tracing.provider.xray.sample.rate` | supported |
+| `tracing.provider.xray.sample.rules` | supported |
+| `tracing.provider.xray.sample.rules[].host` | supported |
+| `tracing.provider.xray.sample.rules[].method` | supported |
+| `tracing.provider.xray.sample.rules[].path` | supported |
+| `tracing.provider.xray.sample.rules[].first` | supported |
+| `tracing.provider.xray.sample.rules[].rate` | supported |
+| `tracing.provider.otel` | supported |
+| `tracing.provider.otel.endpoint` | supported |
+| `tracing.provider.otel.service` | supported |
+| `tracing.provider.otel.sample` | supported |
+| `tracing.provider.otel.sample.rate` | supported |
+| `tracing.tags` | supported |
+| `tracing.tags.<tag name>` | supported |
+| `tracing.tags.<tag name>.env` | supported |
+| `tracing.tags.<tag name>.header` | supported |
+| `tracing.tags.<tag name>.default` | supported |
+| `tracing.path_in_url` | supported |
+<!-- /keys -->
+
 ## Written with no key
 
 Each of these is part of every configuration the Envoy generator writes, with no key for it.

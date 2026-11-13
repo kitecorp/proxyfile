@@ -38,16 +38,17 @@ func grpcPath(m Method) string {
 	return "/" + m.Service + "/" + m.Method
 }
 
-// ReadMethods reads the methods file at path, which is JSON read as YAML so that a problem names its line. It
-// returns the problems of the first step that finds any: reading the file, its syntax, then the format check. Every
+// ReadMethods reads the methods file at path, which is JSON read as YAML so that a problem names its line. It returns
+// the methods and the tree the format check accepted, in which render.Read finds the keys its target refuses, or the
+// problems of the first step that finds any: reading the file, its syntax, then the format check. Every
 // rule of the methods is Resolve's, those that need no proxyfile included (a report holding a comma, an action or a
 // report a header value cannot hold, a method listed twice), so one run names the problems of both kinds.
-func ReadMethods(path string) ([]Method, []model.Problem) {
+func ReadMethods(path string) ([]Method, *tree.Node, []model.Problem) {
 	root, problems := input.Checked(path, format.Methods)
 	if problems != nil {
-		return nil, problems
+		return nil, nil, problems
 	}
-	return MethodsOf(root), nil
+	return MethodsOf(root), root, nil
 }
 
 // MethodsOf reads a list of methods the format check accepted, from a methods file or from the proxyfile's

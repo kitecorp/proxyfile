@@ -230,8 +230,13 @@ func TestRenderProblems(t *testing.T) {
 	minimal := minimalNaming(t, "missing.json")
 	cases := []struct {
 		name, proxyfile string // proxyfile is written to g.yaml in a temporary directory
+		target          string // the request's Target, "" for envoy
 		want            []string
 	}{
+		// The command line refuses a target format.Targets does not declare before it asks render, and render refuses
+		// one as well, so no caller gets an Envoy file for another proxy.
+		{name: "a target with no generator", proxyfile: minimal, target: "nginx",
+			want: []string{"g.yaml: --target nginx: no generator for nginx in this version; see docs/portability.md"}},
 		{name: "rpc entry without methods",
 			proxyfile: "listen: 8000\nservices:\n  backend: {grpc: 5000}\norigins: origins.json\nroutes:\n  - rpc: {to: {\"*\": backend}}\n",
 			want:      []string{"g.yaml:6:5: the routes have an rpc entry, so rpc.methods, rpc.proto or --rpc-methods must list the RPC methods"}},
@@ -256,7 +261,7 @@ func TestRenderProblems(t *testing.T) {
 			dir := t.TempDir()
 			testsupport.WriteFile(t, filepath.Join(dir, "g.yaml"), c.proxyfile)
 			testsupport.WriteFile(t, filepath.Join(dir, "origins.json"), string(origins))
-			files, problems := render(Request{Proxyfile: filepath.Join(dir, "g.yaml"), Out: filepath.Join(dir, "envoy.yaml")})
+			files, problems := render(Request{Proxyfile: filepath.Join(dir, "g.yaml"), Out: filepath.Join(dir, "envoy.yaml"), Target: c.target})
 			if files != nil {
 				t.Errorf("render returned files %q next to problems", paths(files))
 			}

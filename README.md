@@ -138,7 +138,8 @@ flowchart LR
 
 proxyfile does not run the proxy. The Envoy generator writes for Envoy 1.40, and an image build can load the committed
 file with `envoy --mode validate`, as this repository's [`scripts/validate-envoy.sh`](scripts/validate-envoy.sh) does
-for the examples.
+for the examples. The [conformance battery](docs/conformance.md) runs Envoy on the rendered full example and checks its
+answers to the same requests every proxy will get.
 
 [docs/commands.md](docs/commands.md) gives the flags, the file names proxyfile looks for, the exit codes and how a
 problem is printed.

@@ -27,6 +27,8 @@ type File struct {
 	// order first named; nil for a YAML proxyfile, which has no includes. They are inputs of the run, so no output
 	// may name one.
 	Included []string
+	// Tree is the tree the format check accepted, in which render.Read finds the keys its target refuses.
+	Tree *tree.Node
 }
 
 // Proxyfile reads a proxyfile and returns its model and the origins and RPC methods it writes, or the problems that
@@ -57,7 +59,7 @@ func Proxyfile(path string) (*File, []model.Problem) {
 		model.SortProblems(problems)
 		return nil, problems
 	}
-	file := &File{Gateway: g, Origins: inline, Proto: proto, Included: included}
+	file := &File{Gateway: g, Origins: inline, Proto: proto, Included: included, Tree: root}
 	// The check requires exactly one of methods and proto inside rpc, so methods are written exactly when rpc is and
 	// proto is not. Every rule of the methods is rpc.Resolve's, which render.Read runs on these as on a methods file's,
 	// so this stage only reads them.
