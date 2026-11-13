@@ -207,7 +207,7 @@ Each behaviour above was measured on Envoy 1.40.2.
 What the Envoy generator writes with the key:
 
 - The tracer `envoy.tracers.opentelemetry`, its `service_name`, and the cluster `otel_collector` it sends to over
-  HTTP/2, after the services' clusters: `STATIC` for an IP address, `STRICT_DNS` for a name.
+  HTTP/2, after the services' clusters: `STATIC` for an IP address, a `DnsCluster` in `cluster_type` for a name.
 - `random_sampling` at `sample.rate`, and `client_sampling` at 0, so a client's `x-client-trace-id` does not force a
   trace, which with Envoy's default it does at every rate.
 - A `decorator` on each route, which names its span after the route, with `propagate: false`, so the route's name is

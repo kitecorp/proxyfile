@@ -9,10 +9,19 @@ what that is.
 - **One backend at `127.0.0.1` for a service** that writes neither `address` nor `addresses`. Requests are spread round
   robin when `balance` is not written, and a DNS name in `address` is asked of the host's resolver configuration when
   `dns` is not written. Without `health` every backend stays in the pool.
-- **A DNS name is looked up for its IPv4 and IPv6 addresses both** (`dns_lookup_family: ALL`), whether it is a
-  service's address, the tracing endpoint or the keys URL's host, and each address is a backend. Envoy's own default
-  asks for IPv6 addresses first and for IPv4 ones only when there are none
+- **A DNS name is looked up for its IPv4 and IPv6 addresses both** (`dns_lookup_family: ALL` in the cluster's
+  `DnsCluster`), whether it is a service's address, the tracing endpoint or the keys URL's host, and each address is a
+  backend. Envoy's own default asks for IPv6 addresses first and for IPv4 ones only when there are none
   ([Backends and balancing](services.md#backends-and-balancing)).
+- **A cluster that looks a name up is Envoy's `DnsCluster` extension** in the cluster's `cluster_type`, with
+  `dns_lookup_family` and `dns.resolver` inside it, because Envoy 1.40.2 deprecates the DNS settings on the cluster
+  itself in its favor. A file with a DNS name therefore needs Envoy 1.33 or later: `DnsCluster` first appears in Envoy
+  1.33.0 (its `dns_cluster.proto` is absent at v1.32.13). Measured with `envoy --mode validate` in the official images,
+  a file whose one service has a DNS name, with or without `dns.resolver`, loads in Envoy 1.33.14 and 1.40.2, and
+  Envoy 1.32.13 refuses it with
+  `could not find @type 'type.googleapis.com/envoy.extensions.clusters.dns.v3.DnsCluster'`; 1.33.0 to 1.33.13 were not
+  measured. proxyfile 2.1.0 wrote the DNS settings on the cluster itself, a form all three load. Separately, Envoy
+  1.33.14 refuses `balance: hash` (`no such field: 'hash_policy'`); the lowest version that takes it was not measured.
 - **The client's address** is `forwarded` without `tls` and `connection` with it, when `client_address` is not
   written. With `forwarded` (`use_remote_address: false`) a proxy stands in front: `X-Forwarded-For` passes as it came,
   `X-Forwarded-Proto` is kept when present, and with no trusted hops Envoy takes the last `X-Forwarded-For` entry, the

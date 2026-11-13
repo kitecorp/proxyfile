@@ -1,32 +1,47 @@
 # One cluster per port of a service, and one each for the OpenTelemetry collector and the keys URL of auth.jwt, which
 # take none of a service's own settings (extraCluster in generate.go). A STATIC cluster names each backend by its IP
-# address and looks up no name (Envoy 1.40.2, service_discovery.rst, "Static"). A STRICT_DNS cluster looks its name up
-# again every 5 seconds (cluster.proto, dns_refresh_rate, whose default is 5000 ms) and takes every address the answer
-# gives as a backend (service_discovery.rst, "Strict DNS"). balance hash writes its hash policy on the cluster, not on
-# each route: Envoy 1.40.2 reads a cluster's hash policy before a route's (source/common/router/router.h lines 350 to
-# 357, "Use cluster-level hash policy if available"; api/envoy/extensions/upstreams/http/v3/http_protocol_options.proto
-# lines 189 to 202, field 10), so every route to the service hashes alike.
+# address and looks up no name (Envoy 1.40.2, service_discovery.rst, "Static"). balance hash writes its hash policy on
+# the cluster, not on each route: Envoy 1.40.2 reads a cluster's hash policy before a route's
+# (source/common/router/router.h lines 350 to 357, "Use cluster-level hash policy if available";
+# api/envoy/extensions/upstreams/http/v3/http_protocol_options.proto lines 189 to 202, field 10), so every route to the
+# service hashes alike.
 name: {{q .Name}}
-type: {{if .DNS}}STRICT_DNS{{else}}STATIC{{end}}
 {{- if .DNS}}
-# The lookup returns the name's IPv4 and IPv6 addresses both (cluster.proto, DnsLookupFamily ALL), and each is a
-# backend. Without the line Envoy asks for IPv6 addresses first and for IPv4 ones only when the name has none (AUTO,
-# the default). Measured on Envoy 1.40.2 with a name that has one address of each kind: with ALL it gives two
-# backends, each checked on its own and each taking requests; with the default it gives the IPv6 one alone, so a
-# backend that listened on IPv4 only got no request.
-dns_lookup_family: ALL
+# A cluster that looks a name up is the DnsCluster extension in cluster_type, with every DNS setting inside it. In
+# Envoy 1.40.2 the cluster's own dns_refresh_rate, dns_lookup_family and typed_dns_resolver_config are deprecated for a
+# DNS cluster in favor of DnsCluster, and ignored once cluster_type is DnsCluster (cluster.proto, fields 16, 17 and
+# 55), so a file that wrote them would stop loading in the Envoy that removes them. type and cluster_type are one oneof
+# (cluster.proto, cluster_discovery_type), so the cluster writes no type. The host name is looked up again every 5
+# seconds (dns_cluster.proto, dns_refresh_rate, whose default is 5000 ms), and each address the answer gives is a
+# backend of its own, because all_addresses_in_single_endpoint is left false (dns_cluster.proto, field 9: strict DNS;
+# service_discovery.rst, "Strict DNS").
+cluster_type:
+  # envoy.cluster.dns is the name the factory registers under (source/extensions/clusters/dns/dns_cluster.h line 23).
+  # Envoy 1.33.0 and 1.40.2 do not read it: with typed_config they find the factory by its type and read the name only
+  # without one (cluster_factory_impl.cc lines 28 to 39 and 61). The API reference calls it envoy.clusters.dns.
+  name: envoy.cluster.dns
+  typed_config:
+    "@type": type.googleapis.com/envoy.extensions.clusters.dns.v3.DnsCluster
+    # The lookup returns the name's IPv4 and IPv6 addresses both (clusters/common/dns/v3/dns.proto, DnsLookupFamily
+    # ALL), and each is a backend. Without the line Envoy asks for IPv6 addresses first and for IPv4 ones only when the
+    # name has none (dns_cluster.proto, dns_lookup_family: AUTO, the default). Measured on Envoy 1.40.2 with a name that
+    # has one address of each kind: with ALL it gives two backends, each checked on its own and each taking requests;
+    # with the default it gives the IPv6 one alone, so a backend that listened on IPv4 only got no request.
+    dns_lookup_family: ALL
+{{- with .Resolver}}
+    # dns.resolver: c-ares asks this name server instead of the host's resolver configuration
+    # (cares_dns_resolver.proto, resolvers).
+    typed_dns_resolver_config:
+      name: envoy.network.dns_resolver.cares
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+        resolvers: [{socket_address: {address: {{q .Address}}, port_value: {{.Port}}}}]
+{{- end}}
+{{- else}}
+type: STATIC
 {{- end}}
 {{- with .LBPolicy}}
 lb_policy: {{.}}
-{{- end}}
-{{- with .Resolver}}
-# dns.resolver: c-ares asks this name server instead of the host's resolver configuration (cares_dns_resolver.proto,
-# resolvers). typed_dns_resolver_config replaces the deprecated dns_resolvers (cluster.proto).
-typed_dns_resolver_config:
-  name: envoy.network.dns_resolver.cares
-  typed_config:
-    "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
-    resolvers: [{socket_address: {address: {{q .Address}}, port_value: {{.Port}}}}]
 {{- end}}
 load_assignment:
   cluster_name: {{q .Name}}

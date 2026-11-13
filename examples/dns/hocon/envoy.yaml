@@ -116,14 +116,17 @@ static_resources:
                 route: {cluster: "catalog_http"}
   clusters:
   - name: "catalog_http"
-    type: STRICT_DNS
-    dns_lookup_family: ALL
-    lb_policy: RING_HASH
-    typed_dns_resolver_config:
-      name: envoy.network.dns_resolver.cares
+    cluster_type:
+      name: envoy.cluster.dns
       typed_config:
-        "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
-        resolvers: [{socket_address: {address: "10.0.0.2", port_value: 53}}]
+        "@type": type.googleapis.com/envoy.extensions.clusters.dns.v3.DnsCluster
+        dns_lookup_family: ALL
+        typed_dns_resolver_config:
+          name: envoy.network.dns_resolver.cares
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+            resolvers: [{socket_address: {address: "10.0.0.2", port_value: 53}}]
+    lb_policy: RING_HASH
     load_assignment:
       cluster_name: "catalog_http"
       endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: "catalog.internal.example", port_value: 8080}}}}]}]
@@ -133,14 +136,17 @@ static_resources:
         hash_policy: [{header: {header_name: "x-session-id"}}]
         explicit_http_config: {http_protocol_options: {}}
   - name: "search_http"
-    type: STRICT_DNS
-    dns_lookup_family: ALL
-    lb_policy: RING_HASH
-    typed_dns_resolver_config:
-      name: envoy.network.dns_resolver.cares
+    cluster_type:
+      name: envoy.cluster.dns
       typed_config:
-        "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
-        resolvers: [{socket_address: {address: "10.0.0.2", port_value: 53}}]
+        "@type": type.googleapis.com/envoy.extensions.clusters.dns.v3.DnsCluster
+        dns_lookup_family: ALL
+        typed_dns_resolver_config:
+          name: envoy.network.dns_resolver.cares
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+            resolvers: [{socket_address: {address: "10.0.0.2", port_value: 53}}]
+    lb_policy: RING_HASH
     load_assignment:
       cluster_name: "search_http"
       endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: "search.internal.example", port_value: 8090}}}}]}]
