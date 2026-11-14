@@ -88,8 +88,9 @@ func Beside(file, name string) string {
 }
 
 // Absolute is the path two spellings of one file share, so ./a.yaml and a.yaml are one file: the includes' set of
-// files seen and the command line's rule that no output names an input compare paths by it. It falls back to the
-// cleaned path when the working directory cannot be read, so two relative paths still compare by their text.
+// files seen compares paths by it, and the command line's rule that no output names an input starts from it for an
+// output that is not there yet. It falls back to the cleaned path when the working directory cannot be read, so two
+// relative paths still compare by their text.
 func Absolute(path string) string {
 	if abs, err := filepath.Abs(path); err == nil {
 		return abs

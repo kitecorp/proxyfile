@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/kitecorp/proxyfile/v2/internal/model"
@@ -273,5 +274,34 @@ func TestTable(t *testing.T) {
 		if got := string(rpc.Table(c.routes)); got != c.want {
 			t.Errorf("%s: Table() = %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// A method read from a .proto option writes action and reports only when it sets them, as a methods file does when it
+// leaves them out, and every key sits at the method's position.
+func TestTree(t *testing.T) {
+	at := model.Pos{File: "a.proto", Line: 9, Column: 3}
+	cases := []struct {
+		name   string
+		method rpc.Method
+		want   []string
+	}{
+		{name: "an action and reports", method: rpc.Method{Service: "a.v1.S", Method: "M", Action: "read", Reports: []string{"export"}, Pos: at},
+			want: []string{"service a.proto:9:3", "method a.proto:9:3", "action a.proto:9:3", "reports a.proto:9:3"}},
+		{name: "neither", method: rpc.Method{Service: "a.v1.S", Method: "M", Pos: at},
+			want: []string{"service a.proto:9:3", "method a.proto:9:3"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var got []string
+			for _, entry := range rpc.Tree([]rpc.Method{c.method}).Items[0].Entries {
+				// With no message, a problem's text is its position followed by ": ", so a wrong position reads as
+				// written.
+				got = append(got, entry.Key+" "+strings.TrimSuffix((model.Problem{Pos: entry.KeyPos}).String(), ": "))
+			}
+			if !slices.Equal(got, c.want) {
+				t.Errorf("keys = %q, want %q", got, c.want)
+			}
+		})
 	}
 }

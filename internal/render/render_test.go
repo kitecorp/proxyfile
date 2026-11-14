@@ -17,6 +17,8 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/kitecorp/proxyfile/v2/internal/format"
+	"github.com/kitecorp/proxyfile/v2/internal/generator"
 	"github.com/kitecorp/proxyfile/v2/internal/model"
 	"github.com/kitecorp/proxyfile/v2/internal/testsupport"
 )
@@ -51,27 +53,69 @@ func TestExampleTrees(t *testing.T) {
 	}
 }
 
-// TestExamplesAreCurrent keeps the committed outputs in each folder of examples/ equal to what render writes from the
-// proxyfile beside them; -update rewrites them.
+// TestExamplesAreCurrent keeps each example folder's committed files equal to what render writes for each target: the
+// outputs, or <target>.refused, the lines render prints from the repository root when the target refuses the form. A
+// folder never holds both kinds for one target, so neither can stay behind stale; -update writes both kinds.
 func TestExamplesAreCurrent(t *testing.T) {
-	for _, form := range testsupport.ExampleForms {
-		t.Run(form.Dir, func(t *testing.T) {
-			files, problems := render(requestFor(t, form.Dir, filepath.Join(exampleDir(form.Dir), "envoy.yaml")))
-			if problems != nil {
-				t.Fatalf("render problems = %q, want none", testsupport.ProblemStrings(problems))
-			}
-			for _, file := range files {
-				if *update {
-					if err := os.WriteFile(file.Path, file.Bytes, 0o644); err != nil {
-						t.Fatalf("write %s: %v", file.Path, err)
+	for _, target := range Targets {
+		for _, form := range testsupport.ExampleForms {
+			t.Run(target.Name+"/"+form.Dir, func(t *testing.T) {
+				req := requestFor(t, form.Dir, filepath.Join(exampleDir(form.Dir), target.Config))
+				req.Target = target.Name
+				refused := filepath.Join(exampleDir(form.Dir), target.Name+".refused")
+				run, problems := Read(req)
+				var files []File
+				if problems == nil {
+					if files, problems = run.Files(); problems != nil {
+						t.Fatalf("Files problems = %q", testsupport.ProblemStrings(problems))
 					}
-					continue
+				} else {
+					var text strings.Builder
+					for _, problem := range problems {
+						text.WriteString(strings.TrimPrefix(problem.String(), "../../") + "\n")
+					}
+					files = []File{{Path: refused, Bytes: []byte(text.String())}}
 				}
-				if d := committedDifference(t, form.Dir, file); d != "" {
-					t.Errorf("%s\n  run the test with -update to write what render writes", d)
+				// The kind render does not write for this target is the one that must not be committed.
+				leftover := refused
+				if problems != nil {
+					leftover = req.Out
 				}
-			}
-		})
+				for _, file := range files {
+					if *update {
+						if err := os.WriteFile(file.Path, file.Bytes, 0o644); err != nil {
+							t.Fatalf("write %s: %v", file.Path, err)
+						}
+						continue
+					}
+					if d := committedDifference(t, form.Dir, file); d != "" {
+						t.Errorf("%s\n  run the test with -update to write what render writes", d)
+					}
+				}
+				if *update {
+					// Usually absent, so its error says nothing; a leftover that stays fails the next run below.
+					os.Remove(leftover)
+				} else if _, err := os.Stat(leftover); err == nil {
+					t.Errorf("%s is committed beside what render writes for %s; run the test with -update to remove it", leftover, target.Name)
+				}
+			})
+		}
+	}
+}
+
+// Every proxy with a generator declares its support of every key, and every declared proxy has a generator: cli
+// accepts a --target that render.Targets holds, and render refuses one that either list lacks, so two lists that
+// disagree would let the command line accept a target that render then refuses.
+func TestEveryGeneratorIsDeclared(t *testing.T) {
+	var generators, declared []string
+	for _, target := range Targets {
+		generators = append(generators, target.Name)
+	}
+	for _, target := range format.Targets {
+		declared = append(declared, target.Name)
+	}
+	if want := []string{"envoy"}; !slices.Equal(generators, want) || !slices.Equal(declared, want) {
+		t.Errorf("render.Targets = %q, format.Targets = %q, want both %q", generators, declared, want)
 	}
 }
 
@@ -228,15 +272,26 @@ func TestInputs(t *testing.T) {
 }
 
 func TestRenderProblems(t *testing.T) {
-	// The minimal example in the file form, naming an origins file that is not there.
-	minimal := minimalNaming(t, "missing.json")
+	// The minimal example in the file form, naming an origins file that is not there, and one that is.
+	minimal, beside := minimalNaming(t, "missing.json"), minimalNaming(t, "origins.json")
 	cases := []struct {
 		name, proxyfile string // proxyfile is written to g.yaml in a temporary directory
 		target          string // the request's Target, "" for envoy
-		want            []string
+		// named is, when set, the name of the file beside the configuration that the generator of a target nginx
+		// declared for the row returns.
+		named string
+		want  []string
 	}{
-		// The command line refuses a target format.Targets does not declare before it asks render, and render refuses
-		// one as well, so no caller gets an Envoy file for another proxy.
+		// A generator names each file beside the configuration by a name alone, so a name that holds a folder is a bug
+		// in proxyfile, and no file is written outside the folder of -o.
+		{name: "a generator's file in the folder above", proxyfile: beside, target: "nginx", named: "../escape.js",
+			want: []string{`envoy.yaml: proxyfile could not write this file, which is a bug in proxyfile: the generator named a file "../escape.js", which is not a name alone`}},
+		{name: "a generator's file at an absolute path", proxyfile: beside, target: "nginx", named: "/escape.js",
+			want: []string{`envoy.yaml: proxyfile could not write this file, which is a bug in proxyfile: the generator named a file "/escape.js", which is not a name alone`}},
+		{name: "a generator's file in a folder below", proxyfile: beside, target: "nginx", named: "sub/inner.js",
+			want: []string{`envoy.yaml: proxyfile could not write this file, which is a bug in proxyfile: the generator named a file "sub/inner.js", which is not a name alone`}},
+		// The command line refuses a target render.Targets does not hold before it asks render, and render refuses one
+		// as well, so no caller gets an Envoy file for another proxy.
 		{name: "a target with no generator", proxyfile: minimal, target: "nginx",
 			want: []string{"g.yaml: --target nginx: no generator for nginx in this version; see docs/portability.md"}},
 		{name: "rpc entry without methods",
@@ -263,6 +318,9 @@ func TestRenderProblems(t *testing.T) {
 			dir := t.TempDir()
 			testsupport.WriteFile(t, filepath.Join(dir, "g.yaml"), c.proxyfile)
 			testsupport.WriteFile(t, filepath.Join(dir, "origins.json"), string(origins))
+			if c.named != "" {
+				declareNginx(t, []generator.File{{Bytes: []byte("config\n")}, {Name: c.named, Bytes: []byte("script\n")}})
+			}
 			files, problems := render(Request{Proxyfile: filepath.Join(dir, "g.yaml"), Out: filepath.Join(dir, "envoy.yaml"), Target: c.target})
 			if files != nil {
 				t.Errorf("render returned files %q next to problems", paths(files))
@@ -408,7 +466,7 @@ func TestAuthSwitchLine(t *testing.T) {
 		off = "default_value: {numerator: 0, denominator: HUNDRED}"
 	)
 	// By example: how often the line reads on, and how often off.
-	want := map[string][2]int{"full": {1, 0}, "tracing": {1, 0}, "partial": {0, 1}}
+	want := map[string][2]int{"full": {1, 0}, "tracing": {1, 0}, "partial": {0, 1}, "portable": {1, 0}}
 	for _, form := range testsupport.ExampleForms {
 		t.Run(form.Dir, func(t *testing.T) {
 			files, problems := render(requestFor(t, form.Dir, "envoy.yaml"))
@@ -1655,13 +1713,24 @@ func requestFor(t *testing.T, dir, out string) Request {
 	return req
 }
 
+// declareNginx declares, for the test, an nginx that refuses no key and whose generator returns files, and puts both
+// lists back when the test ends. Swapping the lists is safe only while no test of the package runs in parallel.
+func declareNginx(t *testing.T, files []generator.File) {
+	t.Helper()
+	declared, generators := format.Targets, Targets
+	t.Cleanup(func() { format.Targets, Targets = declared, generators })
+	format.Targets = append(slices.Clone(declared), format.Target{Name: "nginx", Title: "nginx", Keys: map[string]format.Support{}})
+	Targets = append(slices.Clone(generators), Target{Name: "nginx", Config: "nginx.conf",
+		Generate: func(generator.Input) ([]generator.File, error) { return files, nil }})
+}
+
 // exampleDir is the path of the example folder dir, <example>/<form>, from this package's directory.
 func exampleDir(dir string) string {
 	return filepath.Join("..", "..", "examples", filepath.FromSlash(dir))
 }
 
 // render reads every input and returns every output: Read and Files in one step, as the command line runs them, but
-// without the command line's rule that no output path names an input or the other output.
+// without the command line's rule that no output path names an input or another output.
 func render(req Request) ([]File, []model.Problem) {
 	run, problems := Read(req)
 	if problems != nil {

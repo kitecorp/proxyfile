@@ -139,7 +139,7 @@ filter_chains:
       # of the last three unless an entry before it covers it (downstreamRemoved in generate.go).
       # The question headers, the accept headers and the claims headers are removed whether or not
       # remove_from_clients lists them, because a client must not be able to forge what the gateway asks the check,
-      # what the check says or what the token says (removedFromClients in generate.go builds the list). Envoy 1.40.2,
+      # what the check says or what the token says (generator.RemovedFromClients builds the list). Envoy 1.40.2,
       # http_connection_manager.proto: early_header_mutation_extensions "will be called before any routing, tracing, or
       # any filter processing"; the extension's mutations are config.common.mutation_rules.v3.HeaderMutation (remove,
       # remove_on_match). The extension is left out when there is nothing to remove, because it needs at least one

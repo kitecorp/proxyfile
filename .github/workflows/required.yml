@@ -28,8 +28,9 @@ jobs:
       - run: go test -count=1 ./...
       - name: Envoy 1.40.2 loads every generated example
         run: scripts/validate-envoy.sh examples/*/*/envoy.yaml
-      # The same requests against each proxy running the full example's rendered file, in Docker, among stub
-      # backends. Its tests are behind the conformance build tag, so the test step above starts no container.
+      # The same requests against each proxy running the rendered file of each example its entry names, the full and
+      # portable examples for Envoy, in Docker, among stub backends. Its tests are behind the conformance build tag, so
+      # the test step above starts no container.
       - name: Conformance battery
         run: |
           go vet -tags conformance ./conformance/...

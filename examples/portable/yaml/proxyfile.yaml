@@ -1,0 +1,74 @@
+# yaml-language-server: $schema=../../../schema/proxyfile.schema.json
+# The full example's world with only the keys every generator is to render alike: no health check, no auth.jwt, no
+# retries, no burst above 0 and no tracing, header names written out, and the Connect bridge off. The conformance
+# battery runs it on each proxy whose generator renders it.
+listen: 10000
+admin: 9901
+tls:
+  certificate: /etc/gateway/tls/certificate.pem
+  key: /etc/gateway/tls/key.pem
+  clients: {ca: /etc/gateway/tls/clients-ca.pem}
+client_address: connection
+limits:
+  connections: 4096
+  request_headers: {size: 96KiB, count: 150}
+timeouts:
+  request: none
+  idle: 90s
+  upstream_idle: 45s
+services:
+  shop:
+    http: 8080
+    grpc: 8081
+    addresses: ["10.0.1.11", "10.0.1.12"]
+    balance: least_requests
+  accounts: {grpc: 7070, http: 7070, host_header: "127.0.0.1:7070"}
+  catalog: {http: 8090, address: catalog.internal.example, balance: hash, hash: {header: x-session-id}}
+dns: {resolver: "10.0.0.2:53"}
+auth:
+  ask: accounts /auth/check
+  timeout: 1500ms
+  enabled: true
+  when_unavailable: allow
+  only_with_header: authorization
+  send: [authorization, x-country]
+  accept: [x-user-id, x-tier-level, x-user-check]
+  send_request: true
+remove_from_clients: [x-client-id]
+cors:
+  allow_methods: "*"
+  allow_headers: "*"
+  expose_headers: "Content-Disposition,X-Request-Id"
+  max_age: "600"
+origins:
+  live:
+    hosts: [api.example.com, api.example.org]
+    origins: ["https://example.com", "https://www.example.com"]
+    patterns: ["https://*.example.com"]
+  test:
+    hosts: [api.test.example.com]
+    origins: ["http://localhost:3000", "https://test.example.com"]
+    patterns: ["https://*.test.example.com"]
+  local:
+    hosts: [127.0.0.1, localhost]
+    origins: []
+    patterns: ["http://*.example.com:*", "http://localhost:*"]
+routes:
+  - {name: accounts-events, pattern: "^/events/[a-z0-9-]+$", to: accounts, auth: off}
+  - rpc:
+      rate_limit: {requests: 100, per: 1s, by: all}
+      to:
+        example.shop.*: {service: shop, name: shop}
+        "*": accounts
+  - {name: accounts-webhooks, path: /api/webhooks, method: POST, to: accounts, rewrite: /hooks/payments, auth: off}
+  - {name: public, prefix: /public/, to: shop, auth: off}
+  - {name: catalog, prefix: /catalog/, to: catalog, rate_limit: {requests: 20, per: 1s, burst: 0, by: client}}
+  - {name: shop, prefix: /, to: shop}
+rpc:
+  methods:
+    - {service: example.shop.v1.CartService, method: GetCart, action: browse}
+    - {service: example.accounts.v1.ProfileService, method: GetProfile}
+    - {service: example.shop.v1.CartService, method: AddItem, action: buy, reports: [browse]}
+log: {status_from: 400, sample: 1%}
+envoy:
+  connect_bridge: false

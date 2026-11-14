@@ -4,9 +4,13 @@ package render
 
 import (
 	"cmp"
+	"fmt"
+	"path/filepath"
+	"slices"
 
 	"github.com/kitecorp/proxyfile/v2/internal/envoy"
 	"github.com/kitecorp/proxyfile/v2/internal/format"
+	"github.com/kitecorp/proxyfile/v2/internal/generator"
 	"github.com/kitecorp/proxyfile/v2/internal/model"
 	"github.com/kitecorp/proxyfile/v2/internal/origins"
 	"github.com/kitecorp/proxyfile/v2/internal/protofiles"
@@ -24,35 +28,61 @@ type File struct {
 	Bytes []byte
 }
 
+// Target is a proxy with a generator: its --target name, the name the examples commit its configuration under, and
+// its generator.
+type Target struct {
+	Name     string
+	Config   string
+	Generate func(generator.Input) ([]generator.File, error)
+}
+
+// Targets are the proxies with a generator: the one list render picks a generator from, which cli reads too to accept
+// a --target. format.Targets declares each one's support of every key and cannot hold the generators itself: every
+// generator depends on format, through origins and rpc, so format importing one would be an import cycle.
+var Targets = []Target{{Name: "envoy", Config: "envoy.yaml", Generate: envoy.Generate}}
+
+// TargetNamed returns the target whose Name is name. It reads Targets at each call, so a test may declare its own.
+func TargetNamed(name string) (Target, bool) {
+	i := slices.IndexFunc(Targets, func(t Target) bool { return t.Name == name })
+	if i < 0 {
+		return Target{}, false
+	}
+	return Targets[i], true
+}
+
 // Run is the inputs of one render, read without a problem and ready to generate.
 type Run struct {
 	req        Request
-	input      envoy.Input // what the generator reads
-	inputPaths []string    // the files it was read from
-	hasMethods bool        // RPC methods were given, by rpc.methods, rpc.proto or --rpc-methods, also when none
+	generate   func(generator.Input) ([]generator.File, error)
+	input      generator.Input // what the generator reads
+	inputPaths []string        // the files it was read from
+	hasMethods bool            // RPC methods were given, by rpc.methods, rpc.proto or --rpc-methods, also when none
 }
 
 // Read reads every input of req and returns them ready to generate, or every problem it finds.
 //
-// The proxyfile is read first, because every other input is read against it, and a key the target refuses ends the
-// run there, because no other input can make the target carry it. Then the origins file, when the proxyfile names
-// one instead of writing the origins, the RPC methods and the rpc-entry rule run together, so one run names the
-// problems of all three, the keys the target refuses in the origins file and the methods file among them. The methods
-// are the proxyfile's rpc.methods when it writes them, those of the .proto files under the roots of rpc.proto when it
-// writes that, and the --rpc-methods file otherwise; giving the flag as well is a problem, because one list would be
-// ignored. A relative origins path or root is read from the proxyfile's own directory, and an absolute one as written
-// (tree.Beside says why).
+// The target is looked up before any file is read, in Targets for its generator and in format.Targets for the keys it
+// refuses, and one that either list lacks is refused, so no caller gets another proxy's file. The proxyfile is read
+// first, because every other input is read against it, and a key the target refuses ends the run there, because no
+// other input can make the target carry it. Then the origins file, when the proxyfile names one instead of writing the
+// origins, the RPC methods and the rpc-entry rule run together, so one run names the problems of all three, the keys
+// the target refuses in the origins file and in the methods among them, whether a methods file or .proto options give
+// them. The methods are the proxyfile's rpc.methods when it writes them, those of the .proto files under the roots of
+// rpc.proto when it writes that, and the --rpc-methods file otherwise; giving the flag as well is a problem, because
+// one list would be ignored. A relative origins path or root is read from the proxyfile's own directory, and an
+// absolute one as written (tree.Beside says why).
 func Read(req Request) (*Run, []model.Problem) {
 	name := cmp.Or(req.Target, "envoy")
-	target, known := format.TargetNamed(name)
-	if !known {
+	target, declared := format.TargetNamed(name)
+	chosen, hasGenerator := TargetNamed(name)
+	if !declared || !hasGenerator {
 		return nil, model.FileProblem(req.Proxyfile, "--target "+name+": "+format.NoGenerator(name))
 	}
 	proxyfile, problems := read.Proxyfile(req.Proxyfile)
 	if problems != nil {
 		return nil, problems
 	}
-	if problems := format.Refusals(format.Proxyfile, proxyfile.Tree, target); problems != nil {
+	if problems := format.Refusals(format.Proxyfile, proxyfile.Tree, proxyfile.Tree, target); problems != nil {
 		return nil, problems
 	}
 	g, file := proxyfile.Gateway, proxyfile.Origins
@@ -63,7 +93,7 @@ func Read(req Request) (*Run, []model.Problem) {
 		var root *tree.Node
 		file, root, problems = origins.Read(originsPath)
 		if problems == nil {
-			problems = format.Refusals(format.Origins, root, target)
+			problems = format.Refusals(format.Origins, root, proxyfile.Tree, target)
 		}
 		all = append(all, problems...)
 		inputPaths = append(inputPaths, originsPath)
@@ -90,13 +120,14 @@ func Read(req Request) (*Run, []model.Problem) {
 		inputPaths = append(inputPaths, protoPaths...)
 		if problems == nil {
 			routes, problems = rpc.Resolve(g, methods)
+			problems = append(problems, format.Refusals(format.Methods, rpc.Tree(methods), proxyfile.Tree, target)...)
 		}
 		all = append(all, problems...)
 	case req.RPCMethods != "":
 		methods, root, problems := rpc.ReadMethods(req.RPCMethods)
 		if problems == nil {
 			routes, problems = rpc.Resolve(g, methods)
-			problems = append(problems, format.Refusals(format.Methods, root, target)...)
+			problems = append(problems, format.Refusals(format.Methods, root, proxyfile.Tree, target)...)
 		}
 		all = append(all, problems...)
 		inputPaths = append(inputPaths, req.RPCMethods)
@@ -110,7 +141,8 @@ func Read(req Request) (*Run, []model.Problem) {
 		model.SortProblems(all)
 		return nil, all
 	}
-	return &Run{req: req, input: envoy.Input{Gateway: g, Origins: file, RPC: routes}, inputPaths: inputPaths,
+	return &Run{req: req, generate: chosen.Generate, input: generator.Input{Gateway: g, Origins: file, RPC: routes},
+		inputPaths: inputPaths,
 		hasMethods: proxyfile.MethodsKey != nil || proxyfile.Proto != nil || req.RPCMethods != ""}, nil
 }
 
@@ -128,15 +160,38 @@ func (r *Run) HasMethods() bool {
 	return r.hasMethods
 }
 
-// Files returns every output, in memory and in this order: Out, then RPCTable.
+// Files returns every output, in memory and in this order: each file the target's generator returns, then RPCTable.
+// The configuration, the file with no name, goes at Out, and a file the configuration loads goes beside it under its
+// own name, because the configuration names it by that name. A name that holds a folder, or is . or .., would put the
+// file outside the folder of Out, so it is refused as the bug in proxyfile it is.
 func (r *Run) Files() ([]File, []model.Problem) {
-	out, err := envoy.Generate(r.input)
+	generated, err := r.generate(r.input)
 	if err != nil {
-		return nil, model.FileProblem(r.req.Out, "proxyfile could not write this file, which is a bug in proxyfile: "+err.Error())
+		return nil, bug(r.req.Out, err.Error())
 	}
-	files := []File{{Path: r.req.Out, Bytes: out}}
+	var files []File
+	var problems []model.Problem
+	for _, file := range generated {
+		path := r.req.Out
+		if file.Name != "" {
+			if file.Name == "." || !filepath.IsLocal(file.Name) || filepath.Base(file.Name) != file.Name {
+				problems = append(problems, bug(r.req.Out, fmt.Sprintf("the generator named a file %q, which is not a name alone", file.Name))...)
+				continue
+			}
+			path = filepath.Join(filepath.Dir(r.req.Out), file.Name)
+		}
+		files = append(files, File{Path: path, Bytes: file.Bytes})
+	}
+	if problems != nil {
+		return nil, problems
+	}
 	if r.req.RPCTable != "" {
 		files = append(files, File{Path: r.req.RPCTable, Bytes: rpc.Table(r.input.RPC)})
 	}
 	return files, nil
+}
+
+// bug is the problem of an output that a defect of proxyfile's own code keeps it from writing.
+func bug(out, reason string) []model.Problem {
+	return model.FileProblem(out, "proxyfile could not write this file, which is a bug in proxyfile: "+reason)
 }

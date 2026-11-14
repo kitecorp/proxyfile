@@ -69,6 +69,8 @@ var ExampleForms = []ExampleForm{
 	{Dir: "partial/proto-methods", File: "Proxyfile", Table: true},
 	{Dir: "full/yaml", File: "proxyfile.yaml", Table: true},
 	{Dir: "full/hocon", File: "Proxyfile", Table: true},
+	{Dir: "portable/yaml", File: "proxyfile.yaml", Table: true},
+	{Dir: "portable/hocon", File: "Proxyfile", Table: true},
 	{Dir: "tracing/yaml", File: "proxyfile.yaml"},
 	{Dir: "tracing/hocon", File: "Proxyfile"},
 	{Dir: "tracing/envoy-tracing", File: "proxyfile.yaml"},

@@ -5,6 +5,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/kitecorp/proxyfile/v2/internal/generator"
 	"github.com/kitecorp/proxyfile/v2/internal/model"
 	"github.com/kitecorp/proxyfile/v2/internal/origins"
 )
@@ -22,16 +23,17 @@ func TestInputTextComesOutAsWritten(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			app := model.Service{Name: "app", Addresses: []model.Text{{Value: "127.0.0.1"}},
 				Ports: []model.ServicePort{{Protocol: model.HTTP, Number: 3000}}}
-			in := Input{
+			in := generator.Input{
 				Gateway: &model.Gateway{Envoy: model.Envoy{Namespace: "proxyfile"}, Listen: model.Port{Number: 8000}, Services: []model.Service{app},
 					Routes: []model.Route{{Name: model.Text{Value: "app"}, Match: model.Prefix, Value: model.Text{Value: "/"},
 						To: model.Text{Value: "app"}}}},
 				Origins: &origins.File{Environments: []origins.Environment{{Name: c.environment, Hosts: []string{"localhost"}}}},
 			}
-			out, err := Generate(in)
+			files, err := Generate(in)
 			if err != nil {
 				t.Fatalf("Generate: %v", err)
 			}
+			out := files[0].Bytes
 			var file struct {
 				StaticResources struct {
 					Listeners []struct {

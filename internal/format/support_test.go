@@ -1,6 +1,7 @@
 package format
 
 import (
+	"net"
 	"os"
 	"slices"
 	"strings"
@@ -55,44 +56,62 @@ func TestSupportMatrix(t *testing.T) {
 	spec := Field{Kind: Map, Fields: []Field{{Name: "a", Kind: Int}, {Name: "b", Kind: Int}}}
 	targets := []Target{
 		{Name: "envoy", Title: "Envoy", Keys: map[string]Support{"a": {Level: Supported}, "b": {Level: Supported}}},
-		{Name: "lean", Title: "Lean", Keys: map[string]Support{"a": {Level: Partial, Note: "counts | per second"},
+		{Name: "lean", Title: "Lean", Keys: map[string]Support{"a": {Level: Partial, Note: "counts | per second", Refuses: []Refusal{{Form: "above 10", Instead: "write 10 or less"}}},
 			"b": {Level: Refused, Note: "a `b` of its own"}}},
 	}
 	want := "| Key | Envoy | Lean |\n|---|---|---|\n" +
-		"| `a` | supported | partial: counts \\| per second |\n" +
+		"| `a` | supported | partial: counts \\| per second; refuses above 10: write 10 or less |\n" +
 		"| `b` | supported | refused: a \\`b\\` of its own |\n"
-	if got := string(SupportMatrix(spec, targets)); got != want {
+	if got := string(SupportMatrix(CoreKeys(spec), targets)); got != want {
 		t.Errorf("SupportMatrix = %q, want %q", got, want)
 	}
 }
 
-// Every target declares every core key and no other, so a key added to the format cannot go undeclared.
-func TestTargetsDeclareEveryCoreKey(t *testing.T) {
-	keys := CoreKeys(Proxyfile)
+// Every target declares every row of the support table, each core key and each behaviour written with no key, and no
+// other, so a key added to the format cannot go undeclared; none refuses a behaviour written with no key, in whole or
+// in a form, because every configuration holds it; and a refused form sits only on a partial key, with a test of the
+// value: on a supported key the table would say supported while render refuses, on a refused key render would name the
+// key twice, and with no test render would stop on a nil function.
+func TestTargetDeclarations(t *testing.T) {
+	rows := MatrixRows()
 	for _, target := range Targets {
-		var undeclared, notCore []string
-		for _, key := range keys {
-			if _, declared := target.Keys[key]; !declared {
-				undeclared = append(undeclared, key)
+		var undeclared, notRows []string
+		for _, row := range rows {
+			if _, declared := target.Keys[row]; !declared {
+				undeclared = append(undeclared, row)
 			}
 		}
-		for key := range target.Keys {
-			if !slices.Contains(keys, key) {
-				notCore = append(notCore, key)
+		for key, support := range target.Keys {
+			if !slices.Contains(rows, key) {
+				notRows = append(notRows, key)
+			}
+			if support.Refuses != nil && support.Level != Partial {
+				t.Errorf("%s: %q lists refused forms, which only a partial key may", target.Name, key)
+			}
+			for _, refusal := range support.Refuses {
+				if refusal.Applies == nil {
+					t.Errorf("%s: %q refuses the form %q with no Applies to tell it", target.Name, key, refusal.Form)
+				}
 			}
 		}
-		slices.Sort(notCore)
+		slices.Sort(notRows)
 		if !slices.Equal(undeclared, nil) {
-			t.Errorf("%s: the core keys it does not declare = %q, want none", target.Name, undeclared)
+			t.Errorf("%s: the rows of the support table it does not declare = %q, want none", target.Name, undeclared)
 		}
-		if !slices.Equal(notCore, nil) {
-			t.Errorf("%s: the keys it declares that are not core = %q, want none", target.Name, notCore)
+		if !slices.Equal(notRows, nil) {
+			t.Errorf("%s: the keys it declares that are no row of the support table = %q, want none", target.Name, notRows)
+		}
+		for _, row := range WrittenWithNoKey {
+			if support := target.Keys[row]; support.Level == Refused || support.Refuses != nil {
+				t.Errorf("%s refuses %q, which every configuration holds", target.Name, row)
+			}
 		}
 	}
 }
 
 // A key the target refuses is named at its own position, also inside a Dict's value or a list item, and in the origins
-// file and the methods file by the path the proxyfile writes it at; a file that writes none of them has no problem.
+// file and the methods file by the path the proxyfile writes it at; a file that writes none of them has no problem. A
+// form refused for another key reads that key in the proxyfile, also for a key of a methods file.
 func TestRefusals(t *testing.T) {
 	lean := Target{Name: "lean", Title: "Lean", Keys: map[string]Support{}}
 	for _, key := range CoreKeys(Proxyfile) {
@@ -107,13 +126,29 @@ func TestRefusals(t *testing.T) {
 	// oneHost refuses the environments themselves, which the proxyfile names by its keys and an origins file by name.
 	oneHost := Target{Name: "one-host", Title: "One host",
 		Keys: map[string]Support{"origins.<environment name>": {Level: Refused, Note: "one-host serves one host"}}}
+	// picky carries retries, an address and a method's reports in some forms only: a value, or a value without another
+	// key of the proxyfile.
+	picky := Target{Name: "picky", Title: "Picky", Keys: map[string]Support{
+		"rpc.methods[].reports": {Level: Partial, Note: "picky tells the check reports through auth.ask only", Refuses: []Refusal{{
+			Form: "without auth.ask", Instead: "write auth.ask",
+			Applies: func(_, proxyfile *tree.Node) bool { return proxyfile.Get("auth").Get("ask") == nil }}}},
+		"routes[].retries": {Level: Partial, Note: "picky tries a request once", Refuses: []Refusal{{Form: "of 1 or more", Instead: "write retries: 0",
+			Applies: func(value, root *tree.Node) bool { return value.Text != "0" }}}},
+		"services.<service name>.address": {Level: Partial, Note: "picky resolves a name with its own resolver only", Refuses: []Refusal{{
+			Form: "naming a host without dns.resolver", Instead: "write dns.resolver",
+			Applies: func(value, root *tree.Node) bool {
+				return net.ParseIP(value.Text) == nil && root.Get("dns").Get("resolver") == nil
+			}}}}}}
 	cases := []struct {
 		name   string
 		spec   Field
 		target Target
 		// file is read when set, and named in the problems by this path; otherwise document is read as g.yaml.
 		file, document string
-		want           []string
+		// beside is the proxyfile, read as p.yaml, that an origins or a methods document is read beside; "" when the
+		// document is the proxyfile.
+		beside string
+		want   []string
 	}{
 		{name: "nothing refused is written", spec: Proxyfile, target: lean, document: m.String(), want: nil},
 		{name: "a refused key", spec: Proxyfile, target: lean, document: m.Inserted(7, "timeouts: {idle: 30s}"),
@@ -123,16 +158,16 @@ func TestRefusals(t *testing.T) {
 		{name: "a refused key in a list item", spec: Proxyfile, target: lean, document: m.Replaced(6, 6, "  - {name: app, prefix: /, to: app, retries: 1}"),
 			want: []string{`g.yaml:6:37: "routes[].retries" is refused by --target lean: lean retries no request`}},
 		{name: "envoy refuses no key of the full example", spec: Proxyfile, target: Targets[0], file: "../../examples/full/yaml/proxyfile.yaml", want: nil},
-		{name: "a refused cors key in an origins file", spec: Origins, target: lean,
+		{name: "a refused cors key in an origins file", spec: Origins, target: lean, beside: m.String(),
 			document: `{"cors": {"max_age": "600"}, "environments": [{"name": "all", "hosts": ["localhost"]}]}`,
 			want:     []string{`g.yaml:1:11: "cors.max_age" is refused by --target lean: lean sends no max age`}},
-		{name: "a refused key of an environment in an origins file", spec: Origins, target: lean,
+		{name: "a refused key of an environment in an origins file", spec: Origins, target: lean, beside: m.String(),
 			document: `{"environments": [{"name": "all", "hosts": ["localhost"], "patterns": ["http://*.localhost"]}]}`,
 			want:     []string{`g.yaml:1:59: "origins.<environment name>.patterns" is refused by --target lean: lean admits no pattern`}},
-		{name: "a refused environment in an origins file, at its name", spec: Origins, target: oneHost,
+		{name: "a refused environment in an origins file, at its name", spec: Origins, target: oneHost, beside: m.String(),
 			document: `{"environments": [{"name": "all", "hosts": ["localhost"]}]}`,
 			want:     []string{`g.yaml:1:20: "origins.<environment name>" is refused by --target one-host: one-host serves one host`}},
-		{name: "a refused key of a method in a methods file", spec: Methods, target: lean,
+		{name: "a refused key of a method in a methods file", spec: Methods, target: lean, beside: m.String(),
 			document: `[{"service": "shop.v1.CartService", "method": "AddItem", "action": "write"}]`,
 			want:     []string{`g.yaml:1:58: "rpc.methods[].action" is refused by --target lean: lean tells the check no action`}},
 		// Written in the proxyfile, each of the keys above is refused once, at its own line.
@@ -142,6 +177,19 @@ func TestRefusals(t *testing.T) {
 			want: []string{`g.yaml:4:8: "cors.max_age" is refused by --target lean: lean sends no max age`,
 				`g.yaml:5:37: "origins.<environment name>.patterns" is refused by --target lean: lean admits no pattern`,
 				`g.yaml:8:65: "rpc.methods[].action" is refused by --target lean: lean tells the check no action`}},
+		{name: "a value the target refuses", spec: Proxyfile, target: picky, document: m.Replaced(6, 6, "  - {name: app, prefix: /, to: app, retries: 1}"),
+			want: []string{`g.yaml:6:37: "routes[].retries" of 1 or more is refused by --target picky: write retries: 0`}},
+		{name: "a value of the same key the target takes", spec: Proxyfile, target: picky, document: m.Replaced(6, 6, "  - {name: app, prefix: /, to: app, retries: 0}"), want: nil},
+		{name: "a value refused for want of another key", spec: Proxyfile, target: picky, document: m.Replaced(3, 3, "  app: {http: 3000, address: app.internal}"),
+			want: []string{`g.yaml:3:21: "services.<service name>.address" naming a host without dns.resolver is refused by --target picky: write dns.resolver`}},
+		{name: "the same value with the other key", spec: Proxyfile, target: picky,
+			document: m.Replaced(3, 3, "  app: {http: 3000, address: app.internal}", `dns: {resolver: "10.0.0.2:53"}`), want: nil},
+		{name: "an address no resolver reads", spec: Proxyfile, target: picky, document: m.Replaced(3, 3, "  app: {http: 3000, address: 10.0.1.5}"), want: nil},
+		{name: "a key of a methods file refused for want of a key of the proxyfile", spec: Methods, target: picky, beside: m.String(),
+			document: `[{"service": "shop.v1.CartService", "method": "AddItem", "reports": ["export"]}]`,
+			want:     []string{`g.yaml:1:58: "rpc.methods[].reports" without auth.ask is refused by --target picky: write auth.ask`}},
+		{name: "the same methods file beside a proxyfile that writes the key", spec: Methods, target: picky,
+			beside: m.Inserted(7, "auth: {ask: app /check}"), document: `[{"service": "shop.v1.CartService", "method": "AddItem", "reports": ["export"]}]`, want: nil},
 		{name: "the same environment in the proxyfile, at its key", spec: Proxyfile, target: oneHost,
 			document: m.Replaced(4, 4, "origins: {all: {hosts: [localhost]}}"),
 			want:     []string{`g.yaml:4:11: "origins.<environment name>" is refused by --target one-host: one-host serves one host`}},
@@ -160,8 +208,46 @@ func TestRefusals(t *testing.T) {
 			if problems != nil {
 				t.Fatalf("FromYAML problems = %q, want none", testsupport.ProblemStrings(problems))
 			}
-			if got := testsupport.ProblemStrings(Refusals(c.spec, root, c.target)); !slices.Equal(got, c.want) {
+			proxyfile := root
+			if c.beside != "" {
+				if proxyfile, problems = tree.FromYAML("p.yaml", []byte(c.beside)); problems != nil {
+					t.Fatalf("FromYAML problems = %q, want none", testsupport.ProblemStrings(problems))
+				}
+			}
+			if got := testsupport.ProblemStrings(Refusals(c.spec, root, proxyfile, c.target)); !slices.Equal(got, c.want) {
 				t.Errorf("Refusals = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// The keys a file writes, each once and sorted, in CoreKeys' spelling: a Dict's value and a list item by their place,
+// a methods file's keys at the path the proxyfile writes them at, and a proxy's block as written.
+func TestWrittenKeys(t *testing.T) {
+	cases := []struct {
+		name     string
+		spec     Field
+		document string
+		want     []string
+	}{
+		{name: "the smallest proxyfile", spec: Proxyfile, document: m.String(),
+			want: []string{"listen", "origins", "routes", "routes[].name", "routes[].prefix", "routes[].to", "services",
+				"services.<service name>", "services.<service name>.http"}},
+		{name: "a methods file", spec: Methods, document: `[{"service": "shop.v1.CartService", "method": "AddItem", "action": "write"}]`,
+			want: []string{"rpc.methods[].action", "rpc.methods[].method", "rpc.methods[].service"}},
+		{name: "two routes and a proxy's block", spec: Proxyfile,
+			document: m.Replaced(6, 6, "  - {name: app, prefix: /, to: app, retries: 1}", "  - {name: api, prefix: /api/, to: app}", "envoy: {connect_bridge: false}"),
+			want: []string{"envoy", "envoy.connect_bridge", "listen", "origins", "routes", "routes[].name", "routes[].prefix", "routes[].retries",
+				"routes[].to", "services", "services.<service name>", "services.<service name>.http"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root, problems := tree.FromYAML("g.yaml", []byte(c.document))
+			if problems != nil {
+				t.Fatalf("FromYAML problems = %q, want none", testsupport.ProblemStrings(problems))
+			}
+			if got := WrittenKeys(c.spec, root); !slices.Equal(got, c.want) {
+				t.Errorf("WrittenKeys = %q, want %q", got, c.want)
 			}
 		})
 	}

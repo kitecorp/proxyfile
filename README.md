@@ -82,8 +82,10 @@ are the targets the format reserves ([`docs/portability.md`](docs/portability.md
 their generators are [issue 25](https://github.com/kitecorp/proxyfile/issues/25) and
 [issue 26](https://github.com/kitecorp/proxyfile/issues/26). The other directories under [`examples/`](examples/) add
 an auth check, a token verified at the proxy, RPC routes read from `.proto` files, tracing, several backends, health
-checks, TLS, rate limits and nearly every key. Each example keeps each form in a folder of its own, under the names
-above and beside the files it renders, so `render` and `check` find the proxyfile in any of them with no file given.
+checks, TLS, rate limits and nearly every key, and `examples/portable` holds the keys every generator is to render
+alike, which the conformance battery runs on each proxy. Each example keeps each form in a folder of its own, under the
+names above and beside the files it renders, so `render` and `check` find the proxyfile in any of them with no file
+given.
 
 ## Install
 
@@ -138,8 +140,8 @@ flowchart LR
 
 proxyfile does not run the proxy. The Envoy generator writes for Envoy 1.40, and an image build can load the committed
 file with `envoy --mode validate`, as this repository's [`scripts/validate-envoy.sh`](scripts/validate-envoy.sh) does
-for the examples. The [conformance battery](docs/conformance.md) runs Envoy on the rendered full example and checks its
-answers to the same requests every proxy will get.
+for the examples. The [conformance battery](docs/conformance.md) runs Envoy on the rendered full and portable examples
+and checks its answers to the same requests every proxy will get.
 
 [docs/commands.md](docs/commands.md) gives the flags, the file names proxyfile looks for, the exit codes and how a
 problem is printed.

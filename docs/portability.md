@@ -73,12 +73,13 @@ mapping, is core. The cost of another proxy is its generator and the proof that 
 ## Support by proxy, from the generators
 
 Each generator declares, for every core key, how it carries the key: `supported`, `partial` with the difference, or
-`refused` with what that proxy offers instead. `proxyfile render` and `proxyfile check` with `--target <proxy>` refuse
-a file that writes a key its target refuses, naming the key where it is written and what the proxy offers instead.
-This table is written from those declarations and has a column for each proxy with a generator, so it holds Envoy's
-alone in this version; the table above stays until the nginx and HAProxy columns are written here. The
-[conformance battery](conformance.md) sends the same requests to each proxy, and checks the refusal for a key the proxy
-refuses.
+`refused` with what that proxy offers instead. Its last two rows are the two behaviours every configuration holds with
+no key (below): each generator declares them as it declares a key, and none may refuse them. `proxyfile render` and
+`proxyfile check` with `--target <proxy>` refuse a file that writes a key its target refuses, naming the key where it
+is written and what the proxy offers instead. This table is written from those declarations and has a column for each
+proxy with a generator, so it holds Envoy's alone in this version; the table above stays until the nginx and HAProxy
+columns are written here. The [conformance battery](conformance.md) sends the same requests to each proxy, and checks
+the refusal for a key the proxy refuses.
 
 <!-- keys: support by proxy -->
 | Key | Envoy |
@@ -212,14 +213,16 @@ refuses.
 | `tracing.tags.<tag name>.header` | supported |
 | `tracing.tags.<tag name>.default` | supported |
 | `tracing.path_in_url` | supported |
+| the request's path normalised before a route is picked | supported |
+| a dot segment with a ; parameter answered 400 | supported |
 <!-- /keys -->
 
 ## Written with no key
 
 Each of these is part of every configuration the Envoy generator writes, with no key for it.
 [Defaults](defaults.md) says what each does. Path normalisation and the refusal of a dot segment with a `;` parameter
-are core. The nginx and HAProxy columns name what each proxy offers, or that it is to be settled with that proxy's
-generator:
+are core. Both are rows of the table above too, where every generator declares how it writes them. The nginx and
+HAProxy columns name what each proxy offers, or that it is to be settled with that proxy's generator:
 
 | What | Envoy | nginx | HAProxy | Class |
 |---|---|---|---|---|

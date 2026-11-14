@@ -21,7 +21,7 @@ is the one this version writes, and `nginx` and `haproxy` are refused until each
 ([Portability](portability.md)). A proxyfile with an rpc entry (`- rpc:` in YAML, `{ rpc { ... } }` in HOCON) takes its
 methods from exactly one of `rpc.methods`, `rpc.proto` and `--rpc-methods`, and methods given with no rpc entry are
 refused. `--rpc-table` needs one of the three. An output path may not name the proxyfile, a file it includes, its
-origins file, its methods file or a `.proto` file it reads, nor the other output.
+origins file, its methods file or a `.proto` file it reads, nor another output.
 
 The generated file starts with this line, and the same input always gives the same bytes:
 
