@@ -1,0 +1,42 @@
+# The conformance battery's file for nginx: the world of examples/full with only the keys the nginx generator writes in
+# this version, catalog at its address instead of a DNS name, four more pattern routes (one that takes any character,
+# one whose {,3} RE2 reads as text and PCRE2 as a repetition, one that PCRE2 gives up on for a long path as written and
+# takes as Go's parse writes it, and one that PCRE2 gives up on for a long path RE2 does not take), four patterns a path
+# with an escape or a character outside ASCII would meet otherwise if nginx matched the path it has decoded, and a
+# prefix route with a rewrite. Every entry runs it, Envoy's too, so its literals are Envoy's answers.
+listen: 10000
+admin: 9901
+services:
+  shop:
+    http: 8080
+    grpc: 8081
+    addresses: ["10.0.1.11", "10.0.1.12"]
+  accounts: {grpc: 7070, http: 7070, host_header: "127.0.0.1:7070"}
+  catalog: {http: 8090, address: "10.0.2.21"}
+origins:
+  live: {hosts: [api.example.com, api.example.org]}
+  test: {hosts: [api.test.example.com]}
+  local: {hosts: [127.0.0.1, localhost]}
+routes:
+  - {name: accounts-events, pattern: "^/events/[a-z0-9-]+$", to: accounts}
+  - rpc:
+      to:
+        example.shop.*: {service: shop, name: shop}
+        "*": accounts
+  - {name: accounts-webhooks, path: /api/webhooks, method: POST, to: accounts, rewrite: /hooks/payments}
+  - {name: accounts-admin, pattern: "^/admin/.*$", to: accounts}
+  - {name: braces, pattern: "^/braces/x{,3}$", to: accounts}
+  - {name: backtrack, pattern: "^/backtrack/((a|a)*c|a+b)$", to: accounts}
+  - {name: give-up, pattern: "^/give-up/(a|aa)+$", to: accounts}
+  - {name: catalog, prefix: /catalog/, to: catalog}
+  - {name: api-admin, pattern: "^/api/[A-Za-z0-9%_-]+/admin$", to: accounts}
+  - {name: user, pattern: "^/u/@[a-z]+$", to: accounts}
+  - {name: letters, pattern: "^/l/[a-z ]+$", to: accounts}
+  - {name: two, pattern: "^/x..$", to: accounts}
+  - {name: hooks, prefix: /hooks/, to: accounts, rewrite: /in/}
+  - {name: shop, prefix: /, to: shop}
+rpc:
+  methods:
+    - {service: example.shop.v1.CartService, method: GetCart}
+    - {service: example.accounts.v1.ProfileService, method: GetProfile}
+    - {service: example.shop.v1.CartService, method: AddItem}

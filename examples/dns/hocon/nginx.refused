@@ -1,0 +1,11 @@
+examples/dns/hocon/Proxyfile: dns: "dns" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/dns/hocon/Proxyfile: dns.resolver: "dns.resolver" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/dns/hocon/Proxyfile: origins.all.origins: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/dns/hocon/Proxyfile: services.catalog.address: "services.<service name>.address" a DNS name is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/dns/hocon/Proxyfile: services.catalog.balance: "services.<service name>.balance" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/dns/hocon/Proxyfile: services.catalog.hash: "services.<service name>.hash" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/dns/hocon/Proxyfile: services.catalog.hash.header: "services.<service name>.hash.header" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/dns/hocon/Proxyfile: services.search.address: "services.<service name>.address" a DNS name is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/dns/hocon/Proxyfile: services.search.balance: "services.<service name>.balance" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/dns/hocon/Proxyfile: services.search.hash: "services.<service name>.hash" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/dns/hocon/Proxyfile: services.search.hash.client: "services.<service name>.hash.client" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

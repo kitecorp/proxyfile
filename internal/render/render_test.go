@@ -3,6 +3,7 @@ package render
 import (
 	"bytes"
 	"cmp"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"maps"
@@ -56,14 +57,22 @@ func TestExampleTrees(t *testing.T) {
 // TestExamplesAreCurrent keeps each example folder's committed files equal to what render writes for each target: the
 // outputs, or <target>.refused, the lines render prints from the repository root when the target refuses the form. A
 // folder never holds both kinds for one target, so neither can stay behind stale; -update writes both kinds.
+//
+// A form's rpc-table.json is compared only by a target that renders the form, so a form whose table every target
+// refuses fails here, by name: nothing else would compare that table.
 func TestExamplesAreCurrent(t *testing.T) {
+	// ran counts the targets whose subtest ran for each form, and rendered says whether one rendered it. A form is
+	// judged only when every target ran, so a run narrowed by -run to one target does not fail the others' tables.
+	ran, rendered := map[string]int{}, map[string]bool{}
 	for _, target := range Targets {
 		for _, form := range testsupport.ExampleForms {
 			t.Run(target.Name+"/"+form.Dir, func(t *testing.T) {
+				ran[form.Dir]++
 				req := requestFor(t, form.Dir, filepath.Join(exampleDir(form.Dir), target.Config))
 				req.Target = target.Name
 				refused := filepath.Join(exampleDir(form.Dir), target.Name+".refused")
 				run, problems := Read(req)
+				rendered[form.Dir] = rendered[form.Dir] || problems == nil
 				var files []File
 				if problems == nil {
 					if files, problems = run.Files(); problems != nil {
@@ -101,6 +110,11 @@ func TestExamplesAreCurrent(t *testing.T) {
 			})
 		}
 	}
+	for _, form := range testsupport.ExampleForms {
+		if form.Table && ran[form.Dir] == len(Targets) && !rendered[form.Dir] {
+			t.Errorf("examples/%s commits rpc-table.json, which no target renders, so no test compares it", form.Dir)
+		}
+	}
 }
 
 // Every proxy with a generator declares its support of every key, and every declared proxy has a generator: cli
@@ -114,66 +128,87 @@ func TestEveryGeneratorIsDeclared(t *testing.T) {
 	for _, target := range format.Targets {
 		declared = append(declared, target.Name)
 	}
-	if want := []string{"envoy"}; !slices.Equal(generators, want) || !slices.Equal(declared, want) {
+	if want := []string{"envoy", "nginx"}; !slices.Equal(generators, want) || !slices.Equal(declared, want) {
 		t.Errorf("render.Targets = %q, format.Targets = %q, want both %q", generators, declared, want)
 	}
 }
 
-// testsupport.ExampleForms is the list every example test reads, so it names each folder that commits an envoy.yaml,
-// and says Table exactly where the folder commits rpc-table.json; a folder or a table it leaves out is never compared.
+// testsupport.ExampleForms is the list every example test reads, so for each target it names each folder that commits
+// the target's configuration or <target>.refused, and says Table exactly where the folder commits rpc-table.json; a
+// folder or a table it leaves out is never compared.
 func TestExampleFormsMatchTheFolders(t *testing.T) {
 	root := filepath.Join("..", "..", "examples")
-	outputs, err := filepath.Glob(filepath.Join(root, "*", "*", "envoy.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var onDisk []string
-	for _, out := range outputs {
-		dir := filepath.Dir(out)
-		rel, err := filepath.Rel(root, dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, statErr := os.Stat(filepath.Join(dir, "rpc-table.json"))
-		onDisk = append(onDisk, fmt.Sprintf("%s table=%t", filepath.ToSlash(rel), statErr == nil))
-	}
-	// Both lists are sorted as strings, because Glob sorts by path, which can differ from the order of these strings.
-	slices.Sort(onDisk)
 	var listed []string
 	for _, form := range testsupport.ExampleForms {
 		listed = append(listed, fmt.Sprintf("%s table=%t", form.Dir, form.Table))
 	}
+	// Both lists are sorted as strings, because Glob sorts by path, which can differ from the order of these strings.
 	slices.Sort(listed)
-	if !slices.Equal(listed, onDisk) {
-		t.Errorf("testsupport.ExampleForms = %q, want the folders on disk %q", listed, onDisk)
+	for _, target := range Targets {
+		t.Run(target.Name, func(t *testing.T) {
+			var onDisk []string
+			for _, name := range []string{target.Config, target.Name + ".refused"} {
+				committed, err := filepath.Glob(filepath.Join(root, "*", "*", name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, file := range committed {
+					dir := filepath.Dir(file)
+					rel, err := filepath.Rel(root, dir)
+					if err != nil {
+						t.Fatal(err)
+					}
+					_, statErr := os.Stat(filepath.Join(dir, "rpc-table.json"))
+					onDisk = append(onDisk, fmt.Sprintf("%s table=%t", filepath.ToSlash(rel), statErr == nil))
+				}
+			}
+			slices.Sort(onDisk)
+			if !slices.Equal(listed, onDisk) {
+				t.Errorf("testsupport.ExampleForms = %q, want the folders on disk %q", listed, onDisk)
+			}
+		})
 	}
 }
 
-// One gateway, whichever way it is written: every file a render of each other form of an example writes equals the
-// file its yaml folder commits, byte for byte, and TestExamplesAreCurrent keeps the yaml folder's files equal to the
-// render of the YAML form.
+// One gateway, whichever way it is written: for each target, a render of each other form of an example is refused
+// exactly when the example's yaml folder commits <target>.refused, and otherwise every file it writes equals the file
+// the yaml folder commits, byte for byte. TestExamplesAreCurrent keeps the yaml folder's files equal to the render of
+// the YAML form, and each form's own refusal lines, which name its own file, line and column.
 func TestBothFormsGiveTheSameFiles(t *testing.T) {
-	for _, form := range testsupport.ExampleForms {
-		example, _, _ := strings.Cut(form.Dir, "/")
-		yamlDir := example + "/yaml"
-		if form.Dir == yamlDir {
-			continue
-		}
-		t.Run(form.Dir, func(t *testing.T) {
-			req := requestFor(t, form.Dir, "envoy.yaml")
-			files, problems := render(req)
-			if problems != nil {
-				t.Fatalf("render problems = %q, want none", testsupport.ProblemStrings(problems))
+	for _, target := range Targets {
+		for _, form := range testsupport.ExampleForms {
+			example, _, _ := strings.Cut(form.Dir, "/")
+			yamlDir := example + "/yaml"
+			if form.Dir == yamlDir {
+				continue
 			}
-			if got, want := len(files), len(outputs(requestFor(t, yamlDir, "envoy.yaml"))); got != want {
-				t.Fatalf("render wrote %d files %q, want %d, as many as %s commits", got, paths(files), want, yamlDir)
-			}
-			for _, file := range files {
-				if d := committedDifference(t, yamlDir, file); d != "" {
-					t.Errorf("rendered from %s: %s", req.Proxyfile, d)
+			t.Run(target.Name+"/"+form.Dir, func(t *testing.T) {
+				req := requestFor(t, form.Dir, target.Config)
+				req.Target = target.Name
+				files, problems := render(req)
+				_, statErr := os.Stat(filepath.Join(exampleDir(yamlDir), target.Name+".refused"))
+				if refused, yamlRefused := problems != nil, statErr == nil; refused != yamlRefused {
+					t.Fatalf("render problems = %q; refused = %t, want %t, as %s commits a %s.refused or not",
+						testsupport.ProblemStrings(problems), refused, yamlRefused, yamlDir, target.Name)
 				}
-			}
-		})
+				if problems != nil {
+					return
+				}
+				// The YAML form's render names the files, so a generator that writes a file beside its
+				// configuration, as nginx writes proxyfile.js, is counted with it.
+				yamlReq := requestFor(t, yamlDir, target.Config)
+				yamlReq.Target = target.Name
+				yamlFiles, _ := render(yamlReq)
+				if got, want := baseNames(files), baseNames(yamlFiles); !slices.Equal(got, want) {
+					t.Fatalf("render wrote %q, want %q, the files %s commits", got, want, yamlDir)
+				}
+				for _, file := range files {
+					if d := committedDifference(t, yamlDir, file); d != "" {
+						t.Errorf("rendered from %s: %s", req.Proxyfile, d)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -187,32 +222,8 @@ func committedDifference(t *testing.T, dir string, file File) string {
 	if bytes.Equal(file.Bytes, committed) {
 		return ""
 	}
-	line, inCommitted, rendered := firstDifferentLine(committed, file.Bytes)
+	line, inCommitted, rendered := testsupport.FirstDifferentLine(committed, file.Bytes)
 	return fmt.Sprintf("%s differs first on line %d:\n  committed: %s\n  rendered:  %s", path, line, inCommitted, rendered)
-}
-
-// firstDifferentLine returns the number, counted from 1, of the line where a and b first differ, and that line of each.
-// The bytes before the first difference are the same in both, so the line starts at the same offset in each.
-func firstDifferentLine(a, b []byte) (int, string, string) {
-	same := 0
-	for same < len(a) && same < len(b) && a[same] == b[same] {
-		same++
-	}
-	start := bytes.LastIndexByte(a[:same], '\n') + 1
-	return bytes.Count(a[:same], []byte("\n")) + 1, lineAt(a, start), lineAt(b, start)
-}
-
-// lineAt returns the line that starts at start, quoted with its newline, so a trailing space, an empty line and a
-// missing last newline each show; or, when the file ends before start, a marker that no quoted line can look like.
-func lineAt(data []byte, start int) string {
-	if start >= len(data) {
-		return "(the file ends here)"
-	}
-	line := data[start:]
-	if end := bytes.IndexByte(line, '\n'); end >= 0 {
-		line = line[:end+1]
-	}
-	return fmt.Sprintf("%q", line)
 }
 
 // minimalNaming returns the minimal example with its inline origins replaced by "origins: <file>": the file form,
@@ -292,8 +303,8 @@ func TestRenderProblems(t *testing.T) {
 			want: []string{`envoy.yaml: proxyfile could not write this file, which is a bug in proxyfile: the generator named a file "sub/inner.js", which is not a name alone`}},
 		// The command line refuses a target render.Targets does not hold before it asks render, and render refuses one
 		// as well, so no caller gets an Envoy file for another proxy.
-		{name: "a target with no generator", proxyfile: minimal, target: "nginx",
-			want: []string{"g.yaml: --target nginx: no generator for nginx in this version; see docs/portability.md"}},
+		{name: "a target with no generator", proxyfile: minimal, target: "caddy",
+			want: []string{"g.yaml: --target caddy: no generator for caddy in this version; see docs/portability.md"}},
 		{name: "rpc entry without methods",
 			proxyfile: "listen: 8000\nservices:\n  backend: {grpc: 5000}\norigins: origins.json\nroutes:\n  - rpc: {to: {\"*\": backend}}\n",
 			want:      []string{"g.yaml:6:5: the routes have an rpc entry, so rpc.methods, rpc.proto or --rpc-methods must list the RPC methods"}},
@@ -330,6 +341,89 @@ func TestRenderProblems(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A render for one proxy reads the core keys and its own block and leaves the other blocks alone, so one file carries
+// what each proxy needs. A render for nginx reads nothing of the envoy block, refuses none of it and writes the grpc
+// example's own nginx.conf and proxyfile.js whatever the block holds, while a render for envoy reads each key as
+// written.
+func TestReadLeavesTheEnvoyBlockToEnvoy(t *testing.T) {
+	example := string(testsupport.ReadFile(t, filepath.Join(exampleDir("grpc/yaml"), "proxyfile.yaml")))
+	// The example ends with its own envoy block, which each row replaces with the block it reads.
+	base, found := strings.CutSuffix(example, "envoy:\n  connect_bridge: false\n")
+	if !found {
+		t.Fatal("examples/grpc/yaml/proxyfile.yaml does not end with its envoy block")
+	}
+	// Absolute, because each row runs in a folder of its own, so that the positions it reads name g.yaml alone.
+	committed, err := filepath.Abs(exampleDir("grpc/yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	xray := "envoy:\n  tracing:\n    provider:\n      xray: {segment: example-gateway}\n"
+	cases := []struct {
+		name, block string
+		envoy       model.Envoy    // what a render for envoy reads as the block
+		tracing     *model.Tracing // what a render for envoy reads as tracing
+		problems    []string       // what a render for either target answers instead
+	}{
+		{name: "namespace", block: "envoy: {namespace: edge}\n", envoy: model.Envoy{Namespace: "edge", ConnectBridge: true}},
+		{name: "heap", block: "envoy: {heap: 192MiB}\n", envoy: model.Envoy{Namespace: "proxyfile", ConnectBridge: true,
+			Heap: &model.Size{Bytes: 201326592, Pos: model.Pos{File: "g.yaml", Line: 15, Column: 15}}}},
+		{name: "connect_bridge", block: "envoy: {connect_bridge: true}\n", envoy: model.Envoy{Namespace: "proxyfile", ConnectBridge: true}},
+		{name: "tracing", block: xray, envoy: model.Envoy{Namespace: "proxyfile", ConnectBridge: true},
+			tracing: &model.Tracing{XRay: &model.XRay{Address: "127.0.0.1", Port: 2000, Segment: "example-gateway"}}},
+		// The reader refuses a file that writes both places before the target's rule runs, so a Tracing read with
+		// envoy.tracing written came from the block.
+		{name: "both places", block: "tracing:\n  provider:\n    xray: {segment: s}\n" + xray,
+			problems: []string{"g.yaml:19:3: write tracing or envoy.tracing, not both"}},
+	}
+	for _, c := range cases {
+		for _, target := range []string{"nginx", "envoy"} {
+			t.Run(c.name+"/"+target, func(t *testing.T) {
+				t.Chdir(t.TempDir())
+				testsupport.WriteFile(t, "g.yaml", base+c.block)
+				run, problems := Read(Request{Proxyfile: "g.yaml", Out: "nginx.conf", Target: target})
+				if got := testsupport.ProblemStrings(problems); !slices.Equal(got, c.problems) {
+					t.Fatalf("Read problems = %q, want %q", got, c.problems)
+				}
+				if problems != nil {
+					return
+				}
+				envoy, tracing := c.envoy, c.tracing
+				if target == "nginx" {
+					envoy, tracing = model.Envoy{}, nil
+				}
+				if got := run.input.Gateway; !reflect.DeepEqual(got.Envoy, envoy) || !reflect.DeepEqual(got.Tracing, tracing) {
+					t.Errorf("Envoy = %s, Tracing = %s, want %s and %s", asJSON(t, got.Envoy), asJSON(t, got.Tracing),
+						asJSON(t, envoy), asJSON(t, tracing))
+				}
+				if target != "nginx" {
+					return
+				}
+				files, problems := run.Files()
+				if got := paths(files); problems != nil || !slices.Equal(got, []string{"nginx.conf", "proxyfile.js"}) {
+					t.Fatalf("Files = %q, problems %q, want nginx.conf and proxyfile.js", got, testsupport.ProblemStrings(problems))
+				}
+				for _, file := range files {
+					path := filepath.Join(committed, file.Path)
+					if want := testsupport.ReadFile(t, path); !bytes.Equal(file.Bytes, want) {
+						line, inCommitted, rendered := testsupport.FirstDifferentLine(want, file.Bytes)
+						t.Errorf("%s differs first on line %d:\n  committed: %s\n  rendered:  %s", path, line, inCommitted, rendered)
+					}
+				}
+			})
+		}
+	}
+}
+
+// asJSON is value as JSON, so a failure shows what a pointer field holds rather than its address.
+func asJSON(t *testing.T, value any) string {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	return string(data)
 }
 
 // The RPC methods written in the proxyfile, as rpc.methods or read from the .proto files rpc.proto names, give what the
@@ -1713,15 +1807,18 @@ func requestFor(t *testing.T, dir, out string) Request {
 	return req
 }
 
-// declareNginx declares, for the test, an nginx that refuses no key and whose generator returns files, and puts both
-// lists back when the test ends. Swapping the lists is safe only while no test of the package runs in parallel.
+// declareNginx declares, for the test, an nginx that refuses no key and whose generator returns files, in place of the
+// shipped one, which TargetNamed would otherwise find first, and puts both lists back when the test ends. Swapping the
+// lists is safe only while no test of the package runs in parallel.
 func declareNginx(t *testing.T, files []generator.File) {
 	t.Helper()
 	declared, generators := format.Targets, Targets
 	t.Cleanup(func() { format.Targets, Targets = declared, generators })
-	format.Targets = append(slices.Clone(declared), format.Target{Name: "nginx", Title: "nginx", Keys: map[string]format.Support{}})
-	Targets = append(slices.Clone(generators), Target{Name: "nginx", Config: "nginx.conf",
-		Generate: func(generator.Input) ([]generator.File, error) { return files, nil }})
+	format.Targets = testsupport.ReplaceOrAppend(declared, format.Target{Name: "nginx", Title: "nginx", Keys: map[string]format.Support{}},
+		func(target format.Target) bool { return target.Name == "nginx" })
+	Targets = testsupport.ReplaceOrAppend(generators, Target{Name: "nginx", Config: "nginx.conf",
+		Generate: func(generator.Input) ([]generator.File, error) { return files, nil }},
+		func(target Target) bool { return target.Name == "nginx" })
 }
 
 // exampleDir is the path of the example folder dir, <example>/<form>, from this package's directory.
@@ -1751,6 +1848,15 @@ func paths(files []File) []string {
 	var list []string
 	for _, file := range files {
 		list = append(list, file.Path)
+	}
+	return list
+}
+
+// baseNames is the name of each file render returns, without its folder, so renders into two folders compare.
+func baseNames(files []File) []string {
+	var list []string
+	for _, file := range files {
+		list = append(list, filepath.Base(file.Path))
 	}
 	return list
 }

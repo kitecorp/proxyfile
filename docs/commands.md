@@ -16,12 +16,13 @@ directory, and exactly one of them must exist.
 
 `--help`, `-h` and `help` print the usage text on standard output and exit with 0.
 
-The flags may stand before or after the file. `--target` names the proxy the configuration is for: `envoy`, the default,
-is the one this version writes, and `nginx` and `haproxy` are refused until each has a generator
-([Portability](portability.md)). A proxyfile with an rpc entry (`- rpc:` in YAML, `{ rpc { ... } }` in HOCON) takes its
-methods from exactly one of `rpc.methods`, `rpc.proto` and `--rpc-methods`, and methods given with no rpc entry are
-refused. `--rpc-table` needs one of the three. An output path may not name the proxyfile, a file it includes, its
-origins file, its methods file or a `.proto` file it reads, nor another output.
+The flags may stand before or after the file. `--target` names the proxy the configuration is for: `envoy` (the
+default), `nginx` or `haproxy`; a target with no generator in this version is refused, and
+[Portability](portability.md) has a column for each one that has one, with the keys it refuses. A proxyfile with an rpc
+entry (`- rpc:` in YAML, `{ rpc { ... } }` in HOCON) takes its methods from exactly one of `rpc.methods`, `rpc.proto`
+and `--rpc-methods`, and methods given with no rpc entry are refused. `--rpc-table` needs one of the three. An output
+path may not name the proxyfile, a file it includes, its origins file, its methods file or a `.proto` file it reads, nor
+another output.
 
 The generated file starts with this line, and the same input always gives the same bytes:
 

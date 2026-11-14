@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -17,8 +16,8 @@ import (
 	"github.com/kitecorp/proxyfile/v2/internal/tree"
 )
 
-const usageText = `usage: proxyfile render [<file>] -o <output> [--target envoy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
-       proxyfile check [<file>] -o <output> [--target envoy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+const usageText = `usage: proxyfile render [<file>] -o <output> [--target envoy|nginx] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+       proxyfile check [<file>] -o <output> [--target envoy|nginx] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
        proxyfile schema
        proxyfile version
 `
@@ -166,8 +165,9 @@ func TestRun(t *testing.T) {
 			stderr: "<tmp>/proxyfile.yaml:19:40: \"origins.<environment name>.origins\" with listen is refused by --target envoy: refused by this test\n" +
 				"<tmp>/proxyfile.yaml:30:86: \"rpc.methods[].reports\" with auth.ask is refused by --target envoy: refused by this test\n",
 			also: nothingWritten("partial")},
-		// No shipped generator writes a file beside its configuration, so these rows declare an nginx whose generator
-		// writes a script, and the script goes through render, check and the output-path rule as a shipped one would.
+		// The nginx generator writes proxyfile.js beside its configuration. These rows declare an nginx whose generator
+		// writes two one-line files under the same names, so each row reads a short literal, and the script goes through
+		// render, check and the output-path rule as the shipped one does.
 		{name: "a script beside the configuration", setup: func(t *testing.T, tmp string) {
 			copyMinimal(t, tmp)
 			declareScripted(t)
@@ -234,10 +234,8 @@ func TestRun(t *testing.T) {
 		{name: "unknown command", args: "rendr", exit: 2, stderr: "proxyfile: unknown command \"rendr\"\n" + usageText},
 		{name: "no -o", args: "render a.yaml", exit: 2, stderr: "proxyfile render: -o is required\n"},
 		{name: "two files", args: "render a.yaml b.yaml -o c.yaml", exit: 2, stderr: "proxyfile render: give exactly one file\n"},
-		// envoy is the one target with a generator. The others are refused before any file is read, so a.yaml need not exist.
 		{name: "target envoy", args: "check <ex>/minimal/yaml/proxyfile.yaml -o <ex>/minimal/yaml/envoy.yaml --target envoy"},
-		{name: "target nginx", args: "render a.yaml -o b.yaml --target nginx", exit: 2,
-			stderr: "proxyfile render: --target nginx: no generator for nginx in this version; see docs/portability.md\n"},
+		// haproxy has no generator in this version, so it is refused before any file is read, and a.yaml need not exist.
 		{name: "target haproxy", args: "check a.yaml -o b.yaml --target haproxy", exit: 2,
 			stderr: "proxyfile check: --target haproxy: no generator for haproxy in this version; see docs/portability.md\n"},
 		// The targets with a generator are the ones render.Targets holds, the list render picks the generator from, so
@@ -418,34 +416,41 @@ func TestRun(t *testing.T) {
 }
 
 // Every example folder holds its proxyfile under a default name, so check run there with no file reads it and finds
-// the committed files current, as a user who copies an example and runs the commands with no file would.
+// the committed files current for each target that renders it, as a user who copies an example and runs the commands
+// with no file would. A form a target refuses commits <target>.refused instead, whose lines TestExamplesAreCurrent
+// compares.
 func TestCheckEveryExampleWithNoFile(t *testing.T) {
-	for _, form := range testsupport.ExampleForms {
-		t.Run(form.Dir, func(t *testing.T) {
+	for _, target := range render.Targets {
+		for _, form := range testsupport.ExampleForms {
 			// examples is relative to the package directory, so the folder is made absolute before the row moves into it.
 			dir, err := filepath.Abs(filepath.Join(examples, form.Dir))
 			if err != nil {
 				t.Fatalf("Abs: %v", err)
 			}
-			args := []string{"check", "-o", "envoy.yaml"}
-			if form.Methods != "" {
-				args = append(args, "--rpc-methods", form.Methods)
+			if _, err := os.Stat(filepath.Join(dir, target.Name+".refused")); err == nil {
+				continue
 			}
-			if form.Table {
-				args = append(args, "--rpc-table", "rpc-table.json")
-			}
-			t.Chdir(dir)
-			var stdout, stderr bytes.Buffer
-			if exit := Run(args, &stdout, &stderr, "v9.9.9"); exit != 0 {
-				t.Errorf("exit = %d, want 0", exit)
-			}
-			if got := stdout.String(); got != "" {
-				t.Errorf("stdout = %q, want %q", got, "")
-			}
-			if got := stderr.String(); got != "" {
-				t.Errorf("stderr = %q, want %q", got, "")
-			}
-		})
+			t.Run(target.Name+"/"+form.Dir, func(t *testing.T) {
+				args := []string{"check", "-o", target.Config, "--target", target.Name}
+				if form.Methods != "" {
+					args = append(args, "--rpc-methods", form.Methods)
+				}
+				if form.Table {
+					args = append(args, "--rpc-table", "rpc-table.json")
+				}
+				t.Chdir(dir)
+				var stdout, stderr bytes.Buffer
+				if exit := Run(args, &stdout, &stderr, "v9.9.9"); exit != 0 {
+					t.Errorf("exit = %d, want 0", exit)
+				}
+				if got := stdout.String(); got != "" {
+					t.Errorf("stdout = %q, want %q", got, "")
+				}
+				if got := stderr.String(); got != "" {
+					t.Errorf("stderr = %q, want %q", got, "")
+				}
+			})
+		}
 	}
 }
 
@@ -471,17 +476,19 @@ func declare(t *testing.T, targets ...format.Target) {
 	format.Targets = targets
 }
 
-// declareScripted declares, for the row, an nginx whose generator writes the configuration "config\n" and the script
-// proxyfile.js holding "script\n", beside Envoy, and puts both lists back when the row ends.
+// declareScripted declares, for the row, an nginx that refuses no key and whose generator writes the configuration
+// "config\n" and the script proxyfile.js holding "script\n", in place of the shipped nginx, which a lookup by name
+// would otherwise find first, and puts both lists back when the row ends.
 func declareScripted(t *testing.T) {
 	t.Helper()
-	declare(t, append(slices.Clone(format.Targets), format.Target{Name: "nginx", Title: "nginx", Keys: map[string]format.Support{}})...)
+	declare(t, testsupport.ReplaceOrAppend(format.Targets, format.Target{Name: "nginx", Title: "nginx", Keys: map[string]format.Support{}},
+		func(target format.Target) bool { return target.Name == "nginx" })...)
 	generators := render.Targets
 	t.Cleanup(func() { render.Targets = generators })
-	render.Targets = append(slices.Clone(render.Targets), render.Target{Name: "nginx", Config: "nginx.conf",
+	render.Targets = testsupport.ReplaceOrAppend(render.Targets, render.Target{Name: "nginx", Config: "nginx.conf",
 		Generate: func(generator.Input) ([]generator.File, error) {
 			return []generator.File{{Bytes: []byte("config\n")}, {Name: "proxyfile.js", Bytes: []byte("script\n")}}, nil
-		}})
+		}}, func(target render.Target) bool { return target.Name == "nginx" })
 }
 
 // envoyRefusing is an Envoy that refuses keys, each with the note "refused by this test", and declares no other key.
@@ -568,5 +575,66 @@ func absent(t *testing.T, tmp string, names ...string) {
 		if _, err := os.Stat(filepath.Join(tmp, name)); !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("%s: Stat error = %v, want that it does not exist", name, err)
 		}
+	}
+}
+
+// A value whose nginx form is longer than nginx reads from its file is refused by its key, as a key nginx cannot carry
+// is, with exit 1 and no file written: nginx reads no value longer than 4094 bytes between its quotes, or 4095 bytes
+// without them (measured on nginx 1.30.6 and 1.31.8), and the form grows by key, by 12 bytes for each $ of a rewrite,
+// which nginx writes as a variable, and by 3 for each dot of a host in its origin check. A service's and an
+// environment's name of 5000 characters is written in HOCON, which takes a key that long.
+func TestLongValuesForNginx(t *testing.T) {
+	const words = " whose nginx form is longer than nginx reads is refused by --target nginx: nginx reads no value longer than " +
+		"4094 bytes between its quotes, or 4095 bytes without them; write a value whose nginx form is at most 4094 bytes, " +
+		"or render it for envoy\n"
+	host := strings.Repeat("a", 4795) + ".example"
+	name := strings.Repeat("s", 5000)
+	// yaml is a proxyfile whose service line, environment line and route are the ones given, on lines 3, 5 and 7.
+	yaml := func(service, environment, route string) string {
+		return "listen: 8000\nservices:\n  " + service + "\norigins:\n  " + environment + "\nroutes:\n  - " + route + "\n"
+	}
+	const app, local = "app: {http: 3000}", "local: {hosts: [localhost]}"
+	cases := []struct {
+		name, file, proxyfile, stderr string
+	}{
+		{"a prefix", "p.yaml", yaml(app, local, "{name: app, to: app, prefix: /"+strings.Repeat("a", 5000)+"/}"),
+			`<tmp>/p.yaml:7:34: "routes[].prefix"` + words},
+		{"a path", "p.yaml", yaml(app, local, "{name: app, to: app, path: /"+strings.Repeat("a", 5000)+"}"),
+			`<tmp>/p.yaml:7:32: "routes[].path"` + words},
+		{"a rewrite", "p.yaml", yaml(app, local, "{name: app, to: app, prefix: /, rewrite: /"+strings.Repeat("a", 5000)+"/}"),
+			`<tmp>/p.yaml:7:46: "routes[].rewrite"` + words},
+		{"a rewrite of 400 $", "p.yaml", yaml(app, local, "{name: app, to: app, prefix: /, rewrite: /"+strings.Repeat("$", 400)+"/}"),
+			`<tmp>/p.yaml:7:46: "routes[].rewrite"` + words},
+		// A pattern's written form grows by the class each \b is written as.
+		{"a pattern", "p.yaml", yaml(app, local, "{name: app, to: app, pattern: '^/"+strings.Repeat(`\b`, 60)+"'}"),
+			`<tmp>/p.yaml:7:35: "routes[].pattern"` + words},
+		{"a host of an environment", "p.yaml", yaml(app, "local: {hosts: ["+host+"]}", "{name: app, to: app, prefix: /}"),
+			`<tmp>/p.yaml:5:3: "origins.<environment name>.hosts"` + words},
+		{"a host_header", "p.yaml", yaml("app: {http: 3000, host_header: "+host+"}", local, "{name: app, to: app, prefix: /}"),
+			`<tmp>/p.yaml:3:3: "services.<service name>.host_header"` + words},
+		{"a service's name", "Proxyfile",
+			"listen = 8000\nservices { " + name + " { http = 3000 } }\norigins { local { hosts = [localhost] } }\n" +
+				"routes = [ { name = app, prefix = \"/\", to = " + name + " } ]\n",
+			"<tmp>/Proxyfile: services." + name + `: "services.<service name>"` + words},
+		{"an environment's name", "Proxyfile",
+			"listen = 8000\nservices { app { http = 3000 } }\norigins { " + name + " { hosts = [localhost] } }\n" +
+				"routes = [ { name = app, prefix = \"/\", to = app } ]\n",
+			"<tmp>/Proxyfile: origins." + name + `: "origins.<environment name>"` + words},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			testsupport.WriteFile(t, filepath.Join(tmp, c.file), c.proxyfile)
+			var stdout, stderr bytes.Buffer
+			exit := Run([]string{"render", filepath.Join(tmp, c.file), "-o", filepath.Join(tmp, "nginx.conf"), "--target", "nginx"},
+				&stdout, &stderr, "v9.9.9")
+			if exit != 1 {
+				t.Errorf("exit = %d, want 1", exit)
+			}
+			if got := strings.ReplaceAll(stderr.String(), tmp, "<tmp>"); got != c.stderr {
+				t.Errorf("stderr = %.400q, want %.400q", got, c.stderr)
+			}
+			absent(t, tmp, "nginx.conf", "proxyfile.js")
+		})
 	}
 }

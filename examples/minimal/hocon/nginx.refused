@@ -1,0 +1,1 @@
+examples/minimal/hocon/Proxyfile: origins.all.origins: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

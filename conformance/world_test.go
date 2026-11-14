@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"os"
@@ -39,9 +40,13 @@ type world struct {
 	ports    map[string]string // each backend's ports by its role, as its -ports flag lists them
 	files    tlsFiles
 	mark     string // the proxy's unchecked mark (target.mark), which send forges and compare reads
+	plain    bool   // the listener speaks plain HTTP, as one of a file that writes no tls does (newClients)
 	// http1, http2, http1NoCertificate and http1OtherCA send the requests (client_test.go): they are made once, so
 	// the requests of a burst share their connections as a client's would.
 	http1, http2, http1NoCertificate, http1OtherCA *http.Client
+	// rawTLS is the TLS a raw request (sendRaw) opens its own connection with: the clients', with the client
+	// certificate the clients CA signed.
+	rawTLS *tls.Config
 }
 
 // claimWorld removes what an earlier run left, makes an empty runFolder, and removes the world and the folder when the
@@ -74,8 +79,9 @@ func claimWorld(t *testing.T) {
 // in the proxy's own network namespace can answer. 10.0.0.0/22 is the smallest block holding every one of them. The
 // collector at 10.0.3.40, which only examples/full names, is left unreachable: no request waits for it. The ports
 // 10000 and 9901 and the folders /config, /etc/gateway/tls and /etc/gateway/jwt are the examples' listen, admin and
-// tls keys and examples/full's auth.jwt.ca, the same for every target.
-func startWorld(t *testing.T, tg target, config string) *world {
+// tls keys and examples/full's auth.jwt.ca, the same for every target. plain says the rendered file's listener speaks
+// plain HTTP, so the clients do too.
+func startWorld(t *testing.T, tg target, config string, plain bool) *world {
 	buildStub(t, filepath.Join(runFolder, "stub"))
 	files := certificates(t, runFolder)
 	if _, err := docker("network", "create", "--subnet", "10.0.0.0/22", network); err != nil {
@@ -108,8 +114,9 @@ func startWorld(t *testing.T, tg target, config string) *world {
 		"-v", state, image, "serve", "-service", "accounts", "-instance", "accounts", "-ports", "7070")
 	waitReady(t, tg.ready)
 	listener := strings.TrimSpace(mustDocker(t, "port", proxy, "10000/tcp"))
-	w := &world{listener: listener, ports: ports, files: files, mark: tg.mark}
-	w.http1, w.http2, w.http1NoCertificate, w.http1OtherCA = newClients(t, files)
+	w := &world{listener: listener, ports: ports, files: files, mark: tg.mark, plain: plain}
+	w.http1, w.http2, w.http1NoCertificate, w.http1OtherCA = newClients(t, files, plain)
+	w.rawTLS = clientTLS(t, files, &files.client)
 	return w
 }
 

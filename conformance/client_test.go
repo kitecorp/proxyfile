@@ -22,6 +22,8 @@ type echo struct {
 	Service, Instance, Port, Proto, Method, Path, Host string
 	Attempt                                            int
 	Headers                                            map[string]string
+	Body                                               string
+	Trailers                                           map[string]string
 }
 
 // result is what came back for one request.
@@ -30,14 +32,42 @@ type result struct {
 	err             error // set when no answer came (a TLS refusal, a closed connection)
 	header, trailer http.Header
 	echo            *echo // nil when no stub wrote the answer
-	elapsed         time.Duration
+	// stubError is set when the answer is a stub's own to a request its HTTP server could not read, which no handler
+	// sees, so it carries no echo: Go's net/http server writes it with Content-Type: text/plain; charset=utf-8 and a
+	// body that starts with the status code and its text, such as 400 Bad Request (conn.serve in net/http/server.go,
+	// lines 2087 to 2124 of go1.27.4). It tells a request the proxy passed on, which the service could not read, from
+	// the proxy's own refusal of it, which would otherwise read alike: a 4xx with no echo.
+	stubError bool
+	elapsed   time.Duration
 }
 
 // newClients makes the battery's clients: HTTP/1.1 and HTTP/2 with the client certificate the clients CA signed,
 // HTTP/1.1 without one, and HTTP/1.1 with the certificate another CA signed. Each trusts the server certificate alone
 // and asks for localhost, the name it carries, whatever host a request names, so a request's Host header can name any
-// environment's host.
-func newClients(t testing.TB, files tlsFiles) (http1, http2, http1NoCertificate, http1OtherCA *http.Client) {
+// environment's host. With plain, for a listener of a file that writes no tls, they speak plain HTTP instead, the
+// HTTP/2 one with prior knowledge, as a gRPC client does; no certificate is sent, so the last two are HTTP/1.1
+// clients like the first, and only a file that writes tls runs the rows that use them.
+func newClients(t testing.TB, files tlsFiles, plain bool) (http1, http2, http1NoCertificate, http1OtherCA *http.Client) {
+	client := func(h2 bool, certificate *tls.Certificate) *http.Client {
+		var protocols http.Protocols
+		protocols.SetHTTP1(!h2)
+		transport := &http.Transport{Protocols: &protocols}
+		if plain {
+			protocols.SetUnencryptedHTTP2(h2)
+		} else {
+			protocols.SetHTTP2(h2)
+			transport.TLSClientConfig = clientTLS(t, files, certificate)
+		}
+		return &http.Client{Transport: transport, Timeout: 20 * time.Second}
+	}
+	return client(false, &files.client), client(true, &files.client), client(false, nil), client(false, &files.otherCA)
+}
+
+// clientTLS is the TLS of the battery's clients: it trusts the server certificate alone, asks for localhost, and
+// presents certificate, or none when it is nil. The certificate is presented by a callback, which crypto/tls never
+// second-guesses. With Certificates instead, crypto/tls sends no certificate whose issuer is missing from the CAs the
+// server names, so the one another CA signed would not be sent, and its row would repeat the no-certificate row.
+func clientTLS(t testing.TB, files tlsFiles, certificate *tls.Certificate) *tls.Config {
 	server, err := os.ReadFile(filepath.Join(files.tls, "certificate.pem"))
 	if err != nil {
 		t.Fatal(err)
@@ -46,35 +76,33 @@ func newClients(t testing.TB, files tlsFiles) (http1, http2, http1NoCertificate,
 	if !roots.AppendCertsFromPEM(server) {
 		t.Fatalf("%s holds no certificate", filepath.Join(files.tls, "certificate.pem"))
 	}
-	client := func(h2 bool, certificate func(*tls.CertificateRequestInfo) (*tls.Certificate, error)) *http.Client {
-		var protocols http.Protocols
-		protocols.SetHTTP1(!h2)
-		protocols.SetHTTP2(h2)
-		transport := &http.Transport{
-			TLSClientConfig: &tls.Config{RootCAs: roots, ServerName: "localhost", GetClientCertificate: certificate},
-			Protocols:       &protocols,
-		}
-		return &http.Client{Transport: transport, Timeout: 20 * time.Second}
+	config := &tls.Config{RootCAs: roots, ServerName: "localhost"}
+	if certificate != nil {
+		config.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return certificate, nil }
 	}
-	// Each certificate is presented by a callback, which crypto/tls never second-guesses. With Certificates instead,
-	// crypto/tls sends no certificate whose issuer is missing from the CAs the server names, so the one another CA
-	// signed would not be sent, and its row would repeat the no-certificate row.
-	present := func(certificate tls.Certificate) func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
-		return func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return &certificate, nil }
-	}
-	return client(false, present(files.client)), client(true, present(files.client)), client(false, nil),
-		client(false, present(files.otherCA))
+	return config
 }
 
-// send sends r to the proxy's listener and reads the whole answer, trailers included.
+// send sends r to the proxy's listener and reads the whole answer, trailers included: by hand when r is raw (sendRaw),
+// and otherwise through the client for its protocol.
 func (w *world) send(r request) result {
+	if r.raw {
+		if r.noCertificate || r.otherCA || r.forgedMark || r.proto == "grpc" {
+			panic(fmt.Sprintf("the battery sends a raw request with the client certificate and no forged mark over http/1.1 or h2, not %+v", r))
+		}
+		return w.sendRaw(r)
+	}
 	client := w.client(r)
 	var body io.Reader
 	if r.proto == "grpc" {
 		// The empty message: no compression flag and a length of 0.
 		body = bytes.NewReader([]byte{0, 0, 0, 0, 0})
 	}
-	req, err := http.NewRequest(r.method, "https://"+w.listener, body)
+	scheme := "https://"
+	if w.plain {
+		scheme = "http://"
+	}
+	req, err := http.NewRequest(r.method, scheme+w.listener, body)
 	if err != nil {
 		// A method net/http refuses is a mistake in the scenario data, as an unknown protocol is (client).
 		panic(fmt.Sprintf("the battery cannot send %q: %v", r.method, err))
@@ -107,6 +135,8 @@ func (w *world) send(r request) result {
 		return got
 	}
 	got.echo = readEcho(resp.Header.Get("content-type"), data)
+	got.stubError = resp.Header.Get("content-type") == "text/plain; charset=utf-8" &&
+		strings.HasPrefix(string(data), fmt.Sprintf("%d %s", resp.StatusCode, http.StatusText(resp.StatusCode)))
 	return got
 }
 

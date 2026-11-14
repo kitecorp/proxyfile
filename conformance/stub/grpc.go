@@ -27,6 +27,7 @@ func (b *backend) grpc(w http.ResponseWriter, r *http.Request) {
 		message = append([]byte{0x0a}, binary.AppendUvarint(nil, uint64(len(body)))...)
 		message = append(message, body...)
 	}
+	askRedirect(w, r)
 	w.Header().Set("content-type", "application/grpc")
 	w.Header().Set("trailer", "grpc-status")
 	w.WriteHeader(http.StatusOK)

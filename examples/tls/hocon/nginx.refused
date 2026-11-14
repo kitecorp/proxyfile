@@ -1,0 +1,6 @@
+examples/tls/hocon/Proxyfile: origins.all.origins: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/tls/hocon/Proxyfile: tls: "tls" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/tls/hocon/Proxyfile: tls.certificate: "tls.certificate" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/tls/hocon/Proxyfile: tls.clients: "tls.clients" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/tls/hocon/Proxyfile: tls.clients.ca: "tls.clients.ca" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/tls/hocon/Proxyfile: tls.key: "tls.key" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

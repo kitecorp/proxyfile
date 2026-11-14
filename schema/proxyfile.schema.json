@@ -381,7 +381,7 @@
     },
     "haproxy": {
       "additionalProperties": false,
-      "description": "The settings only HAProxy will read; this version has no HAProxy generator, so it takes no key.",
+      "description": "The settings only HAProxy reads beyond the core keys; this version holds none, so the block takes no key.",
       "properties": {},
       "type": "object"
     },
@@ -450,7 +450,7 @@
     },
     "nginx": {
       "additionalProperties": false,
-      "description": "The settings only nginx will read; this version has no nginx generator, so it takes no key.",
+      "description": "The settings only nginx reads beyond the core keys; this version holds none, so the block takes no key.",
       "properties": {},
       "type": "object"
     },

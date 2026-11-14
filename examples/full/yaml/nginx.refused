@@ -1,0 +1,91 @@
+examples/full/yaml/proxyfile.yaml:5:1: "tls" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:6:3: "tls.certificate" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:7:3: "tls.key" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:8:3: "tls.clients" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:8:13: "tls.clients.ca" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:9:1: "client_address" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:10:1: "limits" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:11:3: "limits.connections" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:12:3: "limits.request_headers" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:12:21: "limits.request_headers.size" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:12:34: "limits.request_headers.count" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:15:3: "timeouts.idle" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:16:3: "timeouts.upstream_idle" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:22:5: "services.<service name>.balance" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:23:5: "services.<service name>.health" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
+examples/full/yaml/proxyfile.yaml:23:14: "services.<service name>.health.path" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
+examples/full/yaml/proxyfile.yaml:23:30: "services.<service name>.health.grpc" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
+examples/full/yaml/proxyfile.yaml:23:42: "services.<service name>.health.interval" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
+examples/full/yaml/proxyfile.yaml:23:57: "services.<service name>.health.timeout" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
+examples/full/yaml/proxyfile.yaml:23:70: "services.<service name>.health.healthy" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
+examples/full/yaml/proxyfile.yaml:23:82: "services.<service name>.health.unhealthy" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
+examples/full/yaml/proxyfile.yaml:25:25: "services.<service name>.address" a DNS name is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:25:60: "services.<service name>.balance" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:25:75: "services.<service name>.hash" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:25:82: "services.<service name>.hash.header" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:26:1: "dns" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:26:7: "dns.resolver" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:27:1: "auth" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:28:3: "auth.ask" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:29:3: "auth.timeout" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:30:3: "auth.enabled" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:31:3: "auth.when_unavailable" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:32:3: "auth.only_with_header" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:33:3: "auth.send" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:34:3: "auth.accept" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:35:3: "auth.send_request" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:36:3: "auth.jwt" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
+examples/full/yaml/proxyfile.yaml:37:5: "auth.jwt.issuer" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
+examples/full/yaml/proxyfile.yaml:38:5: "auth.jwt.audiences" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
+examples/full/yaml/proxyfile.yaml:39:5: "auth.jwt.keys" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
+examples/full/yaml/proxyfile.yaml:40:5: "auth.jwt.ca" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
+examples/full/yaml/proxyfile.yaml:41:5: "auth.jwt.header" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
+examples/full/yaml/proxyfile.yaml:42:5: "auth.jwt.optional" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
+examples/full/yaml/proxyfile.yaml:43:5: "auth.jwt.claims" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
+examples/full/yaml/proxyfile.yaml:43:14: "auth.jwt.claims.<header name>" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
+examples/full/yaml/proxyfile.yaml:43:30: "auth.jwt.claims.<header name>" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
+examples/full/yaml/proxyfile.yaml:44:1: "remove_from_clients" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:45:1: "cors" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:46:3: "cors.allow_methods" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:47:3: "cors.allow_headers" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:48:3: "cors.expose_headers" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:49:3: "cors.max_age" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:53:5: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:54:5: "origins.<environment name>.patterns" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:57:5: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:58:5: "origins.<environment name>.patterns" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:61:5: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:62:5: "origins.<environment name>.patterns" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:64:76: "routes[].auth" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:66:7: "routes[].rpc.retries" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:67:7: "routes[].rpc.rate_limit" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:67:20: "routes[].rpc.rate_limit.requests" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:67:35: "routes[].rpc.rate_limit.per" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:67:44: "routes[].rpc.rate_limit.by" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:71:106: "routes[].auth" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:72:53: "routes[].rate_limit" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:72:66: "routes[].rate_limit.requests" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:72:80: "routes[].rate_limit.per" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:72:89: "routes[].rate_limit.burst" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:72:100: "routes[].rate_limit.by" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:73:39: "routes[].retries" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:76:63: "rpc.methods[].action" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:78:63: "rpc.methods[].action" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:78:76: "rpc.methods[].reports" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:79:1: "log" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:79:7: "log.status_from" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:79:25: "log.sample" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:80:1: "tracing" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:81:3: "tracing.provider" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:82:5: "tracing.provider.otel" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:83:7: "tracing.provider.otel.endpoint" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:84:7: "tracing.provider.otel.service" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:85:7: "tracing.provider.otel.sample" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:85:16: "tracing.provider.otel.sample.rate" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:86:3: "tracing.tags" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:87:5: "tracing.tags.<tag name>" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:87:19: "tracing.tags.<tag name>.env" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:87:41: "tracing.tags.<tag name>.default" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:88:5: "tracing.tags.<tag name>" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:88:18: "tracing.tags.<tag name>.header" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:89:3: "tracing.path_in_url" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

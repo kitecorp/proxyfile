@@ -1,0 +1,6 @@
+examples/tls/yaml/proxyfile.yaml:6:1: "tls" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/tls/yaml/proxyfile.yaml:7:3: "tls.certificate" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/tls/yaml/proxyfile.yaml:8:3: "tls.key" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/tls/yaml/proxyfile.yaml:9:3: "tls.clients" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/tls/yaml/proxyfile.yaml:9:13: "tls.clients.ca" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/tls/yaml/proxyfile.yaml:13:35: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

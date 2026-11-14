@@ -43,13 +43,35 @@ func (b *backend) reply(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// The body is read to its end before the answer, so the request's trailers are read too (describe). A body the
+	// stub cannot read, such as one whose trailer has a name outside the token characters, is answered as net/http
+	// answers a request it cannot read, so the battery reads it as the stub's own answer (result.stubError) and never
+	// as a refusal by the proxy.
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "400 Bad Request: the stub could not read the body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 	status := http.StatusOK
 	if code, err := strconv.Atoi(r.Header.Get("x-stub-status")); err == nil {
 		status = code
 	}
+	askRedirect(w, r)
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(b.describe(r, attempt))
+	e := b.describe(r, attempt)
+	e.Body = string(body)
+	json.NewEncoder(w).Encode(e)
+}
+
+// askRedirect answers X-Accel-Redirect with the value of the request's x-stub-accel-redirect, when it has one. nginx
+// answers with the URI an upstream names there, in place of the upstream's answer, unless told to ignore the header
+// (proxy_ignore_headers), so a service could serve the client a location no route gives it; a scenario asks for one
+// to see that the proxy passes it on instead.
+func askRedirect(w http.ResponseWriter, r *http.Request) {
+	if value := r.Header.Get("x-stub-accel-redirect"); value != "" {
+		w.Header().Set("X-Accel-Redirect", value)
+	}
 }
 
 // firstTry closes the request carrying an x-stub-fail-first key the first time the key reaches any backend sharing
@@ -107,6 +129,10 @@ type echo struct {
 	Attempt int    `json:"attempt"`
 	// Headers holds every request header by its lower-case name, its values joined with ",".
 	Headers map[string]string `json:"headers"`
+	// Body is the request body as read, on a plain HTTP request; Trailers holds the request's trailers as Headers holds
+	// its headers, read once the body has ended, including those no Trailer header declared.
+	Body     string            `json:"body,omitempty"`
+	Trailers map[string]string `json:"trailers,omitempty"`
 }
 
 func (b *backend) describe(r *http.Request, attempt int) echo {
@@ -118,6 +144,13 @@ func (b *backend) describe(r *http.Request, attempt int) echo {
 	for name, values := range r.Header {
 		headers[strings.ToLower(name)] = strings.Join(values, ",")
 	}
+	var trailers map[string]string
+	for name, values := range r.Trailer {
+		if trailers == nil {
+			trailers = map[string]string{}
+		}
+		trailers[strings.ToLower(name)] = strings.Join(values, ",")
+	}
 	return echo{Service: b.service, Instance: b.instance, Port: port, Proto: r.Proto, Method: r.Method,
-		Path: r.RequestURI, Host: r.Host, Attempt: attempt, Headers: headers}
+		Path: r.RequestURI, Host: r.Host, Attempt: attempt, Headers: headers, Trailers: trailers}
 }

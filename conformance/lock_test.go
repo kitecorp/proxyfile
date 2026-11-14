@@ -14,13 +14,14 @@ import (
 	"time"
 )
 
-// lockWait is the longest a run waits for the lock another run holds: room for the worlds of many runs, a run of both
-// files taking 13 to 15 s on one arm64 Mac.
+// lockWait is the longest a run waits for the lock another run holds: room for the worlds of many runs, a run of every
+// entry's files, five worlds, taking about 19 s on one arm64 Mac.
 const lockWait = 5 * time.Minute
 
-// runTime is what a run keeps for its worlds after the wait, under go test's -timeout: a run of both files took 13 to
-// 15 s on one arm64 Mac, and a first run also pulls the proxy's image. -timeout ends the test binary in a panic that
-// removes no world, so the wait stops in time for the run to say why itself and remove what it made.
+// runTime is what a run keeps for its worlds after the wait, under go test's -timeout: a run of every entry's files,
+// five worlds, took about 19 s on one arm64 Mac, and a first run also pulls the proxies' images. -timeout ends the test
+// binary in a panic that removes no world, so the wait stops in time for the run to say why itself and remove what it
+// made.
 const runTime = 2 * time.Minute
 
 // lockPath is the lock's file, one path for every run on the machine. It is not in the temporary folder, because that

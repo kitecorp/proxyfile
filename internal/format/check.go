@@ -114,7 +114,7 @@ func (c *checker) mapping(f Field, n *tree.Node) {
 		case moved:
 			c.Add(entry.KeyPos, "%q moved to %s in proxyfile 2.0", entry.Key, to)
 		case f.Reserved:
-			c.Add(entry.KeyPos, "%q in %s: %s", entry.Key, f.Name, NoGenerator(f.Name))
+			c.Add(entry.KeyPos, "%q in %s: the %s block takes no key in this version; see docs/portability.md", entry.Key, f.Name, f.Name)
 		default:
 			c.Add(entry.KeyPos, "unknown key %q; known here: %s", entry.Key, strings.Join(sortedNames(f.Fields), ", "))
 		}

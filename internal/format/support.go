@@ -50,11 +50,12 @@ type Target struct {
 // Targets are the proxies with a generator, in the order of the support table's columns, each declared in a file of
 // its own. TestTargetDeclarations keeps each target's declarations complete, so a key added to the format cannot go
 // undeclared, and keeps each refused form on a partial key with a test of the value.
-var Targets = []Target{envoyTarget}
+var Targets = []Target{envoyTarget, nginxTarget}
 
 // WrittenWithNoKey are the behaviours every configuration holds with no key for them, named in words. The support
 // table lists them after the core keys, so each target declares how it writes them as it declares a key.
-var WrittenWithNoKey = []string{"the request's path normalised before a route is picked", "a dot segment with a ; parameter answered 400"}
+var WrittenWithNoKey = []string{"the request's path normalised before a route is picked", "a dot segment with a ; parameter answered 400",
+	"the request line and header names read before a route is picked"}
 
 // MatrixRows are the support table's rows: every core key of the proxyfile, in CoreKeys' order, then WrittenWithNoKey.
 func MatrixRows() []string {
@@ -128,6 +129,13 @@ func RefusedMessage(key string, t Target) string {
 	return fmt.Sprintf("%q is refused by --target %s: %s", key, t.Name, t.Keys[key].Note)
 }
 
+// FormRefusedMessage is the problem of a value of key, written in a file rendered for the target named target, that
+// the target refuses in the form form: the key as the support table names it, the form, and what to write instead. A
+// generator that finds such a value only as it writes it names it in the same words.
+func FormRefusedMessage(key, form, target, instead string) string {
+	return fmt.Sprintf("%q %s is refused by --target %s: %s", key, form, target, instead)
+}
+
 // Refusals returns one problem for each key written in file whose path t declares Refused, at the key, sorted, so a
 // render for t names every key it cannot carry instead of writing a weaker configuration. A Refuses entry of a key's
 // declaration is checked at each key of that path, given the key's value and proxyfile, and names the form it refuses.
@@ -143,7 +151,7 @@ func Refusals(f Field, file, proxyfile *tree.Node, t Target) []model.Problem {
 		}
 		for _, refusal := range support.Refuses {
 			if refusal.Applies(entry.Value, proxyfile) {
-				problems.Add(entry.KeyPos, "%q %s is refused by --target %s: %s", path, refusal.Form, t.Name, refusal.Instead)
+				problems.Add(entry.KeyPos, "%s", FormRefusedMessage(path, refusal.Form, t.Name, refusal.Instead))
 			}
 		}
 	})

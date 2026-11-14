@@ -19,8 +19,8 @@ import (
 	"github.com/kitecorp/proxyfile/v2/internal/tree"
 )
 
-const usage = `usage: proxyfile render [<file>] -o <output> [--target envoy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
-       proxyfile check [<file>] -o <output> [--target envoy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+const usage = `usage: proxyfile render [<file>] -o <output> [--target envoy|nginx] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+       proxyfile check [<file>] -o <output> [--target envoy|nginx] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
        proxyfile schema
        proxyfile version
 `
@@ -30,8 +30,8 @@ const usage = `usage: proxyfile render [<file>] -o <output> [--target envoy] [--
 var defaultNames = []string{"Proxyfile", "proxyfile.conf", "proxyfile.yaml", "proxyfile.yml"}
 
 // targets are the proxies --target names, in the order a message lists them. The ones with a generator are those
-// render.Targets holds, envoy alone in this version, and the others are refused by name rather than given an Envoy
-// file for a gateway meant for them.
+// render.Targets holds, and the others are refused by name rather than given another proxy's file for a gateway meant
+// for them.
 var targets = []string{"envoy", "nginx", "haproxy"}
 
 // The exit codes: done, a problem in the input or a difference check found, and wrong usage.

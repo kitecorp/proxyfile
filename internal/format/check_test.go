@@ -146,13 +146,13 @@ func TestCheck(t *testing.T) {
 			want:     []string{`g.yaml:7:87: "ca" must be an absolute path`, `g.yaml:7:103: "header" must be a lower-case header name`}},
 		{name: "jwt issuer empty", spec: Proxyfile, document: m.Inserted(7, `auth: {jwt: {issuer: "", audiences: any, keys: /k.json}}`),
 			want: []string{`g.yaml:7:22: "issuer" must be one character or more`}},
-		// nginx and haproxy are reserved for their generators: written empty they are accepted, and a key in either is
-		// refused, so a file written for a later version is never rendered without it.
+		// nginx and haproxy are each proxy's own block, which takes no key in this version: written empty they are
+		// accepted, and a key in either is refused, so a file written for a later version is never rendered without it.
 		{name: "nginx and haproxy empty", spec: Proxyfile, document: m.Inserted(7, "nginx: {}\nhaproxy: {}")},
 		{name: "a key in nginx", spec: Proxyfile, document: m.Inserted(7, "nginx: {worker_connections: 1024}"),
-			want: []string{`g.yaml:7:9: "worker_connections" in nginx: no generator for nginx in this version; see docs/portability.md`}},
+			want: []string{`g.yaml:7:9: "worker_connections" in nginx: the nginx block takes no key in this version; see docs/portability.md`}},
 		{name: "a key in haproxy", spec: Proxyfile, document: m.Inserted(7, "haproxy: {maxconn: 1024}"),
-			want: []string{`g.yaml:7:11: "maxconn" in haproxy: no generator for haproxy in this version; see docs/portability.md`}},
+			want: []string{`g.yaml:7:11: "maxconn" in haproxy: the haproxy block takes no key in this version; see docs/portability.md`}},
 		{name: "wrong kind", spec: Proxyfile, document: m.Replaced(2, 3, "services: 5"),
 			want: []string{`g.yaml:2:11: "services" must be a mapping`}},
 		{name: "lowest port", spec: Proxyfile, document: m.Replaced(1, 1, "listen: 1")},

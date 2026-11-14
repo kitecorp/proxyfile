@@ -1,0 +1,30 @@
+# The conformance battery's second file for nginx: nginx.yaml with no pattern route. nginx matches a path holding a
+# byte Envoy escapes before it matches on the path it has decoded in such a file, and refuses that path in a file with
+# a pattern route, so the battery runs both. Every entry runs it, Envoy's too, so its literals are Envoy's answers.
+listen: 10000
+admin: 9901
+services:
+  shop:
+    http: 8080
+    grpc: 8081
+    addresses: ["10.0.1.11", "10.0.1.12"]
+  accounts: {grpc: 7070, http: 7070, host_header: "127.0.0.1:7070"}
+  catalog: {http: 8090, address: "10.0.2.21"}
+origins:
+  live: {hosts: [api.example.com, api.example.org]}
+  test: {hosts: [api.test.example.com]}
+  local: {hosts: [127.0.0.1, localhost]}
+routes:
+  - rpc:
+      to:
+        example.shop.*: {service: shop, name: shop}
+        "*": accounts
+  - {name: accounts-webhooks, path: /api/webhooks, method: POST, to: accounts, rewrite: /hooks/payments}
+  - {name: catalog, prefix: /catalog/, to: catalog}
+  - {name: hooks, prefix: /hooks/, to: accounts, rewrite: /in/}
+  - {name: shop, prefix: /, to: shop}
+rpc:
+  methods:
+    - {service: example.shop.v1.CartService, method: GetCart}
+    - {service: example.accounts.v1.ProfileService, method: GetProfile}
+    - {service: example.shop.v1.CartService, method: AddItem}

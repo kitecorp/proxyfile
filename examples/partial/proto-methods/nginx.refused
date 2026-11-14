@@ -1,0 +1,13 @@
+examples/partial/proto-methods/Proxyfile: auth: "auth" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/proto-methods/Proxyfile: auth.accept: "auth.accept" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/proto-methods/Proxyfile: auth.ask: "auth.ask" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/proto-methods/Proxyfile: auth.enabled: "auth.enabled" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/proto-methods/Proxyfile: auth.send: "auth.send" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/proto-methods/Proxyfile: auth.timeout: "auth.timeout" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/proto-methods/Proxyfile: auth.when_unavailable: "auth.when_unavailable" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/proto-methods/Proxyfile: log: "log" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/proto-methods/Proxyfile: log.sample: "log.sample" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/proto-methods/Proxyfile: log.status_from: "log.status_from" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/proto-methods/Proxyfile: origins.only.origins: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/proto-methods/Proxyfile: routes[1].auth: "routes[].auth" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/proto-methods/Proxyfile: timeouts.request: "timeouts.request" a time is refused by --target nginx: nginx has no limit on a whole request (its time limits count the time between two reads or writes); write timeouts.request: none, or render it for envoy

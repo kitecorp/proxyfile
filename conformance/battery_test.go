@@ -24,16 +24,19 @@ import (
 // entry label and in it one per file label. A file whose folder commits <target>.refused is checked by its render
 // alone (checkRefused), and starts no container. Any other file is rendered for the target through the program's own
 // command line under the target's configuration name, with this machine's conformance lock held (lockWorld), and the
-// proxy runs on it among the stubs; each row that runs on the file (runsOn) is sent and must get its literal on the
-// file (literalOn). It needs Docker, so it is built only with the tag conformance:
+// proxy runs on it among the stubs, reached over plain HTTP when the file writes no tls; each row that runs on the
+// file (runsOn) is sent and must get its literal for the target and the file (literalFor). It needs Docker, so it is
+// built only with the tag conformance:
 // go test -tags conformance ./conformance/...
 func TestBattery(t *testing.T) {
 	// No unit test checks the battery's own rows, because the battery is the test, so it checks them here, before any
 	// container starts: each row names core keys of the format, the keys a target's declaration speaks of; each
-	// literal sits on a file the row runs on, and each row runs on a file of an Envoy entry, where its literals were
-	// measured (rowProblems); every key Envoy's rows exercise is exercised on each entry's files or refused by its
-	// target (coverage); every row that runs on an Envoy entry's file runs on one of each entry's files or names a key
-	// its target refuses (rowCoverage); and each entry's target has a declaration and a generator (in its subtest).
+	// literal sits on a file the row runs on, each target's own literal names a row its target declares partial and
+	// sits on a file of the target's entries the row runs on, and each row runs on a file of an Envoy entry, where its
+	// literals were measured (rowProblems); every key Envoy's rows exercise is exercised on each entry's files or
+	// refused by its target (coverage); every row that runs on an Envoy entry's file runs on one of each entry's files
+	// or names a key its target refuses (rowCoverage); and each entry's target has a declaration and a generator (in its
+	// subtest).
 	keys := format.CoreKeys(format.Proxyfile)
 	for _, s := range scenarios {
 		for _, e := range s.exchanges {
@@ -116,7 +119,7 @@ func runFile(t *testing.T, tg target, f file, config string, lock func(*testing.
 		t.Fatalf("render of %s for %s: exit %d with no committed %s.refused beside it; stderr:\n%s", f.proxyfile, tg.name, code,
 			tg.name, stderr.String())
 	}
-	w := startWorld(t, tg, mounted)
+	w := startWorld(t, tg, mounted, !slices.Contains(written, "tls"))
 	// In order and never in parallel: a scenario's quiet and burst count on nothing else reaching the proxy.
 	for _, s := range scenarios {
 		var rows []exchange
@@ -136,7 +139,7 @@ func runFile(t *testing.T, tg target, f file, config string, lock func(*testing.
 					if e.refusing != "" {
 						w.refuse(t, e.refusing)
 					}
-					for _, difference := range sendRepeated(w, e, literalOn(e, f.label)) {
+					for _, difference := range sendRepeated(w, e, literalFor(e, tg.name, f.label)) {
 						t.Error(difference)
 					}
 				})
