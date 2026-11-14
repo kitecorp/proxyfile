@@ -89,6 +89,10 @@ func (w *world) send(r request) result {
 	for name, value := range r.headers {
 		req.Header.Set(name, value)
 	}
+	if r.forgedMark {
+		// The world's own mark, so each proxy is sent a copy of the header it writes itself.
+		req.Header.Set(w.mark, "true")
+	}
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {

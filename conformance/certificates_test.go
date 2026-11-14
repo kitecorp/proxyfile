@@ -40,7 +40,7 @@ func certificates(t testing.TB, dir string) tlsFiles {
 		}
 	}
 	// The server certificate is its own issuer and a CA, as openssl req -x509 makes it, so the copy in jwt/ca.pem is
-	// a CA bundle the proxy loads as it loads the one scripts/validate-envoy.sh makes.
+	// a CA bundle the proxy loads as it loads the one scripts/throwaway-tls.sh makes.
 	serverKey := newKey(t)
 	server := &x509.Certificate{
 		Subject:               pkix.Name{CommonName: "localhost"},
@@ -98,7 +98,7 @@ func clientCertificate(t testing.TB, ca *x509.Certificate, caKey *rsa.PrivateKey
 	return tls.Certificate{Certificate: [][]byte{certificate.Raw}, PrivateKey: key}
 }
 
-// newKey makes an RSA 2048 key, the kind the openssl commands of scripts/validate-envoy.sh make.
+// newKey makes an RSA 2048 key, the kind the openssl commands of scripts/throwaway-tls.sh make.
 func newKey(t testing.TB) *rsa.PrivateKey {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

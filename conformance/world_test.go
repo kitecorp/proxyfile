@@ -13,7 +13,8 @@ import (
 )
 
 // The battery's own Docker objects. It removes them at the start and at the end of each run and touches nothing
-// else, so it never disturbs another program's containers on the same machine.
+// else, so it never disturbs another program's containers on the same machine. Their names are fixed, so a run holds
+// this machine's conformance lock while they exist (lockWorld), and a second run waits for it.
 const (
 	network  = "proxyfile-conformance"
 	volume   = "proxyfile-conformance-state"
@@ -32,18 +33,21 @@ var containers = []string{accounts, proxy, "proxyfile-conformance-shop-1", "prox
 // its cleanup leaves it where the next run's start removes it.
 var runFolder = filepath.Join(os.TempDir(), "proxyfile-conformance")
 
-// world is a running proxy among the stubs of the full example, reached from the host.
+// world is a running proxy among the stubs of the examples the battery runs, reached from the host.
 type world struct {
 	listener string            // the host and port Docker published the proxy's listener on
 	ports    map[string]string // each backend's ports by its role, as its -ports flag lists them
 	files    tlsFiles
+	mark     string // the proxy's unchecked mark (target.mark), which send forges and compare reads
 	// http1, http2, http1NoCertificate and http1OtherCA send the requests (client_test.go): they are made once, so
 	// the requests of a burst share their connections as a client's would.
 	http1, http2, http1NoCertificate, http1OtherCA *http.Client
 }
 
 // claimWorld removes what an earlier run left, makes an empty runFolder, and removes the world and the folder when the
-// test ends.
+// test ends. Its caller holds the conformance lock (lockWorld, called first), so the world it removes at the start is
+// a run's that ended or was killed, never one still running, and its removal at the end comes before the lock is
+// given back.
 func claimWorld(t *testing.T) {
 	removeWorld()
 	t.Cleanup(func() {
@@ -63,19 +67,20 @@ func claimWorld(t *testing.T) {
 	}
 }
 
-// startWorld starts the network of the full example and the proxy tg on the rendered file in config, and waits until
-// the proxy is ready; claimWorld, called first, removes all of it when the test ends. The addresses are the example's:
-// the shop backends at 10.0.1.11 and 10.0.1.12, the resolver at 10.0.0.2 answering catalog.internal.example with
-// 10.0.2.21, and accounts on 127.0.0.1:7070, which only a container in the proxy's own network namespace can answer.
-// 10.0.0.0/22 is the smallest block holding every one of them. The collector at 10.0.3.40 is left unreachable: no
-// request waits for it. The ports 10000 and 9901 and the folders /config, /etc/gateway/tls and /etc/gateway/jwt are
-// the example's listen, admin, tls keys and auth.jwt.ca, the same for every target.
+// startWorld starts the network of the examples the battery runs and the proxy tg on the rendered file in config, and
+// waits until the proxy is ready; claimWorld, called first, removes all of it when the test ends. The addresses are
+// those examples/full and examples/portable both write: the shop backends at 10.0.1.11 and 10.0.1.12, the resolver at
+// 10.0.0.2 answering catalog.internal.example with 10.0.2.21, and accounts on 127.0.0.1:7070, which only a container
+// in the proxy's own network namespace can answer. 10.0.0.0/22 is the smallest block holding every one of them. The
+// collector at 10.0.3.40, which only examples/full names, is left unreachable: no request waits for it. The ports
+// 10000 and 9901 and the folders /config, /etc/gateway/tls and /etc/gateway/jwt are the examples' listen, admin and
+// tls keys and examples/full's auth.jwt.ca, the same for every target.
 func startWorld(t *testing.T, tg target, config string) *world {
 	buildStub(t, filepath.Join(runFolder, "stub"))
 	files := certificates(t, runFolder)
 	if _, err := docker("network", "create", "--subnet", "10.0.0.0/22", network); err != nil {
 		if strings.Contains(err.Error(), "Pool overlaps") {
-			t.Fatalf("%v\nanother Docker network holds addresses in 10.0.0.0/22, which the full example's addresses "+
+			t.Fatalf("%v\nanother Docker network holds addresses in 10.0.0.0/22, which the examples' addresses "+
 				"need; the battery removes only its own network, %s, so it stops here", err, network)
 		}
 		t.Fatal(err)
@@ -103,7 +108,7 @@ func startWorld(t *testing.T, tg target, config string) *world {
 		"-v", state, image, "serve", "-service", "accounts", "-instance", "accounts", "-ports", "7070")
 	waitReady(t, tg.ready)
 	listener := strings.TrimSpace(mustDocker(t, "port", proxy, "10000/tcp"))
-	w := &world{listener: listener, ports: ports, files: files}
+	w := &world{listener: listener, ports: ports, files: files, mark: tg.mark}
 	w.http1, w.http2, w.http1NoCertificate, w.http1OtherCA = newClients(t, files)
 	return w
 }

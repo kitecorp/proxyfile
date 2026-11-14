@@ -6,11 +6,15 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/kitecorp/proxyfile/v2/internal/format"
+	"github.com/kitecorp/proxyfile/v2/internal/generator"
+	"github.com/kitecorp/proxyfile/v2/internal/render"
 	"github.com/kitecorp/proxyfile/v2/internal/testsupport"
+	"github.com/kitecorp/proxyfile/v2/internal/tree"
 )
 
 const usageText = `usage: proxyfile render [<file>] -o <output> [--target envoy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
@@ -21,7 +25,7 @@ const usageText = `usage: proxyfile render [<file>] -o <output> [--target envoy]
 
 const examples = "../../examples"
 
-const overwrite = "proxyfile render: an output path names an input or the other output\n"
+const overwrite = "proxyfile render: an output path names an input or another output\n"
 
 // originsFixture is the origins file that says what the minimal example writes inline, which the render tests keep for
 // the file form.
@@ -119,6 +123,13 @@ func TestRun(t *testing.T) {
 		}, args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/out.yaml --rpc-methods <tmp>/methods.json", exit: 1,
 			stderr: "<tmp>/methods.json:2:76: \"rpc.methods[].action\" is refused by --target envoy: refused by this test\n",
 			also:   nothingWritten("partial", "methods.json")},
+		{name: "a key the target refuses in a .proto option", setup: func(t *testing.T, tmp string) {
+			copyExample(t, tmp, "partial")
+			declare(t, envoyRefusing("rpc.methods[].action", "rpc.methods[].reports"))
+		}, args: "render <tmp>/proto-methods/Proxyfile -o <tmp>/out.yaml", exit: 1,
+			stderr: "<tmp>/proto/example/backend/v1/reports.proto:9:3: \"rpc.methods[].action\" is refused by --target envoy: refused by this test\n" +
+				"<tmp>/proto/example/backend/v1/reports.proto:9:3: \"rpc.methods[].reports\" is refused by --target envoy: refused by this test\n",
+			also: nothingWritten("partial")},
 		{name: "the same keys in the proxyfile are refused once each", setup: func(t *testing.T, tmp string) {
 			testsupport.WriteFile(t, filepath.Join(tmp, "proxyfile.yaml"), string(testsupport.ReadFile(t, examples+"/partial/yaml/proxyfile.yaml"))+
 				"cors: {max_age: \"600\"}\n"+testsupport.PartialMethods)
@@ -127,6 +138,97 @@ func TestRun(t *testing.T) {
 			stderr: "<tmp>/proxyfile.yaml:28:8: \"cors.max_age\" is refused by --target envoy: refused by this test\n" +
 				"<tmp>/proxyfile.yaml:31:72: \"rpc.methods[].action\" is refused by --target envoy: refused by this test\n",
 			also: nothingWritten("partial")},
+		// A form refused for a key of the proxyfile is told by the proxyfile's keys wherever the refused key is
+		// written: in the origins file, the methods file or the .proto options as in the proxyfile.
+		{name: "a form refused for a key of the proxyfile, in the methods file", setup: func(t *testing.T, tmp string) {
+			copyExample(t, tmp, "partial")
+			declare(t, envoyRefusingWhen(map[string]string{"rpc.methods[].reports": "auth.ask"}))
+		}, args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/out.yaml --rpc-methods <tmp>/methods.json", exit: 1,
+			stderr: "<tmp>/methods.json:2:94: \"rpc.methods[].reports\" with auth.ask is refused by --target envoy: refused by this test\n",
+			also:   nothingWritten("partial", "methods.json")},
+		{name: "a form refused for a key of the proxyfile, in a .proto option", setup: func(t *testing.T, tmp string) {
+			copyExample(t, tmp, "partial")
+			declare(t, envoyRefusingWhen(map[string]string{"rpc.methods[].reports": "auth.ask"}))
+		}, args: "render <tmp>/proto-methods/Proxyfile -o <tmp>/out.yaml", exit: 1,
+			stderr: "<tmp>/proto/example/backend/v1/reports.proto:9:3: \"rpc.methods[].reports\" with auth.ask is refused by --target envoy: refused by this test\n",
+			also:   nothingWritten("partial")},
+		{name: "a form refused for a key of the proxyfile, in the origins file", setup: func(t *testing.T, tmp string) {
+			originsFileForm(t, tmp, string(testsupport.ReadFile(t, originsFixture)))
+			declare(t, envoyRefusingWhen(map[string]string{"origins.<environment name>.origins": "listen"}))
+		}, args: "render <tmp>/proxyfile.yaml -o <tmp>/out.yaml", exit: 1,
+			stderr: "<tmp>/origins.json:3:45: \"origins.<environment name>.origins\" with listen is refused by --target envoy: refused by this test\n",
+			also:   nothingWritten("minimal")},
+		{name: "the same forms in the proxyfile are refused once each", setup: func(t *testing.T, tmp string) {
+			testsupport.WriteFile(t, filepath.Join(tmp, "proxyfile.yaml"), string(testsupport.ReadFile(t, examples+"/partial/yaml/proxyfile.yaml"))+
+				testsupport.PartialMethods)
+			declare(t, envoyRefusingWhen(map[string]string{"rpc.methods[].reports": "auth.ask", "origins.<environment name>.origins": "listen"}))
+		}, args: "render <tmp>/proxyfile.yaml -o <tmp>/out.yaml", exit: 1,
+			stderr: "<tmp>/proxyfile.yaml:19:40: \"origins.<environment name>.origins\" with listen is refused by --target envoy: refused by this test\n" +
+				"<tmp>/proxyfile.yaml:30:86: \"rpc.methods[].reports\" with auth.ask is refused by --target envoy: refused by this test\n",
+			also: nothingWritten("partial")},
+		// No shipped generator writes a file beside its configuration, so these rows declare an nginx whose generator
+		// writes a script, and the script goes through render, check and the output-path rule as a shipped one would.
+		{name: "a script beside the configuration", setup: func(t *testing.T, tmp string) {
+			copyMinimal(t, tmp)
+			declareScripted(t)
+		}, args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/out.conf --target nginx",
+			also: func(t *testing.T, tmp string) {
+				for name, want := range map[string]string{"out.conf": "config\n", "proxyfile.js": "script\n"} {
+					if got := string(testsupport.ReadFile(t, filepath.Join(tmp, name))); got != want {
+						t.Errorf("%s = %q, want %q", name, got, want)
+					}
+				}
+			}},
+		{name: "check finds a changed script", setup: func(t *testing.T, tmp string) {
+			copyMinimal(t, tmp)
+			testsupport.WriteFile(t, filepath.Join(tmp, "out.conf"), "config\n")
+			testsupport.WriteFile(t, filepath.Join(tmp, "proxyfile.js"), "changed\n")
+			declareScripted(t)
+		}, args: "check <tmp>/yaml/proxyfile.yaml -o <tmp>/out.conf --target nginx", exit: 1,
+			stderr: "<tmp>/proxyfile.js differs from what proxyfile render writes\n"},
+		{name: "check finds a missing script", setup: func(t *testing.T, tmp string) {
+			copyMinimal(t, tmp)
+			testsupport.WriteFile(t, filepath.Join(tmp, "out.conf"), "config\n")
+			declareScripted(t)
+		}, args: "check <tmp>/yaml/proxyfile.yaml -o <tmp>/out.conf --target nginx", exit: 1,
+			stderr: "<tmp>/proxyfile.js differs from what proxyfile render writes\n"},
+		{name: "the script would overwrite the methods file", setup: func(t *testing.T, tmp string) {
+			copyExample(t, tmp, "partial")
+			testsupport.WriteFile(t, filepath.Join(tmp, "proxyfile.js"), string(testsupport.ReadFile(t, filepath.Join(tmp, "methods.json"))))
+			declareScripted(t)
+		}, args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/out.conf --rpc-methods <tmp>/proxyfile.js --target nginx", exit: 2,
+			stderr: overwrite,
+			also: func(t *testing.T, tmp string) {
+				absent(t, tmp, "out.conf")
+				if !bytes.Equal(testsupport.ReadFile(t, filepath.Join(tmp, "proxyfile.js")), testsupport.ReadFile(t, examples+"/partial/methods.json")) {
+					t.Errorf("proxyfile.js changed")
+				}
+			}},
+		{name: "the table names the script", setup: func(t *testing.T, tmp string) {
+			copyExample(t, tmp, "partial")
+			declareScripted(t)
+		}, args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/out.conf --rpc-methods <tmp>/methods.json --rpc-table <tmp>/proxyfile.js --target nginx",
+			exit: 2, stderr: overwrite,
+			also: func(t *testing.T, tmp string) {
+				nothingWritten("partial", "methods.json")(t, tmp)
+				absent(t, tmp, "out.conf", "proxyfile.js")
+			}},
+		// A script that is a link to an input is that input, so writing the script would overwrite it.
+		{name: "the script is a link to the methods file", setup: func(t *testing.T, tmp string) {
+			copyExample(t, tmp, "partial")
+			link(t, "methods.json", filepath.Join(tmp, "proxyfile.js"))
+			declareScripted(t)
+		}, args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/out.conf --rpc-methods <tmp>/methods.json --target nginx", exit: 2,
+			stderr: overwrite,
+			also: func(t *testing.T, tmp string) {
+				nothingWritten("partial", "methods.json")(t, tmp)
+				absent(t, tmp, "out.conf")
+			}},
+		{name: "-o names the script", setup: func(t *testing.T, tmp string) {
+			copyMinimal(t, tmp)
+			declareScripted(t)
+		}, args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/proxyfile.js --target nginx", exit: 2, stderr: overwrite,
+			also: func(t *testing.T, tmp string) { absent(t, tmp, "proxyfile.js") }},
 		{name: "no arguments", exit: 2, stderr: usageText},
 		{name: "help", args: "--help", stdout: usageText},
 		{name: "unknown command", args: "rendr", exit: 2, stderr: "proxyfile: unknown command \"rendr\"\n" + usageText},
@@ -138,9 +240,13 @@ func TestRun(t *testing.T) {
 			stderr: "proxyfile render: --target nginx: no generator for nginx in this version; see docs/portability.md\n"},
 		{name: "target haproxy", args: "check a.yaml -o b.yaml --target haproxy", exit: 2,
 			stderr: "proxyfile check: --target haproxy: no generator for haproxy in this version; see docs/portability.md\n"},
-		// The targets with a generator are the ones format.Targets declares, the list render reads too, so a target it
-		// does not declare is refused before any file is read.
-		{name: "a target with no declaration", setup: func(t *testing.T, tmp string) { declare(t) },
+		// The targets with a generator are the ones render.Targets holds, the list render picks the generator from, so
+		// a target it does not hold is refused before any file is read.
+		{name: "a target with no generator", setup: func(t *testing.T, tmp string) {
+			generators := render.Targets
+			t.Cleanup(func() { render.Targets = generators })
+			render.Targets = nil
+		},
 			args: "render a.yaml -o b.yaml --target envoy", exit: 2,
 			stderr: "proxyfile render: --target envoy: no generator for envoy in this version; see docs/portability.md\n"},
 		{name: "unknown target", args: "render a.yaml -o b.yaml --target Envoy", exit: 2,
@@ -190,9 +296,7 @@ func TestRun(t *testing.T) {
 			stderr: "proxyfile render: --rpc-table needs rpc.methods, rpc.proto or --rpc-methods\n",
 			also: func(t *testing.T, tmp string) {
 				nothingWritten("minimal")(t, tmp)
-				if _, err := os.Stat(filepath.Join(tmp, "t.json")); !errors.Is(err, fs.ErrNotExist) {
-					t.Errorf("t.json: Stat error = %v, want that it does not exist", err)
-				}
+				absent(t, tmp, "t.json")
 			}},
 		{name: "table from rpc.methods", setup: func(t *testing.T, tmp string) {
 			testsupport.WriteFile(t, filepath.Join(tmp, "proxyfile.yaml"),
@@ -222,6 +326,39 @@ func TestRun(t *testing.T) {
 		{name: "output names an input, another spelling", setup: copyMinimal,
 			args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/yaml/./proxyfile.yaml", exit: 2,
 			stderr: overwrite, also: nothingWritten("minimal", "yaml/proxyfile.yaml")},
+		// An output that is there already is compared with each input and output by the file it is, so a link, a hard
+		// link, a linked folder and another letter case on a disk that does not tell cases apart reach the proxyfile.
+		{name: "output is a link to the proxyfile", setup: func(t *testing.T, tmp string) {
+			copyMinimal(t, tmp)
+			link(t, "yaml/proxyfile.yaml", filepath.Join(tmp, "link.yaml"))
+		}, args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/link.yaml", exit: 2,
+			stderr: overwrite, also: nothingWritten("minimal", "yaml/proxyfile.yaml")},
+		{name: "output names the proxyfile through a linked folder", setup: func(t *testing.T, tmp string) {
+			copyMinimal(t, tmp)
+			link(t, "yaml", filepath.Join(tmp, "linked"))
+		}, args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/linked/proxyfile.yaml", exit: 2,
+			stderr: overwrite, also: nothingWritten("minimal", "yaml/proxyfile.yaml")},
+		{name: "output is a hard link to the proxyfile", setup: func(t *testing.T, tmp string) {
+			copyMinimal(t, tmp)
+			if err := os.Link(filepath.Join(tmp, "yaml", "proxyfile.yaml"), filepath.Join(tmp, "hard.yaml")); err != nil {
+				t.Fatalf("Link: %v", err)
+			}
+		}, args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/hard.yaml", exit: 2,
+			stderr: overwrite, also: nothingWritten("minimal", "yaml/proxyfile.yaml")},
+		{name: "output names the proxyfile in another letter case", setup: func(t *testing.T, tmp string) {
+			copyMinimal(t, tmp)
+			if _, err := os.Stat(filepath.Join(tmp, "yaml", "PROXYFILE.YAML")); err != nil {
+				t.Skipf("the file system of %s tells letter cases apart, so PROXYFILE.YAML is another file there", tmp)
+			}
+		}, args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/yaml/PROXYFILE.YAML", exit: 2,
+			stderr: overwrite, also: nothingWritten("minimal", "yaml/proxyfile.yaml")},
+		// Two outputs that are not there yet are compared by their folders, each link in them resolved, and their
+		// names, so the table would not replace the configuration through a folder linked to the folder of -o.
+		{name: "table names the output through a linked folder", setup: func(t *testing.T, tmp string) {
+			copyExample(t, tmp, "partial")
+			link(t, ".", filepath.Join(tmp, "linked"))
+		}, args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/out.yaml --rpc-methods <tmp>/methods.json --rpc-table <tmp>/linked/out.yaml",
+			exit: 2, stderr: overwrite, also: nothingWritten("partial", "methods.json")},
 		{name: "table names the methods file", setup: func(t *testing.T, tmp string) { copyExample(t, tmp, "partial") },
 			args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/out.yaml --rpc-methods <tmp>/methods.json --rpc-table <tmp>/methods.json",
 			exit: 2, stderr: overwrite, also: nothingWritten("partial", "methods.json")},
@@ -334,6 +471,19 @@ func declare(t *testing.T, targets ...format.Target) {
 	format.Targets = targets
 }
 
+// declareScripted declares, for the row, an nginx whose generator writes the configuration "config\n" and the script
+// proxyfile.js holding "script\n", beside Envoy, and puts both lists back when the row ends.
+func declareScripted(t *testing.T) {
+	t.Helper()
+	declare(t, append(slices.Clone(format.Targets), format.Target{Name: "nginx", Title: "nginx", Keys: map[string]format.Support{}})...)
+	generators := render.Targets
+	t.Cleanup(func() { render.Targets = generators })
+	render.Targets = append(slices.Clone(render.Targets), render.Target{Name: "nginx", Config: "nginx.conf",
+		Generate: func(generator.Input) ([]generator.File, error) {
+			return []generator.File{{Bytes: []byte("config\n")}, {Name: "proxyfile.js", Bytes: []byte("script\n")}}, nil
+		}})
+}
+
 // envoyRefusing is an Envoy that refuses keys, each with the note "refused by this test", and declares no other key.
 func envoyRefusing(keys ...string) format.Target {
 	refused := map[string]format.Support{}
@@ -341,6 +491,32 @@ func envoyRefusing(keys ...string) format.Target {
 		refused[key] = format.Support{Level: format.Refused, Note: "refused by this test"}
 	}
 	return format.Target{Name: "envoy", Title: "Envoy", Keys: refused}
+}
+
+// envoyRefusingWhen is an Envoy that declares each key of forms partial and refuses the key when the proxyfile writes
+// the key forms maps it to, a path of keys joined by dots, in the form "with <that key>" and with the words "refused by
+// this test". It declares no other key.
+func envoyRefusingWhen(forms map[string]string) format.Target {
+	declared := map[string]format.Support{}
+	for key, other := range forms {
+		declared[key] = format.Support{Level: format.Partial, Note: "partial in this test", Refuses: []format.Refusal{{
+			Form: "with " + other, Instead: "refused by this test",
+			Applies: func(_, proxyfile *tree.Node) bool {
+				for _, step := range strings.Split(other, ".") {
+					proxyfile = proxyfile.Get(step)
+				}
+				return proxyfile != nil
+			}}}}
+	}
+	return format.Target{Name: "envoy", Title: "Envoy", Keys: declared}
+}
+
+// link makes a symbolic link at path holding target, which is read from the link's own folder.
+func link(t *testing.T, target, path string) {
+	t.Helper()
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
 }
 
 // copyExample copies examples/<name> into dir, its directories included.
@@ -376,13 +552,21 @@ func nothingWritten(example string, names ...string) func(t *testing.T, tmp stri
 		if absErr != nil {
 			t.Fatalf("Abs: %v", absErr)
 		}
-		if _, err := os.Stat(filepath.Join(tmp, "out.yaml")); !errors.Is(err, fs.ErrNotExist) {
-			t.Errorf("out.yaml: Stat error = %v, want that it does not exist", err)
-		}
+		absent(t, tmp, "out.yaml")
 		for _, name := range names {
 			if !bytes.Equal(testsupport.ReadFile(t, filepath.Join(tmp, name)), testsupport.ReadFile(t, filepath.Join(dir, name))) {
 				t.Errorf("%s changed", name)
 			}
+		}
+	}
+}
+
+// absent checks that the row's directory holds no file of each name.
+func absent(t *testing.T, tmp string, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		if _, err := os.Stat(filepath.Join(tmp, name)); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s: Stat error = %v, want that it does not exist", name, err)
 		}
 	}
 }

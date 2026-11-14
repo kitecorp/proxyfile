@@ -156,8 +156,8 @@ func keyTables(text string) ([]keyTable, error) {
 
 // tableNamed returns the table a marker names: "." holds the keys at the top of a proxyfile that hold no keys of
 // their own, "origins file" and "methods file" the keys of those files, "support by proxy" each target's support of
-// every core key, and any other name is the path of a key of the proxyfile, whose table holds that key and every key
-// under it, in the class of the key that holds it.
+// every row of MatrixRows, and any other name is the path of a key of the proxyfile, whose table holds that key and
+// every key under it, in the class of the key that holds it.
 func tableNamed(name string) (string, error) {
 	switch name {
 	case ".":
@@ -168,7 +168,7 @@ func tableNamed(name string) (string, error) {
 	case "methods file":
 		return string(Reference(Methods, "", core)), nil
 	case "support by proxy":
-		return string(SupportMatrix(Proxyfile, Targets)), nil
+		return string(SupportMatrix(MatrixRows(), Targets)), nil
 	}
 	spec, class := &Proxyfile, core
 	for _, key := range strings.Split(name, ".") {

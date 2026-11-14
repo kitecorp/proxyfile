@@ -15,7 +15,6 @@ import (
 // proxy's own, so a new target changes nothing here. A row may assert such a header absent, which every proxy answers.
 type scenario struct {
 	name      string
-	keys      []string      // core key paths of the format the scenario exercises (format.CoreKeys spelling)
 	quiet     time.Duration // waited before the first exchange
 	exchanges []exchange
 }
@@ -23,8 +22,15 @@ type scenario struct {
 // exchange is one request and the answer it must get.
 type exchange struct {
 	name string
+	// keys are the core keys the row's answer depends on (format.CoreKeys spelling). The row runs only on a file that
+	// writes every one of them, because a file without one gives another answer, which says nothing of the proxy; a
+	// row with none runs on every file.
+	keys []string
 	send request
 	want answer
+	// on holds, by a file's label, the row's literal on a file whose values give another answer than want and
+	// admitted, measured on Envoy.
+	on map[string]literal
 	// repeat sends the request this many times back to back, and at least one answer after the first admitted must be
 	// what want asks. "At least one" because a bucket that refills while the requests go out may admit one of them.
 	repeat   int
@@ -33,6 +39,12 @@ type exchange struct {
 	// refusing names a backend container by its role, such as shop-2, that refuses connections on every port while
 	// the row's requests go out, as a backend that is down does (world.refuse).
 	refusing string
+}
+
+// literal is what a row wants on one file: the answer, and with repeat how many answers before it must be 200.
+type literal struct {
+	want     answer
+	admitted int
 }
 
 // request is what the battery sends to the proxy's listener.
@@ -44,6 +56,9 @@ type request struct {
 	headers       map[string]string
 	noCertificate bool
 	otherCA       bool // the client certificate is one a CA other than the clients CA signed, with the same name
+	// forgedMark sends the target's unchecked mark with the value true, a copy no proxy may pass on: only the proxy
+	// may tell the service that a request went through unchecked.
+	forgedMark bool
 }
 
 // answer is what a row wants back. A zero value of a field is not compared, except service, whose "" wants no stub
@@ -60,12 +75,15 @@ type answer struct {
 	port, proto, method, path, host string            // what that stub received; "" is not compared
 	received                        map[string]string // headers the stub received, with these values
 	absent                          []string          // headers the stub must not have received
+	marked                          string            // the value of the target's unchecked mark the stub must receive
+	unmarked                        bool              // the stub must not receive the target's unchecked mark
 	attempt                         int
 	atLeast, below                  time.Duration
 }
 
 // compare returns each way got differs from want, in a fixed order, so a failing row reads the same on every run.
-func compare(want answer, got result) []string {
+// mark is the target's unchecked mark, which marked and unmarked speak of.
+func compare(want answer, got result, mark string) []string {
 	var e echo
 	if got.echo != nil {
 		e = *got.echo
@@ -133,6 +151,13 @@ func compare(want answer, got result) []string {
 		if value, ok := e.Headers[name]; ok {
 			differ("received %s: got %q, want none", name, value)
 		}
+	}
+	value, marked := e.Headers[mark]
+	switch {
+	case want.marked != "" && value != want.marked:
+		differ("received the unchecked mark %s: got %q, want %q", mark, value, want.marked)
+	case want.unmarked && marked:
+		differ("received the unchecked mark %s: got %q, want none", mark, value)
 	}
 	if want.atLeast != 0 && got.elapsed < want.atLeast {
 		differ("time: got %s, want at least %s", got.elapsed, want.atLeast)

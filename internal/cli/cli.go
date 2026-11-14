@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -29,7 +30,7 @@ const usage = `usage: proxyfile render [<file>] -o <output> [--target envoy] [--
 var defaultNames = []string{"Proxyfile", "proxyfile.conf", "proxyfile.yaml", "proxyfile.yml"}
 
 // targets are the proxies --target names, in the order a message lists them. The ones with a generator are those
-// format.Targets declares, envoy alone in this version, and the others are refused by name rather than given an Envoy
+// render.Targets holds, envoy alone in this version, and the others are refused by name rather than given an Envoy
 // file for a gateway meant for them.
 var targets = []string{"envoy", "nginx", "haproxy"}
 
@@ -140,11 +141,11 @@ func request(command string, args []string) (render.Request, error) {
 	return render.Request{Proxyfile: files[0], Out: *out, RPCMethods: *methods, RPCTable: *table, Target: *target}, nil
 }
 
-// hasGenerator reports whether format.Targets declares the target, the one list of the targets with a generator,
-// which render.Read reads too.
+// hasGenerator reports whether render.Targets holds the target, the one list of the targets with a generator, which
+// render.Read picks the generator from.
 func hasGenerator(target string) bool {
-	_, declared := format.TargetNamed(target)
-	return declared
+	_, found := render.TargetNamed(target)
+	return found
 }
 
 // defaultFile returns the one name of defaultNames that is a regular file in the working directory. Two or more are
@@ -166,9 +167,10 @@ func defaultFile() (string, error) {
 }
 
 // outputs reads every input of req and returns every output in memory, or the problems of the inputs, or a usage
-// error: an RPC table with no methods to fill it, or an output that would overwrite an input. Both rules run after
-// the read, because the proxyfile may write the methods and name the origins file, neither of which the command line
-// shows.
+// error: an RPC table with no methods to fill it, or an output that would overwrite an input or another output. Both
+// rules run after the read, because the proxyfile may write the methods and name the origins file, neither of which
+// the command line shows. The overwrite rule runs after Files as well, because the paths of the files a generator
+// writes beside Out are known only then; Files fails only on a bug in proxyfile, so its problems come first.
 func outputs(req render.Request) ([]render.File, []model.Problem, error) {
 	run, problems := render.Read(req)
 	if problems != nil {
@@ -177,24 +179,26 @@ func outputs(req render.Request) ([]render.File, []model.Problem, error) {
 	if req.RPCTable != "" && !run.HasMethods() {
 		return nil, nil, errors.New("--rpc-table needs rpc.methods, rpc.proto or --rpc-methods")
 	}
-	if overwritesAnInput(req, run.Inputs()) {
-		return nil, nil, errors.New("an output path names an input or the other output")
-	}
 	files, problems := run.Files()
-	return files, problems, nil
+	if problems != nil {
+		return nil, problems, nil
+	}
+	if overwritesAnInput(files, run.Inputs()) {
+		return nil, nil, errors.New("an output path names an input or another output")
+	}
+	return files, nil, nil
 }
 
-// overwritesAnInput reports whether an output path names one of the inputs or the other output, which render would
-// overwrite. Paths are compared by tree.Absolute, so ./a.yaml and a.yaml are one path. Two inputs on one path
-// overwrite nothing.
-func overwritesAnInput(req render.Request, inputs []string) bool {
-	outputPaths := []string{req.Out}
-	if req.RPCTable != "" {
-		outputPaths = append(outputPaths, req.RPCTable)
+// overwritesAnInput reports whether the path of an output file names one of the inputs or another output, which
+// render would overwrite. Two inputs on one path overwrite nothing.
+func overwritesAnInput(files []render.File, inputs []string) bool {
+	var outputPaths []string
+	for _, file := range files {
+		outputPaths = append(outputPaths, file.Path)
 	}
 	for i, output := range outputPaths {
 		for _, other := range slices.Concat(outputPaths[i+1:], inputs) {
-			if tree.Absolute(output) == tree.Absolute(other) {
+			if sameFile(output, other) {
 				return true
 			}
 		}
@@ -202,8 +206,32 @@ func overwritesAnInput(req render.Request, inputs []string) bool {
 	return false
 }
 
+// sameFile reports whether two paths name one file. When both are there, the file system says, so a symbolic link, a
+// hard link, a linked folder and another letter case on a disk that does not tell cases apart all count: comparing the
+// spelling alone let each of them overwrite the proxyfile. A path that is not there yet is a new file, so it cannot
+// be an input render read; it is compared by its folder, each link in it resolved, and its name, which finds two
+// outputs that would be one file through a linked folder. Two such outputs that differ only in letter case, on a disk
+// that does not tell cases apart, still count as two, because no file says yet how that disk compares names.
+func sameFile(a, b string) bool {
+	infoA, errA := os.Stat(a)
+	infoB, errB := os.Stat(b)
+	if errA == nil && errB == nil {
+		return os.SameFile(infoA, infoB)
+	}
+	return resolved(a) == resolved(b)
+}
+
+// resolved is path made absolute, with the links of its folder resolved when the folder is there.
+func resolved(path string) string {
+	abs := tree.Absolute(path)
+	if dir, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
+		return filepath.Join(dir, filepath.Base(abs))
+	}
+	return abs
+}
+
 // write writes the files that outputs returned, which it returns only when every input was read without a problem and
-// no output names an input, so a problem writes nothing.
+// no output names an input or another output, so a problem writes nothing.
 func write(files []render.File, stderr io.Writer) int {
 	for _, file := range files {
 		if err := os.WriteFile(file.Path, file.Bytes, 0o644); err != nil {

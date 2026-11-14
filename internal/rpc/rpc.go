@@ -185,3 +185,32 @@ func Table(routes []Route) []byte {
 	}
 	return []byte("[\n" + strings.Join(lines, ",\n") + "\n]\n")
 }
+
+// Tree is methods as the tree a methods file of the same methods reads as: a list of maps, one per method, with
+// service and method, action only when not "", and reports only when not nil, every key and value at the method's
+// position. Methods read from .proto options are in no file of the format, and format.Refusals reads a tree, so
+// render.Read refuses through it the keys its target refuses among them.
+func Tree(methods []Method) *tree.Node {
+	list := &tree.Node{Kind: tree.List}
+	for _, m := range methods {
+		item := &tree.Node{Kind: tree.Map, Pos: m.Pos}
+		add := func(key string, value *tree.Node) {
+			value.Pos = m.Pos
+			item.Entries = append(item.Entries, tree.Entry{Key: key, KeyPos: m.Pos, Value: value})
+		}
+		add("service", &tree.Node{Kind: tree.Scalar, Text: m.Service})
+		add("method", &tree.Node{Kind: tree.Scalar, Text: m.Method})
+		if m.Action != "" {
+			add("action", &tree.Node{Kind: tree.Scalar, Text: m.Action})
+		}
+		if m.Reports != nil {
+			reports := &tree.Node{Kind: tree.List}
+			for _, report := range m.Reports {
+				reports.Items = append(reports.Items, &tree.Node{Kind: tree.Scalar, Text: report, Pos: m.Pos})
+			}
+			add("reports", reports)
+		}
+		list.Items = append(list.Items, item)
+	}
+	return list
+}
