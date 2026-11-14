@@ -1,9 +1,15 @@
-# The first route of every virtual host refuses a path that still holds a dot segment with a ; parameter once the
-# listener has normalised it. Envoy resolves ..; when the dots are written as dots, and writes %2e%2e; out as ..;
-# without resolving it. A server that drops the parameter and then resolves the dots reads another path than the one
-# the route was picked by: /open/%2e%2e;/private/report.txt took a route with prefix /open/ and auth off, and Tomcat
-# 11.0.27 answered it with /private/report.txt (measured on Envoy 1.40.2). The route is not auth off, so the token
-# filter and the check still run before its 400.
+# The first route of every virtual host refuses a path that, once the listener has normalised it, still holds a
+# segment that is . or .. followed by a ; parameter, the ; written or escaped once (%3B or %3b). A server that drops
+# the parameter and then resolves the dots reads another path than the one the route was picked by:
+# /open/%2e%2e;/private/report.txt took a route with prefix /open/ and auth off, and Tomcat 11.0.27 answered it with
+# /private/report.txt (measured on Envoy 1.40.2). Envoy keeps %3B escaped and in the case it was sent (measured on
+# Envoy 1.40.2 and 1.33.14), so a hop that decodes it once on the way to the service would hand the service that same
+# ..; form. Envoy itself drops the parameter of a dot segment written with dots and resolves the segment from 1.40.0,
+# and from 1.36.10, 1.37.6, 1.38.4 and 1.39.1 on the older release lines (their release notes), unless the runtime
+# setting envoy.reloadable_features.strip_dotdot_segments_with_parameters is false; where it does not, as on Envoy
+# 1.33.14 or with the setting false, this route answers 400 to that spelling too. It writes %2e%2e; out as ..; without
+# resolving it either way. A ; escaped twice, a ; on any other segment and the query pass. The route is not auth off,
+# so the token filter and the check still run before its 400.
 name: "refused:dot-segment-with-parameter"
-match: {safe_regex: {regex: ".*/\\.\\.?;.*"}}
+match: {safe_regex: {regex: ".*/\\.\\.?(?:;|%3[Bb]).*"}}
 direct_response: {status: 400}

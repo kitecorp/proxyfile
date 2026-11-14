@@ -106,7 +106,7 @@ static_resources:
                   forward_not_matching_preflights: false
               routes:
               - name: "refused:dot-segment-with-parameter"
-                match: {safe_regex: {regex: ".*/\\.\\.?;.*"}}
+                match: {safe_regex: {regex: ".*/\\.\\.?(?:;|%3[Bb]).*"}}
                 direct_response: {status: 400}
               - name: app
                 match: {prefix: /}

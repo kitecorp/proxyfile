@@ -91,10 +91,22 @@ not take a route with `prefix: /open/` and `auth: off`. Measured on Envoy 1.40.2
 server as the service: with no token, that path, `/open/%2e%2e/private/report.txt` and `/open/..%2fprivate/report.txt`
 are each answered `401`, and no service is reached.
 
-A dot segment with a `;` parameter is refused. The proxy resolves `..;` written with dots, but it writes `%2e%2e;` out
-as `..;` and leaves it there, and a servlet container drops the parameter and resolves the dots: Tomcat 11 answered
-`/open/..;/private/report.txt` with `/private/report.txt`. So the first route of every generated file answers `400` to
-a path that still holds `/.;` or `/..;`, and such a request reaches no service.
+A dot segment with a `;` parameter is refused, the `;` written or escaped once. The proxy resolves `..;` written with
+dots, but it writes `%2e%2e;` out as `..;` and leaves it there, and a servlet container drops the parameter and
+resolves the dots: Tomcat 11 answered `/open/..;/private/report.txt` with `/private/report.txt`. The proxy keeps an
+escaped `;`, `%3B` or `%3b`, as sent, so a hop that decodes it once on the way to the service would hand the service
+that same `..;`. So the first route of every generated file answers `400` to a path that still holds `/.;`, `/..;`,
+`/.%3B` or `/..%3B`, with the hex in either case, and such a request reaches no service. The route does not turn `auth`
+off, so the token and the check are read before it answers: a request refused for its token or by the check gets that
+answer, such as the check's `401`, instead of the `400`, also under a `prefix` with `auth: off`, and a request they let
+through gets the `400`; neither reaches a service (measured on Envoy 1.40.2). A `;` escaped twice, `%253B`, passes as
+sent: a service that decodes the path twice is not covered.
+
+Envoy resolves `..;` written with dots itself from 1.40.0, and from 1.36.10, 1.37.6, 1.38.4 and 1.39.1 on the older
+release lines, as their release notes say, while the runtime setting
+`envoy.reloadable_features.strip_dotdot_segments_with_parameters` is on, its default. On an older Envoy, or with the
+setting off, `..;` stays in the path and the same first route answers `400`: measured on Envoy 1.33.14, and on 1.40.2
+with the setting off.
 
 The proxy cannot read a path as every service does. A `;` parameter on a name, such as `/open/readme.txt;x=1`, and
 the case of letters reach the route, the check and the service as sent. So write `prefix` with `auth: off` for a

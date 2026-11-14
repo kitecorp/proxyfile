@@ -58,7 +58,8 @@ filter_chains:
       # and reached the service with no token and no check; with them each is answered 401 and reaches no service
       # (measured on Envoy 1.40.2). A ; parameter on a name and the case of letters are kept as sent, a ; parameter on a
       # dot segment written with dots is dropped with the segment resolved, and a backslash or %5C is read as /
-      # (measured on Envoy 1.40.2). A dot segment with a ; parameter that is still in the path is refused by the first
+      # (measured on Envoy 1.40.2; route-refused.yaml says from which Envoy and under which runtime setting). A dot
+      # segment with a ; parameter, the ; written or escaped once, that is still in the path is refused by the first
       # route of every virtual host (route-refused.yaml).
       normalize_path: true
       merge_slashes: true

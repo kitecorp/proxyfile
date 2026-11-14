@@ -195,7 +195,13 @@ var gRPC = scenario{name: "gRPC", keys: []string{"routes[].rpc", "routes[].rpc.t
 	}}
 
 // paths: every value measured on Envoy 1.40.2; no key, because path normalisation is written for every file
-// (docs/portability.md). Envoy also answers, and no row asserts: the 400 with an empty body.
+// (docs/portability.md). A segment that is . or .. followed by ;, or by ; escaped once in either case of hex, is
+// refused wherever the proxy's normalisation leaves it; ; escaped twice, ; on any other segment and anything in the
+// query pass as sent. Envoy also answers, and no row asserts: the 400 with an empty body; and /catalog/..;/products/1,
+// with the dots and the ; written, reaches shop as /products/1, because Envoy drops the parameter and resolves the
+// segment itself, while with envoy.reloadable_features.strip_dotdot_segments_with_parameters false, and on Envoy
+// 1.33.14, which do not, the same request answers 400; its answer depends on the Envoy version and that setting, so no
+// row checks it.
 var paths = scenario{name: "path normalisation",
 	exchanges: []exchange{
 		{name: "a dot-dot segment", send: get("/catalog/../products/1"), want: answer{status: 200, service: "shop", path: "/products/1"}},
@@ -207,6 +213,40 @@ var paths = scenario{name: "path normalisation",
 		{name: "a dot-dot segment and a backslash written as %5C", send: get("/catalog/..%5Cproducts/1"), want: answer{status: 200, service: "shop", path: "/products/1"}},
 		{name: "a dot-dot segment and a backslash", send: get("/catalog/..\\products/1"), want: answer{status: 200, service: "shop", path: "/products/1"}},
 		{name: "a dot segment that keeps a ; parameter", send: get("/catalog/%2e%2e;/products/1"), want: answer{status: 400}},
+		{name: "a dot-dot segment with ; escaped in upper case hex", send: get("/catalog/..%3B/products/1"), want: answer{status: 400}},
+		{name: "a dot-dot segment with ; escaped in lower case hex", send: get("/catalog/..%3b/products/1"), want: answer{status: 400}},
+		{name: "escaped dots with an escaped ;", send: get("/catalog/%2e%2e%3b/products/1"), want: answer{status: 400}},
+		{name: "escaped dots with an escaped ; all in upper case hex", send: get("/catalog/%2E%2E%3B/products/1"), want: answer{status: 400}},
+		{name: "a dot and an escaped dot with an escaped ;", send: get("/catalog/.%2e%3B/products/1"), want: answer{status: 400}},
+		{name: "a dot segment with an escaped ;", send: get("/catalog/items/.%3B/x"), want: answer{status: 400}},
+		{name: "an escaped dot segment with an escaped ;", send: get("/catalog/items/%2e%3b/x"), want: answer{status: 400}},
+		{name: "an escaped ; that carries a value", send: get("/catalog/..%3Bx=1/products/1"), want: answer{status: 400}},
+		{name: "two escaped ;", send: get("/catalog/..%3B%3B/products/1"), want: answer{status: 400}},
+		{name: "an escaped ; on the last segment", send: get("/catalog/..%3B"), want: answer{status: 400}},
+		{name: "an escaped ; on the first segment", send: get("/..%3B/products/1"), want: answer{status: 400}},
+		{name: "an escaped ; between backslashes", send: get("/catalog\\..%3B\\products\\1"), want: answer{status: 400}},
+		{name: "an escaped ; between backslashes written as %5C", send: get("/catalog%5C..%3b%5Cproducts%5C1"), want: answer{status: 400}},
+		{name: "an escaped ; before an escaped slash", send: get("/catalog/..%3B%2Fproducts/1"), want: answer{status: 400}},
+		{name: "a ; parameter on an ordinary segment", send: get("/a;v=1/b"), want: answer{status: 200, service: "shop", path: "/a;v=1/b"}},
+		{name: "a ; parameter on a name", send: get("/catalog/readme.txt;x=1"),
+			want: answer{status: 200, service: "catalog", path: "/catalog/readme.txt;x=1"}},
+		{name: "a ; parameter on a name that starts with a dot", send: get("/catalog/.well-known;x/y"),
+			want: answer{status: 200, service: "catalog", path: "/catalog/.well-known;x/y"}},
+		{name: "a ; after three dots", send: get("/catalog/...;/x"), want: answer{status: 200, service: "catalog", path: "/catalog/...;/x"}},
+		{name: "an escaped ; after three dots", send: get("/catalog/...%3B/x"),
+			want: answer{status: 200, service: "catalog", path: "/catalog/...%3B/x"}},
+		{name: "an escaped ; after a name that ends in two dots", send: get("/catalog/x..%3B/y"),
+			want: answer{status: 200, service: "catalog", path: "/catalog/x..%3B/y"}},
+		{name: "an escaped ; inside a name", send: get("/catalog/a%3Bb/c"), want: answer{status: 200, service: "catalog", path: "/catalog/a%3Bb/c"}},
+		{name: "a dot-dot segment with ; escaped twice", send: get("/catalog/..%253B/products/1"),
+			want: answer{status: 200, service: "catalog", path: "/catalog/..%253B/products/1"}},
+		{name: "a query that holds a dot-dot segment and an escaped ;", send: get("/catalog/items?q=/..%3B/"),
+			want: answer{status: 200, service: "catalog", path: "/catalog/items?q=/..%3B/"}},
+		{name: "a query that holds a dot-dot segment and a ;", send: get("/catalog/items?q=/..;/"),
+			want: answer{status: 200, service: "catalog", path: "/catalog/items?q=/..;/"}},
+		{name: "a dot-dot segment with an escaped ?", send: get("/catalog/..%3Fx/y"), want: answer{status: 200, service: "catalog", path: "/catalog/..%3Fx/y"}},
+		{name: "a dot segment with an escaped ; that a dot-dot segment removes", send: get("/catalog/.%3B/../products/1"),
+			want: answer{status: 200, service: "catalog", path: "/catalog/products/1"}},
 		{name: "an exact path reached through a dot-dot segment", send: request{proto: "http/1.1", method: "POST", host: "localhost", path: "/x/../api/webhooks"},
 			want: answer{status: 200, service: "accounts", path: "/hooks/payments"}},
 	}}

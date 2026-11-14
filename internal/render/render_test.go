@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -818,12 +819,12 @@ func TestResponseMutations(t *testing.T) {
 }
 
 // The first route of every virtual host answers 400 to a path that still holds a dot segment with a ; parameter after
-// normalisation, so no route of the file takes such a path: in a file with one environment and in the full example,
-// whose three environments each start with it.
+// normalisation, the ; written or escaped once, so no route of the file takes such a path: in a file with one
+// environment and in the full example, whose three environments each start with it.
 func TestRefusedRouteComesFirst(t *testing.T) {
 	const refused = `
 name: "refused:dot-segment-with-parameter"
-match: {safe_regex: {regex: ".*/\\.\\.?;.*"}}
+match: {safe_regex: {regex: ".*/\\.\\.?(?:;|%3[Bb]).*"}}
 direct_response: {status: 400}
 `
 	at := []any{"static_resources", "listeners", 0, "filter_chains", 0, "filters", 0, "typed_config", "route_config", "virtual_hosts"}
@@ -851,6 +852,56 @@ direct_response: {status: 400}
 				}
 			}
 		})
+	}
+}
+
+// The refused route's pattern takes a segment that is . or .. followed by ;, written or escaped once in either case of
+// hex, and nothing else. Envoy's safe_regex is RE2 matched against the whole path without its query, and Go's regexp
+// reads RE2's syntax, so the pattern is anchored at both ends here. Each row is a path as Envoy can hold it after
+// normalisation, which decodes escaped dots and keeps %3B and its case as sent; a dot segment with a written ; is
+// still there where Envoy does not strip the parameter itself. The conformance battery sends the spellings to Envoy.
+func TestRefusedRoutePattern(t *testing.T) {
+	files, problems := render(requestFor(t, "minimal/yaml", "envoy.yaml"))
+	if problems != nil {
+		t.Fatalf("render problems = %q, want none", testsupport.ProblemStrings(problems))
+	}
+	at := []any{"static_resources", "listeners", 0, "filter_chains", 0, "filters", 0, "typed_config", "route_config", "virtual_hosts"}
+	route := valueAt(listAt(t, decode(t, files[0].Bytes), at...)[0], "routes", 0)
+	pattern, ok := valueAt(route, "match", "safe_regex", "regex").(string)
+	if !ok {
+		t.Fatalf("route 0 has no match.safe_regex.regex: %v", route)
+	}
+	whole, err := regexp.Compile(`^(?:` + pattern + `)$`)
+	if err != nil {
+		t.Fatalf("the refused route's pattern %q is not RE2: %v", pattern, err)
+	}
+	cases := []struct {
+		path    string
+		refused bool
+	}{
+		{path: "/catalog/..;/products/1", refused: true},
+		{path: "/catalog/..%3B/products/1", refused: true},
+		{path: "/catalog/..%3b/products/1", refused: true},
+		{path: "/catalog/items/.;/x", refused: true},
+		{path: "/catalog/items/.%3B/x", refused: true},
+		{path: "/catalog/items/.%3b/x", refused: true},
+		{path: "/catalog/..%3Bx=1/products/1", refused: true},
+		{path: "/catalog/..%3B", refused: true},
+		{path: "/..%3B/products/1", refused: true},
+		{path: "/a;v=1/b", refused: false},
+		{path: "/catalog/readme.txt;x=1", refused: false},
+		{path: "/catalog/.well-known;x/y", refused: false},
+		{path: "/catalog/...;/x", refused: false},
+		{path: "/catalog/...%3B/x", refused: false},
+		{path: "/catalog/x..%3B/y", refused: false},
+		{path: "/catalog/a%3Bb/c", refused: false},
+		{path: "/catalog/..%253B/products/1", refused: false},
+		{path: "/catalog/..%3Fx/y", refused: false},
+	}
+	for _, c := range cases {
+		if got := whole.MatchString(c.path); got != c.refused {
+			t.Errorf("pattern %q takes %q = %t, want %t", pattern, c.path, got, c.refused)
+		}
 	}
 }
 
