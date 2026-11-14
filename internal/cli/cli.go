@@ -19,8 +19,8 @@ import (
 	"github.com/kitecorp/proxyfile/v2/internal/tree"
 )
 
-const usage = `usage: proxyfile render [<file>] -o <output> [--target envoy|nginx] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
-       proxyfile check [<file>] -o <output> [--target envoy|nginx] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+const usage = `usage: proxyfile render [<file>] -o <output> [--target envoy|nginx|haproxy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+       proxyfile check [<file>] -o <output> [--target envoy|nginx|haproxy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
        proxyfile schema
        proxyfile version
 `
@@ -89,7 +89,15 @@ func Run(args []string, stdout, stderr io.Writer, version string) int {
 			return exitProblem
 		}
 		if command == "render" {
-			return write(files, stderr)
+			exit := write(files, stderr)
+			// The line comes after the files are written, so it never stands for a problem, and it leaves the exit
+			// code as it is.
+			if t, found := format.TargetNamed(req.Target); exit == exitDone && found {
+				if warning := format.LessStrictWarning(t); warning != "" {
+					fmt.Fprintf(stderr, "proxyfile render: %s\n", warning)
+				}
+			}
+			return exit
 		}
 		return compare(files, stderr)
 	default:

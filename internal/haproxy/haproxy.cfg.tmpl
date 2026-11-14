@@ -1,0 +1,284 @@
+{{- /*
+The HAProxy configuration of one gateway, for HAProxy 3.2 and 3.4 (generate.go's view). Each value from the proxyfile
+arrives quoted, or in a form HAProxy reads as written (view), so this file writes no text of the input itself.
+HAProxy runs the http-request rules of a frontend in the order written, so the order below is part of what each rule
+does.
+*/ -}}
+{{.Header}}# Loads proxyfile.lua, the script proxyfile render writes beside this file.
+.if version_before(3.2)
+  .alert "proxyfile writes this file for HAProxy 3.2 and 3.4; this HAProxy is older, so it stops here"
+.endif
+global
+  {{- /* normalize-uri is experimental: without this line HAProxy 3.4.7 refuses the file (measured). */}}
+  expose-experimental-directives
+  default-path config
+  {{- /* The script's functions answer what this file cannot (proxyfile.lua says which); default-path config makes
+  HAProxy read it from this file's folder. The script reads no boolean sample, and without the tune line HAProxy 3.4.7
+  warned at every start (measured). */}}
+  tune.lua.bool-sample-conversion normal
+  lua-load-per-thread proxyfile.lua
+  {{- /* Envoy admits 100 request header lines and refuses 101. HAProxy counts the request line among its lines: with
+  100 here it refused 100 header lines, and with 101, its default, it served 100 and refused 101 (measured on HAProxy
+  3.2.26 and 3.4.7 beside Envoy 1.40.2). */}}
+  tune.http.maxhdr 101
+{{- if .TLS}}
+  {{- /* Without this line HAProxy 3.4.7 also accepted TLS 1.2 suites Envoy 1.40.2 refuses, such as AES128-SHA; with
+  it, only the ECDHE AES-GCM and ChaCha20 suites, as Envoy (measured). */}}
+  ssl-default-bind-ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305
+  {{- /* Envoy 1.40.2 takes the key exchange groups X25519MLKEM768, X25519 and P-256 alone, where HAProxy 3.2.26 and
+  3.4.7 also took P-384, P-521, X448 and, over TLS 1.3, ffdhe2048 without this line (measured). */}}
+  ssl-default-bind-curves X25519MLKEM768:X25519:P-256
+{{- end}}
+
+defaults
+  mode http
+  {{- /* With no retries line HAProxy 3.4.7 tried a refused connection 3 more times (measured); Envoy's file retries
+  only where a route asks, which this version does not write. */}}
+  retries 0
+  {{- /* HAProxy kept its connections to a service and, when the service closed one it reused before its answer, sent
+  the request again on a new one: over HTTP/1.1 by closing the client's connection, which the client tried again, and
+  over HTTP/2 by refusing the stream, so the service received it twice, where Envoy 1.40.2 answers 502 (measured on
+  HAProxy 3.2.26 and 3.4.7, over HTTP/1.1 and HTTP/2 and to a gRPC service). With these lines each request reaches the
+  service on a connection of its own, closed after the answer, and the service receives no Connection header, as from
+  Envoy; the second line keeps HAProxy from sending Connection: close. A gRPC server's connection is HTTP/2, which
+  these lines do not close, so its server line writes max-reuse 0 (backends). */}}
+  option http-server-close
+  option http-pretend-keepalive
+  timeout connect 5s
+  {{- /* Envoy's stream idle timeout is 5 minutes (read in its documentation). Without timeouts.request the Envoy
+  output ends a request 15 s after it (a route's default timeout), which HAProxy cannot write for a whole answer: 15 s
+  with no data from the service gives one that says nothing the same 504 at the same time (measured), and lets an
+  answer that keeps coming run past 15 s, the difference timeouts.request's declaration names. With
+  timeouts.request: none only the 5 minutes are left. */}}
+  timeout client 300s
+  timeout server {{.ServerTimeout}}
+  {{- /* Envoy sends the body of a request on and no trailer of it, where HAProxy passed a trailer to the service over
+  HTTP/1.1 and HTTP/2 without this line (measured). */}}
+  option http-drop-request-trailers
+  {{- /* An empty 503 needs no file beside the configuration; the 502 rule of the frontend turns it into Envoy's answer
+  to a service out of reach. A service that closed the connection before its answer got HAProxy's HTML 502 without the
+  second line, where Envoy's 502 is empty (measured). */}}
+  http-error status 503
+  http-error status 502
+{{- with .TLS}}
+
+crt-store
+  load crt {{.Certificate}} key {{.Key}} alias public
+{{- end}}
+{{- with .Admin}}
+
+frontend admin
+  bind 127.0.0.1:{{.}}
+  monitor-uri /ready
+  http-request return status 404
+{{- end}}
+
+frontend public
+  bind :{{.Listen}}{{with .TLS}} ssl crt @/public alpn h2,http/1.1{{with .ClientsCA}} verify required ca-file {{.}}{{end}}{{end}}
+{{- with .Removed}}
+  # remove_from_clients, before any other rule
+{{- range .}}
+  http-request del-header {{.}}
+{{- end}}
+{{- end}}
+  # what Envoy refuses before it reads a request further, and the headers it removes
+  {{- /* Each answer was measured on Envoy 1.40.2 beside HAProxy 3.2.26 and 3.4.7, which answered alike. Envoy answers
+  HTTP/1.0 426, and over HTTP/1.1 a method its parser does not know 400 (a method in another letter case too), where
+  HAProxy served both. An absolute target, which HAProxy sends on in absolute form after it drops a default or empty
+  port from the target and the Host header, is answered 400: no rule sees the port it dropped, and Envoy sends the path
+  alone with the line's host as Host, and answers an empty port 400. */}}
+  http-request return status 426 if { req.ver 1.0 }
+  http-request return status 400 if { req.ver 1.1 } !{ method {{.Methods}} }
+  http-request return status 400 if { req.ver 1.1 } !{ url_beg / }
+  {{- /* A client's own upgrade field over HTTP/2 is refused by HAProxy's parser, so an HTTP/2 request that holds one is
+  a WebSocket over HTTP/2 (extended CONNECT), which HAProxy 3.2.26 sent the service as an HTTP/1.1 upgrade with a key
+  of its own, where HAProxy 3.4.7 answers 400 and Envoy 1.40.2 closes the connection (measured). */}}
+  http-request return status 400 if { req.ver 2.0 } { req.fhdr(upgrade) -m found }
+  {{- /* Envoy removes a header another Connection token names, or answers 400 when it names one Envoy keeps. HAProxy
+  drops close and keep-alive from Connection itself and passes any other token and the header it names, so a token
+  other than these, compared in any letter case as RFC 9110 asks, is answered 400; an empty element passes, as Envoy
+  takes it. */}}
+  http-request return status 400 if { req.hdr(connection) -i -m reg '^(?!{{.ConnectionTokens}}?\z)' }
+  {{- /* Envoy answers ten Connection tokens or more 400 (generator.MostConnectionTokens). HAProxy removes close and
+  keep-alive before any rule reads the header, so the rule counts the other tokens alone, and an empty element too,
+  which Envoy takes. */}}
+  http-request return status 400 if { req.hdr_cnt(connection) ge {{.TooManyConnectionTokens}} }
+  {{- /* Envoy removes HTTP2-Settings from an h2c upgrade, which it serves as a plain request, and keeps it on any other
+  request. HAProxy drops an h2c upgrade's Upgrade header and its upgrade token before any rule reads the request, and
+  keeps the token HTTP2-Settings (measured on HAProxy 3.2.26 and 3.4.7), so an upgrade is a request whose Connection
+  names HTTP2-Settings: it is answered 400, and a request that carries the header alone passes, as through Envoy. */}}
+  http-request return status 400 if { req.hdr(connection) -i -m str http2-settings }
+  {{- /* HAProxy writes the line break of a header line folded onto the next as two spaces, so a folded value holds
+  three spaces or tabs in a row, where Envoy drops the line break. A value that holds them unfolded is refused too. */}}
+  http-request return status 400 if { req.hdrs -m reg '[ ][ ][ \t]' } || !{ req.hdrs -m found }
+  {{- /* Over HTTP/2 Envoy admits 100 header fields with the 4 pseudo-headers of a request and refuses one more, where
+  HAProxy writes :authority as one Host line, counted below, and joins every cookie field into one line, so each
+  cookie counts as a field. */}}
+  http-request set-var(txn.cookies) req.cook_cnt
+  http-request return status 400 if { req.ver 2.0 } { req.fhdr_cnt,add(txn.cookies) ge 98 }
+  {{- /* Envoy sends TE: trailers in any letter case when Connection names te, and HAProxy only as written in lower case.
+  Envoy sends no Connection header on but a WebSocket upgrade's, nor Keep-Alive, and passes a service's Keep-Alive to
+  no client, which HAProxy 3.2.26 and 3.4.7 passed on over HTTP/1.1 (measured): it speaks of the service's connection,
+  not the client's. */}}
+  http-request set-header te trailers if { req.hdr(connection) -i -m str te } { req.hdr(te) -i -m str trailers }
+  http-request del-header connection unless { req.hdr(upgrade) -i -m str websocket }
+  http-request del-header keep-alive
+  http-response del-header keep-alive
+{{- range .EnvoyRemoved}}
+  http-request del-header {{.}}
+{{- end}}
+  # the lines of each header Envoy joins, as one line, before anything reads them
+  {{- /* pf_join writes them as Envoy does (proxyfile.lua). Every rule after it reads a header's whole line (req.fhdr),
+  never its comma-separated parts (req.hdr): a single Origin line that holds a listed origin after a comma is not that
+  origin, for Envoy. A request whose run stopped part way is answered 400. */}}
+  http-request lua.pf_join
+  http-request return status 400 if !{ var(txn.joined) -m found }
+  # client_address: {{.ClientAddress}}
+{{- if .Connection}}
+  {{- /* Envoy takes the client for one it faces: it removes what only a proxy in front may send, appends the peer's
+  address to the client's own X-Forwarded-For on the same line, or writes it alone when the client sent none or an
+  empty one, and replaces x-envoy-external-address and x-forwarded-proto (measured). */}}
+{{- range .Faced}}
+  http-request del-header {{.}}
+{{- end}}
+  http-request set-header x-forwarded-for "%[req.fhdr(x-forwarded-for)],%[src]" if { req.fhdr(x-forwarded-for) -m len gt 0 }
+  http-request set-header x-forwarded-for %[src] unless { req.fhdr(x-forwarded-for) -m len gt 0 }
+  http-request set-header x-envoy-external-address %[src]
+  http-request set-header x-forwarded-proto {{.Scheme}}
+{{- else}}
+  {{- /* The x-forwarded-proto a proxy in front sent is kept, as Envoy keeps it. */}}
+  http-request set-header x-forwarded-proto {{.Scheme}} unless { req.hdr(x-forwarded-proto) -m found }
+{{- end}}
+  # every response carries the request's id
+  {{- /* Envoy replaces the id of a request from a client it faces, and keeps the id a proxy in front sent. */}}
+  http-request set-header x-request-id %[uuid(4)]{{if not .Connection}} unless { req.hdr(x-request-id) -m found }{{end}}
+  http-request set-var(txn.request_id) req.fhdr(x-request-id)
+  http-after-response set-header x-request-id %[var(txn.request_id)]
+  # the path, normalised before anything reads it
+  {{- /* pf_escape escapes what Envoy escapes before it picks a route. The regsub rules turn an escaped slash or
+  backslash into a slash before the dot segments are resolved, so /open/..%2fprivate cannot reach a route as /open/ and
+  the service as /private; '\\x5c' is a backslash (measured on HAProxy 3.2.26 and 3.4.7). A path the script did not
+  escape is answered 400. Every escape that is not decoded keeps the case of its hex digits and an invalid one, such as
+  %zz, passes, as through Envoy: neither normalize-uri line holds strict, and no line writes percent-to-uppercase.
+  Envoy answers 400 to %00 in a path. */}}
+  http-request normalize-uri fragment-strip
+  http-request set-var(txn.path) path,lua.pf_escape,regsub(%2f,/,gi),regsub(%5c,/,gi),regsub('\\x5c',/,g)
+  http-request return status 400 if !{ var(txn.path) -m found }
+  http-request set-path %[var(txn.path)]
+  http-request normalize-uri percent-decode-unreserved
+  http-request normalize-uri path-merge-slashes
+  http-request normalize-uri path-strip-dot
+  http-request normalize-uri path-strip-dotdot full
+  http-request return status 400 if { path -m sub %00 }
+  # the environment, by the Host header without its port
+  http-request set-var(txn.host) req.hdr(host),host_only,lower
+{{- range .Environments}}
+  {{- /* The environment is named by its place; its own name, which may hold any text, is only in the comment. Each
+  list of the proxyfile is written one value a line: HAProxy reads at most 65 words on a line (measured on HAProxy
+  3.2.26 and 3.4.7). Every value of the file in an acl line comes after --, the end of the line's flags: a host the
+  reader admits may start with -, and HAProxy 3.4.7 read -f as a flag that names a file, and -n and -i as flags,
+  matching no host. */}}
+  # {{.ID}}: {{.Comment}}
+{{- $id := .ID}}
+{{- range .Hosts}}
+  acl {{$id}}_host var(txn.host) -m str -- {{.}}
+{{- end}}
+  http-request set-var(txn.environment) str({{.ID}}) if {{.ID}}_host
+{{- end}}
+  http-request return status 404 if !{ var(txn.environment) -m found }
+  # the routes, in the written order: the first that matches is the request's route
+{{- range .Routes}}
+{{- if .Program}}
+  {{- /* The script runs the pattern's program in an action, which HAProxy runs in steps, letting other requests run
+  between them, where a sample fetch runs at once: one request whose path 24 programs read in a fetch held a thread
+  past HAProxy's watchdog, which stopped HAProxy 3.2.26 and 3.4.7 (measured). A run that set nothing, past the
+  script's budget or failed, is answered 400, never read as no match. */}}
+  # route {{.ID}} matches the pattern {{.Pattern}}
+  http-request lua.pf_route {{.ID}} {{.Program}} if !{ var(txn.route) -m found }
+  http-request return status 400 if !{ var(txn.route) -m found } !{ var(txn.pattern{{.ID}}) -m found }
+{{- end}}
+{{- $id := .ID}}
+{{- range .Matches}}
+  http-request set-var(txn.route) str({{$id}}) if !{ var(txn.route) -m found } {{.}}
+{{- end}}
+{{- end}}
+  # a dot segment with a ; parameter, written or escaped once, reaches no service
+  {{- /* path-strip-dot and path-strip-dotdot do not take ..; or .; as a dot segment (measured on HAProxy 3.2.26 and
+  3.4.7). Envoy's file refuses one by a route of its own, the first of each environment, so a request with one has a
+  route; Envoy answers a request with none 404 before it reads its upgrade or its origin, and the dot segment 400
+  after both, with no CORS header (measured on Envoy 1.40.2). */}}
+  acl dot_segment path_reg '/\.\.?(;|%3[Bb])'
+  http-request return status 404 if !{ var(txn.route) -m found } !dot_segment
+  # WebSocket is the one upgrade passed on
+  {{- /* Envoy answers every 403 of its own with the body Invalid CORS request when the request carries an Origin
+  header, this one too (measured). */}}
+  acl has_origin req.fhdr(origin) -m found
+  acl upgrade req.fhdr(upgrade) -m found
+  acl websocket req.fhdr(upgrade) -i -m str websocket
+  http-request return status 403 content-type text/plain string "Invalid CORS request" if upgrade !websocket has_origin
+  http-request return status 403 if upgrade !websocket
+  {{- /* Every file checks the browser origin, as Envoy does with or without cors and lists; only the lines that read a
+  list depend on one. */}}
+  # browser origins: none, an environment's own host, or its origins and patterns
+{{- range .Environments}}
+{{- $id := .ID}}
+{{- range .Origins}}
+  acl {{$id}} req.fhdr(origin) -i -m str -- {{.}}
+{{- end}}
+{{- range .Patterns}}
+  acl {{$id}} req.fhdr(origin) -m reg -- {{.}}
+{{- end}}
+{{- range .Own}}
+  acl {{$id}}_own req.fhdr(origin) -m reg -- {{.}}
+{{- end}}
+{{- end}}
+{{- range .Environments}}
+{{- if .Listed}}
+  http-request set-var(txn.cors) bool(true) if { var(txn.environment) -m str {{.ID}} } {{.ID}}
+{{- end}}
+{{- end}}
+  {{- /* An origin is admitted with no Origin header, by its environment's origins or patterns, or on one of the
+  environment's own hosts, which gets no CORS header; any other is refused. */}}
+  http-request set-var(txn.admitted) bool(true) if !has_origin
+{{- if .Listed}}
+  http-request set-var(txn.admitted) bool(true) if { var(txn.cors) -m bool }
+{{- end}}
+{{- range .Environments}}
+  http-request set-var(txn.admitted) bool(true) if { var(txn.environment) -m str {{.ID}} } {{.ID}}_own
+{{- end}}
+  http-request return status 403 content-type text/plain string "Invalid CORS request" if !{ var(txn.admitted) -m bool }
+  http-request return status 400 if dot_segment
+  acl preflight method OPTIONS
+  acl preflight_method req.fhdr(access-control-request-method) -m len gt 0
+{{- if .Listed}}
+  http-request return status 200 hdr access-control-allow-origin "%[req.fhdr(origin)]"{{.Answer}}{{with .Expose}} hdr access-control-expose-headers {{.}}{{end}} if has_origin preflight preflight_method { var(txn.cors) -m bool }
+{{- end}}
+  http-request return status 200{{.Answer}} if has_origin preflight preflight_method
+{{- if .Listed}}
+  http-request set-var(txn.origin) req.fhdr(origin) if { var(txn.cors) -m bool }
+  http-after-response set-header access-control-allow-origin "%[var(txn.origin)]" if { var(txn.origin) -m found }
+{{- with .Expose}}
+  http-after-response set-header access-control-expose-headers {{.}} if { var(txn.origin) -m found }
+{{- end}}
+{{- end}}
+  http-after-response add-header vary Origin
+{{- range .Rewrites}}
+  http-request replace-path {{.Regex}} {{.Format}} if { var(txn.route) -m str {{.ID}} }
+{{- end}}
+  # a service that cannot be reached: 502 with an empty body
+  {{- /* S with C or H: the service refused the connection or closed it before its answer's headers; sC: the
+  connection to it timed out. */}}
+  http-after-response set-status 502 if { txn.sess_term_state -m reg ^S[CH] } || { txn.sess_term_state -m str sC }
+{{- range .Routes}}
+  use_backend {{.Backend}} if { var(txn.route) -m str {{.ID}} }
+{{- end}}
+{{- range .Backends}}
+
+backend {{.Name}}
+{{- with .HostHeader}}
+  http-request set-header host {{.}}
+{{- end}}
+{{- range .Servers}}
+  server {{.}}
+{{- end}}
+{{- end}}

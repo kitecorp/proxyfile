@@ -10,14 +10,15 @@
 You describe your gateway in one short file: the services behind it, the routes to them, who may call what. proxyfile
 writes the complete configuration of the proxy you run from it.
 
-Generators: Envoy today. nginx and HAProxy are next.
+Generators: Envoy writes every key; nginx writes routing ([docs/nginx.md](docs/nginx.md)), and HAProxy routing, TLS
+and CORS ([docs/haproxy.md](docs/haproxy.md)), each refusing by name the keys it does not write.
 
 ```mermaid
 flowchart TB
     source["Your proxyfile<br/>YAML or HOCON"] --> render["proxyfile render"]
-    render --> envoy["The Envoy configuration"]
-    render -. planned .-> nginx["The nginx configuration"]
-    render -. planned .-> haproxy["The HAProxy configuration"]
+    render --> envoy["The Envoy configuration<br/>every key"]
+    render --> nginx["The nginx configuration<br/>routing"]
+    render --> haproxy["The HAProxy configuration<br/>routing, TLS and CORS"]
 ```
 
 <picture>
@@ -26,7 +27,10 @@ flowchart TB
 </picture>
 
 This is the [minimal example](examples/minimal/yaml/), every line of both files: the 9 lines you write and the 123
-lines proxyfile writes for Envoy; the nginx and HAProxy figures arrive with their generators.
+lines proxyfile writes for Envoy. For HAProxy it writes [`haproxy.cfg`](examples/minimal/yaml/haproxy.cfg) beside
+them, with the script it loads, [`proxyfile.lua`](examples/minimal/yaml/proxyfile.lua), and nginx's generator refuses
+the file's list of `origins`, as
+[`nginx.refused`](examples/minimal/yaml/nginx.refused) says.
 
 ## Why
 
@@ -72,15 +76,19 @@ refuse a hand edit or a missed render:
 ```sh
 proxyfile render -o envoy.yaml                    # the default target, envoy: a complete Envoy configuration
 proxyfile check -o envoy.yaml                     # in the build: renders again, fails when envoy.yaml differs
-proxyfile render --target nginx -o nginx.conf     # routing only, and proxyfile.js beside it; other keys are refused
-proxyfile render --target haproxy -o haproxy.cfg  # refused: no generator for haproxy in this version
+proxyfile render --target nginx -o nginx.conf     # routing only, and proxyfile.js beside it; other keys are refused,
+                                                  # and a line on standard error counts where it is less strict than Envoy
+proxyfile render --target haproxy -o haproxy.cfg  # HAProxy 3.2 or 3.4: routing, TLS, CORS; other keys refused by name,
+                                                  # and the same line counts where it is less strict than Envoy
 ```
 
 The `envoy.yaml` it writes has the listener on 8000, a cluster for `app` on 3000, the route and the CORS filter for the
-origin; the committed one is [`examples/minimal/yaml/envoy.yaml`](examples/minimal/yaml/envoy.yaml). nginx and HAProxy
-are the targets the format reserves ([`docs/portability.md`](docs/portability.md) says which keys each will take);
-their generators are [issue 25](https://github.com/kitecorp/proxyfile/issues/25) and
-[issue 26](https://github.com/kitecorp/proxyfile/issues/26). The other directories under [`examples/`](examples/) add
+origin; the committed one is [`examples/minimal/yaml/envoy.yaml`](examples/minimal/yaml/envoy.yaml). Beside it each
+example commits what the nginx and HAProxy generators write for it, or the refusal render prints when one of them
+refuses a key the example writes (`nginx.refused`, `haproxy.refused`). Each generator's column in
+[`docs/portability.md`](docs/portability.md#support-by-proxy-from-the-generators) says which keys it writes and what to
+write instead of a key it refuses, and [`docs/nginx.md`](docs/nginx.md) and [`docs/haproxy.md`](docs/haproxy.md) say
+what each proxy's file does differently from Envoy's. The other directories under [`examples/`](examples/) add
 an auth check, a token verified at the proxy, RPC routes read from `.proto` files, tracing, several backends, health
 checks, TLS, rate limits and nearly every key, and `examples/portable` holds the keys every generator is to render
 alike, which the conformance battery runs on each proxy. Each example keeps each form in a folder of its own, under the
@@ -115,8 +123,8 @@ go install github.com/kitecorp/proxyfile/v2/cmd/proxyfile@v2.1.0
 ## Commands
 
 ```
-usage: proxyfile render [<file>] -o <output> [--target envoy|nginx] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
-       proxyfile check [<file>] -o <output> [--target envoy|nginx] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+usage: proxyfile render [<file>] -o <output> [--target envoy|nginx|haproxy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+       proxyfile check [<file>] -o <output> [--target envoy|nginx|haproxy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
        proxyfile schema
        proxyfile version
 ```
@@ -134,16 +142,18 @@ flowchart LR
     protos[".proto files"] -->|rpc.proto| render
     render --> generated["generated configuration<br/>committed"]
     generated --> check["proxyfile check<br/>in the build: renders again,<br/>fails when the file differs"]
-    check --> validate["the proxy's own check in the image<br/>Envoy: envoy --mode validate<br/>nginx: nginx -t"]
+    check --> validate["the proxy's own check in the image<br/>Envoy: envoy --mode validate<br/>nginx: nginx -t<br/>HAProxy: haproxy -c"]
     validate --> running["the proxy running"]
 ```
 
-proxyfile does not run the proxy. The Envoy generator writes for Envoy 1.40 and the nginx generator for nginx 1.30 and
-1.31, and an image build can load the committed file with `envoy --mode validate` or `nginx -t`, as this repository's
-[`scripts/validate-envoy.sh`](scripts/validate-envoy.sh) and [`scripts/validate-nginx.sh`](scripts/validate-nginx.sh)
-do for the examples. The [conformance battery](docs/conformance.md) runs Envoy on the rendered full and portable
-examples and on nginx's own file, and nginx 1.30 and 1.31 on that file, and checks each proxy's answers to the same
-requests.
+proxyfile does not run the proxy. The Envoy generator writes for Envoy 1.40, the nginx generator for nginx 1.30 and
+1.31, and the HAProxy generator for HAProxy 3.2 and 3.4, and an image build can load the committed file with
+`envoy --mode validate`, `nginx -t` or `haproxy -c`, as this repository's
+[`scripts/validate-envoy.sh`](scripts/validate-envoy.sh), [`scripts/validate-nginx.sh`](scripts/validate-nginx.sh)
+and [`scripts/validate-haproxy.sh`](scripts/validate-haproxy.sh) do for the examples. The
+[conformance battery](docs/conformance.md) runs Envoy on the rendered full and portable examples and on nginx's and
+HAProxy's own files, nginx 1.30 and 1.31 on nginx's, and HAProxy 3.2 and 3.4 on HAProxy's, and checks each proxy's
+answers to the same requests.
 
 [docs/commands.md](docs/commands.md) gives the flags, the file names proxyfile looks for, the exit codes and how a
 problem is printed.
@@ -190,6 +200,10 @@ whose block holds it ([docs/portability.md](docs/portability.md)).
 
 `proxyfile schema` prints the JSON Schema of the format, which gives completion and checking as you type in a YAML
 proxyfile. [docs/editors.md](docs/editors.md) says how to point an editor at it, and how to highlight HOCON.
+
+## Made by
+
+proxyfile is made by the team behind [Transferify](https://transferify.eu) ([transferify.ro](https://transferify.ro) in Romania).
 
 ## Licence
 

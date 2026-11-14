@@ -33,8 +33,8 @@ says how often the overload manager checks.
 `true`, the default, makes each RPC route take Connect calls as well as gRPC ones: Envoy's Connect-gRPC bridge turns a
 Connect call into gRPC for the service and the answer back into Connect, and a small Lua filter sets the current Connect
 status on the bridge's errors ([Defaults](defaults.md)). `false` routes gRPC calls alone: each RPC route sends a call to
-the service's gRPC port with neither filter, as nginx and HAProxy would, so a Connect call reaches the service as it
-came. [`examples/grpc`](../examples/grpc/) writes `connect_bridge: false`.
+the service's gRPC port with neither filter, as the nginx and HAProxy files do, so a Connect call reaches the service as
+it came. [`examples/grpc`](../examples/grpc/) writes `connect_bridge: false`.
 
 ## `envoy.tracing`
 

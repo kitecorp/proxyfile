@@ -92,7 +92,11 @@ func (w *world) send(r request) result {
 		}
 		return w.sendRaw(r)
 	}
-	client := w.client(r)
+	return w.sendOn(w.client(r), r)
+}
+
+// sendOn sends r, which is no raw request, through client.
+func (w *world) sendOn(client *http.Client, r request) result {
 	var body io.Reader
 	if r.proto == "grpc" {
 		// The empty message: no compression flag and a length of 0.
@@ -144,6 +148,10 @@ func (w *world) send(r request) result {
 // data, and an error would pass a row that wants a refusal, so it panics instead.
 func (w *world) client(r request) *http.Client {
 	switch {
+	case r.offer != nil && (r.noCertificate || r.otherCA || r.proto != "http/1.1" || w.plain):
+		panic(fmt.Sprintf("the battery sends a TLS offer over http/1.1 to a listener of a file that writes tls, with the client certificate the clients CA signed, not %+v", r))
+	case r.offer != nil:
+		return w.offering(*r.offer)
 	case r.noCertificate && r.otherCA:
 		panic("a request has no client certificate or another CA's, not both")
 	case r.noCertificate && r.proto == "http/1.1":
@@ -159,6 +167,21 @@ func (w *world) client(r request) *http.Client {
 	default:
 		panic(fmt.Sprintf("the battery has no client for the protocol %q", r.proto))
 	}
+}
+
+// offering is an HTTP/1.1 client of its own that offers offer in its TLS handshake, with the TLS of a raw request:
+// the client certificate the clients CA signed, and the server certificate alone trusted.
+func (w *world) offering(offer tlsOffer) *http.Client {
+	config := w.rawTLS.Clone()
+	config.NextProtos = nil
+	if offer.version != 0 {
+		config.MinVersion, config.MaxVersion = offer.version, offer.version
+	}
+	config.CipherSuites, config.CurvePreferences = offer.ciphers, offer.groups
+	var protocols http.Protocols
+	protocols.SetHTTP1(true)
+	return &http.Client{Transport: &http.Transport{Protocols: &protocols, TLSClientConfig: config, DisableKeepAlives: true},
+		Timeout: 20 * time.Second}
 }
 
 // readEcho returns what the stub that wrote the answer received, or nil when no stub wrote it: a stub's echo is a

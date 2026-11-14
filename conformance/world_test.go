@@ -2,13 +2,18 @@ package conformance
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -210,6 +215,61 @@ func removeWorld() {
 	docker("volume", "rm", volume)
 	os.RemoveAll(runFolder)
 }
+
+// memory returns the memory the proxy's container uses, in bytes, as docker stats shows it: the cgroup's usage less
+// its inactive file cache, total_inactive_file under cgroup v1 and inactive_file under v2. It asks Docker's API for one
+// sample (one-shot), which answered in about 0.04 s, where docker stats took a second, waiting for two.
+func (w *world) memory() (int64, error) {
+	client, err := dockerAPI()
+	if err != nil {
+		return 0, err
+	}
+	answer, err := client.Get("http://docker/containers/" + proxy + "/stats?stream=false&one-shot=true")
+	if err != nil {
+		return 0, err
+	}
+	defer answer.Body.Close()
+	var stats struct {
+		Memory struct {
+			Usage int64            `json:"usage"`
+			Stats map[string]int64 `json:"stats"`
+		} `json:"memory_stats"`
+	}
+	if err := json.NewDecoder(answer.Body).Decode(&stats); err != nil || answer.StatusCode != http.StatusOK || stats.Memory.Usage == 0 {
+		return 0, fmt.Errorf("Docker's API gave no memory of %s: %s, %v", proxy, answer.Status, err)
+	}
+	inactive, v1 := stats.Memory.Stats["total_inactive_file"]
+	if !v1 {
+		inactive = stats.Memory.Stats["inactive_file"]
+	}
+	return stats.Memory.Usage - inactive, nil
+}
+
+// dockerAPI is a client of the Docker daemon on the unix socket the docker command's current context names.
+var dockerAPI = sync.OnceValues(func() (*http.Client, error) {
+	out, err := docker("context", "inspect", "--format", "{{.Endpoints.docker.Host}}")
+	if err != nil {
+		return nil, err
+	}
+	socket, ok := strings.CutPrefix(strings.TrimSpace(out), "unix://")
+	if !ok {
+		return nil, fmt.Errorf("the battery reads the proxy's memory on Docker's unix socket, and the context's host is %q", strings.TrimSpace(out))
+	}
+	dial := func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+	}
+	return &http.Client{Transport: &http.Transport{DialContext: dial}, Timeout: 10 * time.Second}, nil
+})
+
+// dockerCPUs is the number of CPUs Docker gives a container, read once: HAProxy runs a thread for each, and Envoy a
+// worker for each.
+var dockerCPUs = sync.OnceValues(func() (int, error) {
+	out, err := docker("info", "--format", "{{.NCPU}}")
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(strings.TrimSpace(out))
+})
 
 // docker runs one Docker command and returns its output. Every Docker call of the battery goes through it, so a
 // failure always names the command and what Docker answered.

@@ -7,25 +7,8 @@
 # configuration's folder, so the folder of the configuration is mounted and holds both.
 set -euo pipefail
 
-refuse_pin() {
-  echo "validate-nginx.sh: $pin must hold one nginx image a line, tagged with its version and pinned by digest (nginx:<major>.<minor>.<patch>@sha256:<digest>)" >&2
-  exit 1
-}
-
-# The nginx releases proxyfile writes for, one a line, each pinned by digest; the conformance battery runs an entry for
-# each of them. An empty file would otherwise check nothing and pass.
-pin="$(dirname "$0")/nginx-images"
-images=()
-while IFS= read -r image || [[ -n $image ]]; do
-  images+=("$image")
-done < <(cat "$pin" 2>/dev/null)
-if ((${#images[@]} == 0)); then
-  refuse_pin
-fi
-# The battery's entries (conformance/targets_nginx_test.go) hold the same rule.
-for image in "${images[@]}"; do
-  [[ $image =~ ^[^[:space:]@]+:[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$ ]] || refuse_pin
-done
+source "$(dirname "$0")/pinned-images.sh"
+pinned_images nginx nginx
 
 status=0
 for file in "$@"; do

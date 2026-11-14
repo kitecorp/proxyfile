@@ -41,21 +41,37 @@ type Refusal struct {
 
 // Target is a proxy with a generator: Name is the --target value, Title the support table's column heading, and Keys
 // its declaration for each row of MatrixRows: a core key by its path as CoreKeys gives it, a behaviour written with
-// no key by its words.
+// no key by its words. LessStrict lists, in the order its page gives them, the ways its output is less strict than the
+// Envoy output, which the Envoy output itself has none of.
 type Target struct {
 	Name, Title string
 	Keys        map[string]Support
+	LessStrict  []LessStrict
+}
+
+// LessStrict is a way a target's output is not stricter than the Envoy output: the proxy serves a request the Envoy
+// output refuses or ends, or sends a service what the Envoy output would not. Row is the support table's row it
+// belongs to, which the target declares Partial and whose cell names it after the note; Name is its short name, which
+// that cell and the target's page give; Measured says the request and each proxy's answer, which the page gives after
+// the name. Render counts them after it writes (LessStrictWarning), so a user who did not read the page still learns
+// they exist.
+type LessStrict struct {
+	Row, Name, Measured string
 }
 
 // Targets are the proxies with a generator, in the order of the support table's columns, each declared in a file of
 // its own. TestTargetDeclarations keeps each target's declarations complete, so a key added to the format cannot go
 // undeclared, and keeps each refused form on a partial key with a test of the value.
-var Targets = []Target{envoyTarget, nginxTarget}
+var Targets = []Target{envoyTarget, nginxTarget, haproxyTarget}
 
 // WrittenWithNoKey are the behaviours every configuration holds with no key for them, named in words. The support
 // table lists them after the core keys, so each target declares how it writes them as it declares a key.
 var WrittenWithNoKey = []string{"the request's path normalised before a route is picked", "a dot segment with a ; parameter answered 400",
-	"the request line and header names read before a route is picked"}
+	requestLine}
+
+// requestLine is the row of what a proxy reads of a request before it picks a route, which most of the ways a target
+// is less strict than the Envoy output belong to.
+const requestLine = "the request line and header names read before a route is picked"
 
 // MatrixRows are the support table's rows: every core key of the proxyfile, in CoreKeys' order, then WrittenWithNoKey.
 func MatrixRows() []string {
@@ -98,16 +114,17 @@ func SupportMatrix(rows []string, targets []Target) []byte {
 			b.WriteString("| `" + key + "` |")
 		}
 		for _, t := range targets {
-			b.WriteString(" " + cell(t.Keys[key]) + " |")
+			b.WriteString(" " + cell(t.Keys[key], t.lessStrictOn(key)) + " |")
 		}
 		b.WriteString("\n")
 	}
 	return []byte(b.String())
 }
 
-// cell words one declaration in the support table. A key a target does not declare is written as such, though
-// TestTargetDeclarations keeps every shipped target from leaving one out.
-func cell(s Support) string {
+// cell words one declaration in the support table, with the names of the ways the target is less strict than the
+// Envoy output on that row. A key a target does not declare is written as such, though TestTargetDeclarations keeps
+// every shipped target from leaving one out, and from naming a less strict way on a row it does not declare Partial.
+func cell(s Support, lessStrict []string) string {
 	switch s.Level {
 	case Supported:
 		return "supported"
@@ -116,11 +133,50 @@ func cell(s Support) string {
 		for _, refusal := range s.Refuses {
 			text += "; refuses " + escape(refusal.Form) + ": " + escape(refusal.Instead)
 		}
+		if lessStrict != nil {
+			text += "; less strict than the Envoy output: " + escape(strings.Join(lessStrict, "; "))
+		}
 		return text
 	case Refused:
 		return "refused: " + escape(s.Note)
 	}
 	return "not declared"
+}
+
+// lessStrictOn returns the names of t's less strict ways that belong to row, in their order.
+func (t Target) lessStrictOn(row string) []string {
+	var names []string
+	for _, way := range t.LessStrict {
+		if way.Row == row {
+			names = append(names, way.Name)
+		}
+	}
+	return names
+}
+
+// LessStrictList writes t's less strict ways as the Markdown list its page holds: each name in bold, then what was
+// measured.
+func LessStrictList(t Target) []byte {
+	var b strings.Builder
+	for _, way := range t.LessStrict {
+		b.WriteString("- **" + way.Name + "**: " + way.Measured + "\n")
+	}
+	return []byte(b.String())
+}
+
+// LessStrictHeading is the heading of the section of t's page that lists its less strict ways.
+func LessStrictHeading(t Target) string {
+	return "Where " + t.Title + " is less strict than the Envoy output"
+}
+
+// LessStrictWarning is what render prints after it has written t's files: in how many ways the output is less strict
+// than the Envoy output, and where they are listed; "" when there are none.
+func LessStrictWarning(t Target) string {
+	if len(t.LessStrict) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("this %s configuration is less strict than the Envoy output in %d ways; docs/%s.md lists them under %q",
+		t.Title, len(t.LessStrict), t.Name, LessStrictHeading(t))
 }
 
 // RefusedMessage is the problem of key, written in a file rendered for t, which refuses it: the key as the support

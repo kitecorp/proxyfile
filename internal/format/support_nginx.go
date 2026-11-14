@@ -80,7 +80,7 @@ var nginxTarget = Target{Name: "nginx", Title: "nginx", Keys: map[string]Support
 	// ngx_http_proxy_module), so no directive holds a time for a whole request, and none, which sets no limit, is the
 	// one value nginx writes as the file says.
 	"timeouts.request": {Level: Partial,
-		Note: "without the key nginx answers 504 to a service silent for 15 s after the request, as the Envoy output does, but lets an answer that keeps coming run past the 15 s at which Envoy ends it; with none, nginx ends a request after 5 minutes with nothing read or written, as Envoy does",
+		Note: "without the key nginx answers 504 to a service silent for 15 s after the request, as the Envoy output does; with none, nginx ends a request after 5 minutes with nothing read or written, as Envoy does",
 		Refuses: []Refusal{{Form: "a time",
 			Instead: "nginx has no limit on a whole request (its time limits count the time between two reads or writes); write timeouts.request: none, or render it for envoy",
 			Applies: func(value, _ *tree.Node) bool { return value.Text != "none" }}}},
@@ -249,5 +249,20 @@ var nginxTarget = Target{Name: "nginx", Title: "nginx", Keys: map[string]Support
 		Note: "a path that holds //, a dot segment, an escaped unreserved character or %2F and also an escape Envoy keeps, such as %3B, is answered 400, and so is one that holds such an escape beside a character Envoy escapes before it matches (\" < > ^ ` { | } or one outside ASCII), where Envoy normalises the path and keeps the escape; an empty query, a ? with nothing after it, after a path that needs normalising or holds such a character is answered 400, where Envoy sends the ? on; a backslash, %5C and a control character, written or escaped, are answered 400, and so is an invalid escape such as %zz, which Envoy passes on"},
 	"a dot segment with a ; parameter answered 400": {Level: Partial, Note: "/a/..;/b is answered 400 where Envoy 1.40 resolves it"},
 	"the request line and header names read before a route is picked": {Level: Partial,
-		Note: "a tab between the method and the target, an absolute target with user information, with no Host header or with a query or a fragment right after its host, and OPTIONS * are answered 400, TRACE and CONNECT 405, and HTTP/0.9 gets no answer, where Envoy serves the first two and TRACE, answers OPTIONS *, CONNECT and that absolute target 404, and HTTP/0.9 426; a header name outside RFC 9110's token characters is answered 400 over HTTP/1.1 and HTTP/2, where Envoy answers 400 over HTTP/1.1 and closes the connection over HTTP/2; a request trailer is never read, so over HTTP/1.1 one whose name is outside those characters is let through, not refused, where Envoy answers 400 (the service receives the body and no trailer through either), and over HTTP/2 any trailer ends the connection, where Envoy serves the request; a header line folded onto the next and a Host whose port is past 65535 or holds a sign are answered 400, where Envoy serves them"},
-}}
+		Note: "a tab between the method and the target, an absolute target with user information, with no Host header or with a query or a fragment right after its host, and OPTIONS * are answered 400, TRACE and CONNECT 405, and HTTP/0.9 gets no answer, where Envoy serves the first two and TRACE, answers OPTIONS *, CONNECT and that absolute target 404, and HTTP/0.9 426; a header name outside RFC 9110's token characters is answered 400 over HTTP/1.1 and HTTP/2, where Envoy answers 400 over HTTP/1.1 and closes the connection over HTTP/2; over HTTP/2 any request trailer ends the connection, where Envoy serves the request; a header line folded onto the next and a Host whose port is past 65535 or holds a sign are answered 400, where Envoy serves them"},
+}, LessStrict: nginxLessStrict}
+
+// nginxLessStrict are the ways the nginx output is less strict than the Envoy output, measured on nginx 1.30.6 and
+// 1.31.8 beside Envoy 1.40.2.
+var nginxLessStrict = []LessStrict{
+	{Row: requestLine, Name: "a request trailer whose name is outside the token characters is served over HTTP/1.1",
+		Measured: "A chunked request whose trailer is `x@at: 2` is served, and the service receives its body and no trailer, where Envoy answers `400`: `proxyfile.js` runs before the body arrives and never reads a trailer."},
+	{Row: requestLine, Name: "a Connection token and nine elements of white space are served",
+		Measured: "`Connection: te, , , , , , , , , ,` is served, where Envoy counts each element of white space as a token and answers ten `400`."},
+	{Row: requestLine, Name: "a request with no body reaches the service without content-length: 0",
+		Measured: "A `POST` with no body reaches the service with no `Content-Length`, over HTTP/1.1 and HTTP/2, where Envoy adds `content-length: 0`."},
+	{Row: requestLine, Name: "a WebSocket upgrade a service answers without switching passes the service's body",
+		Measured: "A WebSocket upgrade a service answers `200` without switching reaches the client with the service's body, where Envoy passes the status and headers with no body."},
+	{Row: "timeouts.request", Name: "without timeouts.request, an answer that keeps arriving runs past 15 s",
+		Measured: "Without `timeouts.request`, an answer that keeps coming runs past the 15 s at which the Envoy output ends a request: nginx counts its limits between two reads or writes."},
+}

@@ -1,6 +1,7 @@
 package conformance
 
 import (
+	"crypto/tls"
 	"fmt"
 	"maps"
 	"reflect"
@@ -44,6 +45,20 @@ type exchange struct {
 	// refusing names a backend container by its role, such as shop-2, that refuses connections on every port while
 	// the row's requests go out, as a backend that is down does (world.refuse).
 	refusing string
+	// flood, when set, sends the row's request many times at once with other paths, and wants the proxy's memory to
+	// stay within a bound (sendFlood).
+	flood *flood
+}
+
+// flood is what a row floods the proxy with: requests requests from connections HTTP/1.1 connections at once, request
+// i to path(i), each answer what the row wants. The proxy's memory, read before and after (world.memory), must grow by
+// less than fixed bytes and perThread bytes for each CPU Docker gives a container (dockerCPUs): HAProxy runs a thread
+// for each, and each thread keeps the states of its own patterns, where Envoy's RE2 keeps a cache for each pattern,
+// whatever its workers.
+type flood struct {
+	connections, requests int
+	path                  func(i int) string
+	fixed, perThread      int64
 }
 
 // own is a target's own literal for a row, and difference the row of the support table (format.MatrixRows) whose
@@ -71,6 +86,9 @@ type request struct {
 	headers       map[string]string
 	noCertificate bool
 	otherCA       bool // the client certificate is one a CA other than the clients CA signed, with the same name
+	// offer, when set, is what the client offers in its TLS handshake in place of crypto/tls's defaults, over
+	// http/1.1 with the client certificate the clients CA signed.
+	offer *tlsOffer
 	// forgedMark sends the target's unchecked mark with the value true, a copy no proxy may pass on: only the proxy
 	// may tell the service that a request went through unchecked.
 	forgedMark bool
@@ -83,6 +101,17 @@ type request struct {
 	// with Transfer-Encoding: chunked, and over h2 as a DATA frame and a second HEADERS frame.
 	body     string
 	trailers map[string]string
+	// unframed, on a raw http/1.1 request, writes body after the headers as it is, with no Transfer-Encoding of the
+	// sender's own, so the row's headers frame it: two Content-Length lines, or one beside Transfer-Encoding.
+	unframed bool
+}
+
+// tlsOffer is a client's TLS offer: versions from and to version, or crypto/tls's when 0, and only these TLS 1.2
+// cipher suites and these key exchange groups, or crypto/tls's when empty.
+type tlsOffer struct {
+	version uint16
+	ciphers []uint16
+	groups  []tls.CurveID
 }
 
 // answer is what a row wants back. A zero value of a field is not compared, except service, whose "" wants no stub
@@ -99,6 +128,8 @@ type answer struct {
 	port, proto, method, path, host string            // what that stub received; "" is not compared
 	received                        map[string]string // headers the stub received, with these values
 	absent                          []string          // headers the stub must not have received
+	oneLine                         []string          // headers the stub must have received as one line each
+	replaced                        map[string]string // headers the client sent with these values; the stub must receive each with another value
 	body                            string            // the body the stub received; "" is not compared
 	noTrailers                      bool              // the stub must have received no trailer
 	marked                          string            // the value of the target's unchecked mark the stub must receive
@@ -182,9 +213,19 @@ func compare(want answer, got result, mark string) []string {
 			differ("received %s: got %q, want %q", name, value, want.received[name])
 		}
 	}
+	for _, name := range want.oneLine {
+		if value, ok := e.Headers[name]; !ok || strings.Contains(value, "\n") {
+			differ("received %s: got %q, want one line", name, value)
+		}
+	}
 	for _, name := range want.absent {
 		if value, ok := e.Headers[name]; ok {
 			differ("received %s: got %q, want none", name, value)
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(want.replaced)) {
+		if value, ok := e.Headers[name]; !ok || value == want.replaced[name] {
+			differ("received %s: got %q, want a value other than the client's %q", name, value, want.replaced[name])
 		}
 	}
 	if want.body != "" && e.Body != want.body {

@@ -1,0 +1,314 @@
+-- The functions the configuration calls, for HAProxy's Lua 5.4. Each answers what HAProxy's own configuration cannot:
+-- pf_join writes the lines of a header as one, pf_escape writes a byte above 0x7F as its escape, and pf_route matches
+-- a route's pattern without ever giving up. The script is the same for every file: each pattern's program is written
+-- in the configuration, as an argument of pf_route.
+
+-- pf_join writes the lines of each header in joined, the headers Envoy joins, as one line: the values that are not
+-- empty, in the order they came, joined with a comma, or one empty line when every line is empty (measured on Envoy
+-- 1.40.2). HAProxy passes each line on, and none of its fetches reads every line of a header as one value. It sets
+-- txn.joined last, so the configuration answers 400 to a request whose run stopped part way.
+core.register_action("pf_join", {"http-req"}, function(txn)
+  local headers = txn.http:req_get_headers()
+  for _, name in ipairs(joined) do
+    -- HAProxy numbers a header's lines from 0, so a second line is at 1.
+    local lines = headers[name]
+    if lines ~= nil and lines[1] ~= nil then
+      local values = {}
+      local at = 0
+      while lines[at] ~= nil do
+        if lines[at] ~= "" then
+          values[#values + 1] = lines[at]
+        end
+        at = at + 1
+      end
+      txn.http:req_set_header(name, table.concat(values, ","))
+    end
+  end
+  txn:set_var("txn.joined", 1)
+end)
+
+-- pf_escape escapes each byte of a path Envoy escapes before it picks a route, escaped, in upper case hex (measured on
+-- Envoy 1.40.2). HAProxy's regsub writes one fixed text for every match, so it cannot write the hex of the byte it
+-- matched.
+core.register_converters("pf_escape", function(path)
+  return (path:gsub(escaped, function(byte)
+    return string.format("%%%02X", byte:byte())
+  end))
+end)
+
+-- The kinds of a program's instructions, as Go's regexp/syntax compiles a pattern: an alternative, a step that reads
+-- nothing, an empty-width assertion, a byte read, the match and the failure.
+local ALT, NOP, EMPTY, BYTE, MATCH, FAIL = 1, 2, 3, 4, 5, 6
+local kinds = {a = ALT, n = NOP, e = EMPTY, r = BYTE, m = MATCH, f = FAIL}
+
+-- decode turns a program's text, as the configuration writes it, into its instructions, numbered from 1, and the
+-- number of its first. The text is "s" and that number, then one instruction a part, the parts joined with ";": its
+-- kind's letter, then its numbers joined with ",": the next instruction and, for an alternative, the other one, for
+-- an assertion its bits, and for a byte read the ranges of the bytes from 0 to 127 it takes, low and high.
+local function decode(text)
+  local program, start = {}, nil
+  for part in text:gmatch("[^;]+") do
+    local numbers = {}
+    for number in part:gmatch("%d+") do
+      numbers[#numbers + 1] = tonumber(number)
+    end
+    local letter = part:sub(1, 1)
+    if letter == "s" then
+      start = numbers[1]
+    else
+      local instruction = {kind = kinds[letter], out = numbers[1], arg = numbers[2]}
+      if instruction.kind == BYTE then
+        local set = {}
+        for at = 2, #numbers, 2 do
+          for byte = numbers[at], numbers[at + 1] do
+            set[byte] = true
+          end
+        end
+        instruction.set = set
+      end
+      program[#program + 1] = instruction
+    end
+  end
+  return program, start
+end
+
+-- The class of the byte before a place, which with the byte after it gives Go's syntax.EmptyOpContext there: a word
+-- byte (syntax.IsWordChar), a line feed, any other byte, or none, at the start of the text.
+local WORD, NEWLINE, OTHER, START = 1, 2, 3, 4
+local classOf = {}
+for byte = 0, 255 do
+  if (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 95 then
+    classOf[byte] = WORD
+  elseif byte == 10 then
+    classOf[byte] = NEWLINE
+  else
+    classOf[byte] = OTHER
+  end
+end
+
+-- context is the bits of EmptyBeginLine (1), EmptyEndLine (2), EmptyBeginText (4), EmptyEndText (8),
+-- EmptyWordBoundary (16) and EmptyNoWordBoundary (32) that hold between a byte of the class before and the byte after,
+-- nil at the end of the text.
+local function context(before, after)
+  local op, boundary = 32, before == WORD
+  if before == NEWLINE then
+    op = op | 1
+  elseif before == START then
+    op = op | 4 | 1
+  end
+  if after == nil then
+    op = op | 8 | 2
+  elseif classOf[after] == WORD then
+    boundary = not boundary
+  elseif after == 10 then
+    op = op | 2
+  end
+  if boundary then
+    op = op ~ (16 | 32)
+  end
+  return op
+end
+
+local contexts, ends = {}, {}
+for before = WORD, START do
+  contexts[before] = {}
+  for byte = 0, 255 do
+    contexts[before][byte] = context(before, byte)
+  end
+  ends[before] = context(before, nil)
+end
+
+-- A machine runs one program as a deterministic automaton built while it reads (RE2's way): a state is the
+-- instructions the paths through the program wait at, before their empty-width steps, and the class of the byte read
+-- last; reading a byte follows them to the byte reads that take it. A state keeps where each byte took it, so a byte
+-- read again from that state costs one table read, and a path's time grows with its length alone, never with the
+-- program's size. dead is the state of no path, from which no byte leads anywhere.
+local dead = {}
+for byte = 0, 255 do
+  dead[byte] = dead
+end
+
+-- The states the machines build are a cache, and the cache of a thread is bounded as a whole: HAProxy gives each thread
+-- a Lua state of its own (lua-load-per-thread), and every machine of the thread counts each state it keeps in held, as
+-- perState for the table and its key, one for each instruction it waits on and one for each byte it knows where it
+-- leads. Once held reaches mostHeld, every machine of the thread forgets its states and builds them again as it reads,
+-- in time the request's budget below bounds. One unit held 26 to 28 bytes of Lua memory on HAProxy 3.2.26 and 3.4.7
+-- (measured), so a thread keeps about 1 MB of states at most, and HAProxy that times its threads. 200 paths sent again
+-- and again through the 73 pattern routes of the conformance battery's HAProxy file kept about 26,000 units a thread
+-- and were served as fast as with 8 MB; a flood of new paths then grew HAProxy by about 4 MB a thread, as much as
+-- those 200 paths did, where 8 MB let it grow by about 19 MB (measured on 12 threads).
+local held, mostHeld, perState = 0, 40000, 8
+
+-- budget is the most work the patterns of one request may take: a byte read from a state that knows where it leads
+-- counts 1, each instruction visited while a new state is built counts building, and each run counts calling and a
+-- unit for each 512 bytes of its program's text, which HAProxy copies at each call. One unit took about 47 ns of CPU
+-- on HAProxy 3.2.26 and 3.4.7 on an arm64 Mac, whether the work read bytes or built states, and about 65 ns with all
+-- 12 threads busy (measured), so the patterns of one request alone take about 24 ms at most, and of each of many at
+-- once about 33 ms. A request past it is answered 400 by the configuration, where Envoy's RE2 would always decide;
+-- HAProxy runs the action in steps, letting other requests run between them, so no request holds a thread for long.
+local budget, building, calling = 500000, 6, 64
+
+local machines = {}
+
+-- forget makes every machine of the thread forget the states it keeps. A run that holds one of them goes on from it,
+-- and drops it when the run ends.
+local function forget()
+  for _, machine in pairs(machines) do
+    machine.states = {}
+  end
+  held = 0
+end
+
+-- state returns the state of the instructions waiting, as a list, after a byte of class class, made once.
+local function state(machine, waiting, class)
+  if #waiting == 0 then
+    return dead
+  end
+  table.sort(waiting)
+  local key = class .. ":" .. table.concat(waiting, ",")
+  local found = machine.states[key]
+  if found == nil then
+    found = {waiting = waiting, class = class}
+    machine.states[key] = found
+    held = held + perState + #waiting
+  end
+  return found
+end
+
+-- follow visits each instruction reached from the state's waiting ones by alternatives, steps that read nothing and
+-- the assertions op satisfies, each once, and calls reached with each byte read and match it reaches. It returns how
+-- many instructions it visited.
+local function follow(program, from, op, reached)
+  local seen, stack, visited = {}, {}, 0
+  for _, at in ipairs(from.waiting) do
+    stack[#stack + 1] = at
+  end
+  while #stack > 0 do
+    local at = stack[#stack]
+    stack[#stack] = nil
+    if not seen[at] then
+      seen[at] = true
+      visited = visited + 1
+      local instruction = program[at]
+      local kind = instruction.kind
+      if kind == ALT then
+        stack[#stack + 1] = instruction.arg
+        stack[#stack + 1] = instruction.out
+      elseif kind == NOP then
+        stack[#stack + 1] = instruction.out
+      elseif kind == EMPTY then
+        if (instruction.arg & ~op) == 0 then
+          stack[#stack + 1] = instruction.out
+        end
+      elseif kind == BYTE or kind == MATCH then
+        reached(instruction)
+      end
+    end
+  end
+  return visited
+end
+
+-- step returns the state byte leads to from from, which it keeps in from, and the instructions it visited. Every unit
+-- held but the first state of a run is added by a step, so the thread forgets here, before it adds more.
+local function step(machine, from, byte)
+  if held >= mostHeld then
+    forget()
+  end
+  local next, waiting = {}, {}
+  local visited = follow(machine.program, from, contexts[from.class][byte], function(instruction)
+    if instruction.kind == BYTE and instruction.set[byte] and not next[instruction.out] then
+      next[instruction.out] = true
+      waiting[#waiting + 1] = instruction.out
+    end
+  end)
+  local to = state(machine, waiting, classOf[byte])
+  from[byte] = to
+  held = held + 1
+  return to, visited
+end
+
+-- accepts says whether a path that ends in from matches, which from keeps, and the instructions it visited.
+local function accepts(machine, from)
+  if from.accepts ~= nil then
+    return from.accepts, 0
+  end
+  local found = false
+  local visited = follow(machine.program, from, ends[from.class], function(instruction)
+    if instruction.kind == MATCH then
+      found = true
+    end
+  end)
+  from.accepts = found
+  return found, visited
+end
+
+-- machineOf returns the machine of the route numbered route, made from its program's text the first time the route
+-- runs. A process loads one configuration, which gives each route one program, so the route's number names it.
+local function machineOf(route, text)
+  local machine = machines[route]
+  if machine == nil then
+    local program, start = decode(text)
+    machine = {program = program, start = start, states = {}}
+    machines[route] = machine
+  end
+  return machine
+end
+
+-- run says whether the whole of bytes, n of them, matches the machine's program, and how much of left is left; nil
+-- when the work would pass left, so the configuration answers 400.
+local function run(machine, bytes, n, left)
+  if left < 0 then
+    return nil, left
+  end
+  local at = state(machine, {machine.start}, START)
+  for i = 1, n do
+    local byte = bytes[i]
+    local to = at[byte]
+    if to == nil then
+      local visited
+      to, visited = step(machine, at, byte)
+      left = left - visited * building
+    end
+    left = left - 1
+    if left < 0 then
+      return nil, left
+    end
+    if to == dead then
+      return false, left
+    end
+    at = to
+  end
+  local found, visited = accepts(machine, at)
+  left = left - visited * building
+  if left < 0 then
+    return nil, left
+  end
+  return found, left
+end
+
+-- The bytes of the last path read, kept so the routes of one request read the path once.
+local lastPath, lastBytes = nil, {}
+
+-- pf_route matches the path against the program of the route numbered route, and sets txn.pattern<route> to "1" or
+-- "0". It sets nothing when the request's work would pass the budget, or when the run failed, which the configuration
+-- answers 400, never as no match.
+core.register_action("pf_route", {"http-req"}, function(txn, route, text)
+  local machine = machineOf(route, text)
+  local path = txn.f:path()
+  if path ~= lastPath then
+    local bytes = {}
+    for i = 1, #path do
+      bytes[i] = path:byte(i)
+    end
+    lastPath, lastBytes = path, bytes
+  end
+  local bytes = lastBytes
+  local left = (txn:get_var("txn.pf_left") or budget) - calling - #text // 512
+  local found
+  found, left = run(machine, bytes, #path, left)
+  if found == nil then
+    return
+  end
+  txn:set_var("txn.pf_left", left)
+  txn:set_var("txn.pattern" .. route, found and "1" or "0")
+end, 2)

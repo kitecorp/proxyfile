@@ -1,0 +1,189 @@
+# yaml-language-server: $schema=../../schema/proxyfile.schema.json
+# The conformance battery's file for HAProxy: the world of examples/portable with only the keys this version's HAProxy
+# generator writes, and the pattern routes and the prefix route with a rewrite of nginx's battery file, whose rows test
+# the patterns and the path as the client wrote it; the test environment has a host with a dot at its start and one
+# with a dot at its end, which HAProxy compares as written, as Envoy does. catalog is reached at its IP address, and no
+# route is checked: the generator writes no DNS name and no auth check yet. The 24 asset routes and the 64 patterns of
+# many hold what a long path and a long Origin cost: one request of each stopped HAProxy before its patterns ran in
+# steps and its origin patterns were written so they cannot backtrack. The 40 routes k01 to k40 hold what a flood of
+# new paths costs in memory: HAProxy kept up to 2,000 states of each pattern on each thread, over 600 MB in a flood,
+# before the patterns of a thread shared one budget. Envoy runs it too, so each row's literal on it is Envoy's.
+listen: 10000
+admin: 9901
+tls:
+  certificate: /etc/gateway/tls/certificate.pem
+  key: /etc/gateway/tls/key.pem
+  clients: {ca: /etc/gateway/tls/clients-ca.pem}
+client_address: connection
+services:
+  shop: {http: 8080, grpc: 8081, addresses: ["10.0.1.11", "10.0.1.12"]}
+  accounts: {grpc: 7070, http: 7070, host_header: "127.0.0.1:7070"}
+  catalog: {http: 8090, address: 10.0.2.21}
+remove_from_clients: [x-client-id]
+cors: {allow_methods: "*", allow_headers: "*", expose_headers: "Content-Disposition,X-Request-Id", max_age: "600"}
+origins:
+  live:
+    hosts: [api.example.com, api.example.org]
+    origins: ["https://example.com", "https://www.example.com"]
+    patterns: ["https://*.example.com"]
+  test:
+    hosts: [-f, -i, -n, .dot.example.com, api.test.example.com, dot.example.com.]
+    origins: ["http://localhost:3000", "https://test.example.com"]
+    patterns: ["https://*.test.example.com"]
+  local:
+    hosts: [127.0.0.1, localhost]
+    origins: []
+    patterns: ["http://*.example.com:*", "http://localhost:*"]
+  many:
+    hosts: [patterns.example.net]
+    origins: []
+    patterns:
+      - "https://*.*.example1.org"
+      - "https://*.*.example10.org"
+      - "https://*.*.example11.org"
+      - "https://*.*.example12.org"
+      - "https://*.*.example13.org"
+      - "https://*.*.example14.org"
+      - "https://*.*.example15.org"
+      - "https://*.*.example16.org"
+      - "https://*.*.example17.org"
+      - "https://*.*.example18.org"
+      - "https://*.*.example19.org"
+      - "https://*.*.example2.org"
+      - "https://*.*.example20.org"
+      - "https://*.*.example21.org"
+      - "https://*.*.example22.org"
+      - "https://*.*.example23.org"
+      - "https://*.*.example24.org"
+      - "https://*.*.example25.org"
+      - "https://*.*.example26.org"
+      - "https://*.*.example27.org"
+      - "https://*.*.example28.org"
+      - "https://*.*.example29.org"
+      - "https://*.*.example3.org"
+      - "https://*.*.example30.org"
+      - "https://*.*.example31.org"
+      - "https://*.*.example32.org"
+      - "https://*.*.example33.org"
+      - "https://*.*.example34.org"
+      - "https://*.*.example35.org"
+      - "https://*.*.example36.org"
+      - "https://*.*.example37.org"
+      - "https://*.*.example38.org"
+      - "https://*.*.example39.org"
+      - "https://*.*.example4.org"
+      - "https://*.*.example40.org"
+      - "https://*.*.example41.org"
+      - "https://*.*.example42.org"
+      - "https://*.*.example43.org"
+      - "https://*.*.example44.org"
+      - "https://*.*.example45.org"
+      - "https://*.*.example46.org"
+      - "https://*.*.example47.org"
+      - "https://*.*.example48.org"
+      - "https://*.*.example49.org"
+      - "https://*.*.example5.org"
+      - "https://*.*.example50.org"
+      - "https://*.*.example51.org"
+      - "https://*.*.example52.org"
+      - "https://*.*.example53.org"
+      - "https://*.*.example54.org"
+      - "https://*.*.example55.org"
+      - "https://*.*.example56.org"
+      - "https://*.*.example57.org"
+      - "https://*.*.example58.org"
+      - "https://*.*.example59.org"
+      - "https://*.*.example6.org"
+      - "https://*.*.example60.org"
+      - "https://*.*.example61.org"
+      - "https://*.*.example62.org"
+      - "https://*.*.example63.org"
+      - "https://*.*.example64.org"
+      - "https://*.*.example7.org"
+      - "https://*.*.example8.org"
+      - "https://*.*.example9.org"
+routes:
+  - {name: accounts-events, pattern: "^/events/[a-z0-9-]+$", to: accounts}
+  - rpc: {to: {example.shop.*: {service: shop, name: shop}, "*": accounts}}
+  - {name: accounts-webhooks, path: /api/webhooks, method: POST, to: accounts, rewrite: /hooks/payments}
+  - {name: accounts-admin, pattern: "^/admin/.*$", to: accounts}
+  - {name: braces, pattern: "^/braces/x{,3}$", to: accounts}
+  - {name: backtrack, pattern: "^/backtrack/((a|a)*c|a+b)$", to: accounts}
+  - {name: give-up, pattern: "^/give-up/(a|aa)+$", to: accounts}
+  - {name: catalog, prefix: /catalog/, to: catalog}
+  - {name: api-admin, pattern: "^/api/[A-Za-z0-9%_-]+/admin$", to: accounts}
+  - {name: user, pattern: "^/u/@[a-z]+$", to: accounts}
+  - {name: letters, pattern: "^/l/[a-z ]+$", to: accounts}
+  - {name: two, pattern: "^/x..$", to: accounts}
+  - {name: hooks, prefix: /hooks/, to: accounts, rewrite: /in/}
+  - {name: asset-1, pattern: "/api/.*[0-9a-f]{20}\\.js1", to: catalog}
+  - {name: asset-2, pattern: "/api/.*[0-9a-f]{20}\\.js2", to: catalog}
+  - {name: asset-3, pattern: "/api/.*[0-9a-f]{20}\\.js3", to: catalog}
+  - {name: asset-4, pattern: "/api/.*[0-9a-f]{20}\\.js4", to: catalog}
+  - {name: asset-5, pattern: "/api/.*[0-9a-f]{20}\\.js5", to: catalog}
+  - {name: asset-6, pattern: "/api/.*[0-9a-f]{20}\\.js6", to: catalog}
+  - {name: asset-7, pattern: "/api/.*[0-9a-f]{20}\\.js7", to: catalog}
+  - {name: asset-8, pattern: "/api/.*[0-9a-f]{20}\\.js8", to: catalog}
+  - {name: asset-9, pattern: "/api/.*[0-9a-f]{20}\\.js9", to: catalog}
+  - {name: asset-10, pattern: "/api/.*[0-9a-f]{20}\\.js10", to: catalog}
+  - {name: asset-11, pattern: "/api/.*[0-9a-f]{20}\\.js11", to: catalog}
+  - {name: asset-12, pattern: "/api/.*[0-9a-f]{20}\\.js12", to: catalog}
+  - {name: asset-13, pattern: "/api/.*[0-9a-f]{20}\\.js13", to: catalog}
+  - {name: asset-14, pattern: "/api/.*[0-9a-f]{20}\\.js14", to: catalog}
+  - {name: asset-15, pattern: "/api/.*[0-9a-f]{20}\\.js15", to: catalog}
+  - {name: asset-16, pattern: "/api/.*[0-9a-f]{20}\\.js16", to: catalog}
+  - {name: asset-17, pattern: "/api/.*[0-9a-f]{20}\\.js17", to: catalog}
+  - {name: asset-18, pattern: "/api/.*[0-9a-f]{20}\\.js18", to: catalog}
+  - {name: asset-19, pattern: "/api/.*[0-9a-f]{20}\\.js19", to: catalog}
+  - {name: asset-20, pattern: "/api/.*[0-9a-f]{20}\\.js20", to: catalog}
+  - {name: asset-21, pattern: "/api/.*[0-9a-f]{20}\\.js21", to: catalog}
+  - {name: asset-22, pattern: "/api/.*[0-9a-f]{20}\\.js22", to: catalog}
+  - {name: asset-23, pattern: "/api/.*[0-9a-f]{20}\\.js23", to: catalog}
+  - {name: asset-24, pattern: "/api/.*[0-9a-f]{20}\\.js24", to: catalog}
+  - {name: k01, pattern: "/k01/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k02, pattern: "/k02/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k03, pattern: "/k03/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k04, pattern: "/k04/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k05, pattern: "/k05/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k06, pattern: "/k06/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k07, pattern: "/k07/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k08, pattern: "/k08/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k09, pattern: "/k09/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k10, pattern: "/k10/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k11, pattern: "/k11/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k12, pattern: "/k12/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k13, pattern: "/k13/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k14, pattern: "/k14/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k15, pattern: "/k15/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k16, pattern: "/k16/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k17, pattern: "/k17/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k18, pattern: "/k18/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k19, pattern: "/k19/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k20, pattern: "/k20/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k21, pattern: "/k21/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k22, pattern: "/k22/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k23, pattern: "/k23/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k24, pattern: "/k24/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k25, pattern: "/k25/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k26, pattern: "/k26/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k27, pattern: "/k27/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k28, pattern: "/k28/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k29, pattern: "/k29/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k30, pattern: "/k30/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k31, pattern: "/k31/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k32, pattern: "/k32/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k33, pattern: "/k33/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k34, pattern: "/k34/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k35, pattern: "/k35/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k36, pattern: "/k36/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k37, pattern: "/k37/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k38, pattern: "/k38/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k39, pattern: "/k39/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: k40, pattern: "/k40/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: shop, prefix: /, to: shop}
+rpc:
+  methods:
+    - {service: example.shop.v1.CartService, method: GetCart}
+    - {service: example.accounts.v1.ProfileService, method: GetProfile}
+    - {service: example.shop.v1.CartService, method: AddItem}
+envoy: {connect_bridge: false}

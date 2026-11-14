@@ -128,7 +128,7 @@ func TestEveryGeneratorIsDeclared(t *testing.T) {
 	for _, target := range format.Targets {
 		declared = append(declared, target.Name)
 	}
-	if want := []string{"envoy", "nginx"}; !slices.Equal(generators, want) || !slices.Equal(declared, want) {
+	if want := []string{"envoy", "nginx", "haproxy"}; !slices.Equal(generators, want) || !slices.Equal(declared, want) {
 		t.Errorf("render.Targets = %q, format.Targets = %q, want both %q", generators, declared, want)
 	}
 }
