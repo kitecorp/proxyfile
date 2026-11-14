@@ -31,6 +31,11 @@ type exchange struct {
 	// on holds, by a file's label, the row's literal on a file whose values give another answer than want and
 	// admitted, measured on Envoy.
 	on map[string]literal
+	// by holds, by a target's name, the target's own literal on every file of its entries, where the target answers
+	// otherwise than Envoy by a difference its declaration names, measured on that target. It comes before on and
+	// want (literalFor), and the battery fails one whose difference the target does not declare partial, so a row
+	// never takes a target's answer that docs/portability.md does not show.
+	by map[string]own
 	// repeat sends the request this many times back to back, and at least one answer after the first admitted must be
 	// what want asks. "At least one" because a bucket that refills while the requests go out may admit one of them.
 	repeat   int
@@ -39,6 +44,16 @@ type exchange struct {
 	// refusing names a backend container by its role, such as shop-2, that refuses connections on every port while
 	// the row's requests go out, as a backend that is down does (world.refuse).
 	refusing string
+}
+
+// own is a target's own literal for a row, and difference the row of the support table (format.MatrixRows) whose
+// partial cell names the difference that gives it. files, when set, are the labels of the files of the target's
+// entries it holds on, where the difference depends on what a file writes; on the target's other files the row wants
+// what it wants of every target.
+type own struct {
+	difference string
+	files      []string
+	literal
 }
 
 // literal is what a row wants on one file: the answer, and with repeat how many answers before it must be 200.
@@ -59,6 +74,15 @@ type request struct {
 	// forgedMark sends the target's unchecked mark with the value true, a copy no proxy may pass on: only the proxy
 	// may tell the service that a request went through unchecked.
 	forgedMark bool
+	// raw sends the request by hand (sendRaw), with the header names as written and, over http/1.1, line as the
+	// request line when set: net/http refuses a name outside RFC 9110's token characters and writes one space between
+	// the parts of a request line.
+	raw  bool
+	line string
+	// body and trailers, on a raw request, are sent as a chunked body that ends with these trailers, over http/1.1
+	// with Transfer-Encoding: chunked, and over h2 as a DATA frame and a second HEADERS frame.
+	body     string
+	trailers map[string]string
 }
 
 // answer is what a row wants back. A zero value of a field is not compared, except service, whose "" wants no stub
@@ -75,10 +99,15 @@ type answer struct {
 	port, proto, method, path, host string            // what that stub received; "" is not compared
 	received                        map[string]string // headers the stub received, with these values
 	absent                          []string          // headers the stub must not have received
+	body                            string            // the body the stub received; "" is not compared
+	noTrailers                      bool              // the stub must have received no trailer
 	marked                          string            // the value of the target's unchecked mark the stub must receive
 	unmarked                        bool              // the stub must not receive the target's unchecked mark
-	attempt                         int
-	atLeast, below                  time.Duration
+	// unreadable wants a stub's own answer to a request its HTTP server could not read (result.stubError): the proxy
+	// passed the request on as sent. No service is compared then, because that answer names none.
+	unreadable     bool
+	attempt        int
+	atLeast, below time.Duration
 }
 
 // compare returns each way got differs from want, in a fixed order, so a failing row reads the same on every run.
@@ -92,7 +121,8 @@ func compare(want answer, got result, mark string) []string {
 		if !reflect.DeepEqual(want, answer{refused: true}) {
 			return []string{"a refused row compares nothing else"}
 		}
-		if got.err != nil || got.echo == nil && got.status >= 400 {
+		// A stub's own answer to a request it could not read carries no echo either, but the proxy passed the request on.
+		if got.err != nil || got.echo == nil && !got.stubError && got.status >= 400 {
 			return nil
 		}
 		return []string{fmt.Sprintf("refused: got %d from %q, want a TLS error or a refusal no service wrote",
@@ -109,8 +139,13 @@ func compare(want answer, got result, mark string) []string {
 		differ("status: got %d, want %d", got.status, want.status)
 	}
 	switch {
+	case want.unreadable && !got.stubError:
+		differ("service: got %d, want the stub's own answer to a request it could not read", got.status)
+	case want.unreadable: // that answer names no service, so none is compared
 	case want.service == "" && got.echo != nil:
 		differ("service: got %q, want no service", e.Service)
+	case want.service == "" && got.stubError:
+		differ("service: got the stub's own %d for a request it could not read, want no service", got.status)
 	case want.service != "" && got.echo == nil:
 		differ("service: got no service, want %q", want.service)
 	case want.service != e.Service:
@@ -151,6 +186,12 @@ func compare(want answer, got result, mark string) []string {
 		if value, ok := e.Headers[name]; ok {
 			differ("received %s: got %q, want none", name, value)
 		}
+	}
+	if want.body != "" && e.Body != want.body {
+		differ("received body: got %q, want %q", e.Body, want.body)
+	}
+	if want.noTrailers && len(e.Trailers) != 0 {
+		differ("received trailers: got %q, want none", e.Trailers)
 	}
 	value, marked := e.Headers[mark]
 	switch {

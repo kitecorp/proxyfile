@@ -3,8 +3,11 @@
 The `envoy` block holds the keys only the Envoy generator reads: the namespace of the gateway's metadata, its heap
 budget, the old place of tracing and the Connect bridge. nginx and HAProxy have nothing that matches them
 ([Portability](portability.md)), so a file written for one of those leaves the block out, and a file written for several
-proxies keeps it beside their blocks. proxyfile 1.x read `namespace` and `tracing` at the top of the file and `heap`
-under `limits`; from 2.1 `tracing` is read at the top again.
+proxies keeps it beside their blocks. A render for another proxy reads none of the block and refuses none of it:
+`namespace`, `heap`, `connect_bridge` and `envoy.tracing` are left as written, so one file carries Envoy's settings
+beside another proxy's. Tracing for every proxy is the core key `tracing`; tracing written at `envoy.tracing`, its old
+place, is Envoy's alone. proxyfile 1.x read `namespace` and `tracing` at the top of the file and `heap` under `limits`;
+from 2.1 `tracing` is read at the top again.
 
 ```yaml
 envoy:

@@ -1,0 +1,1 @@
+examples/minimal/yaml/proxyfile.yaml:7:29: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

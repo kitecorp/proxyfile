@@ -72,7 +72,7 @@ refuse a hand edit or a missed render:
 ```sh
 proxyfile render -o envoy.yaml                    # the default target, envoy: a complete Envoy configuration
 proxyfile check -o envoy.yaml                     # in the build: renders again, fails when envoy.yaml differs
-proxyfile render --target nginx -o nginx.conf     # refused: no generator for nginx in this version
+proxyfile render --target nginx -o nginx.conf     # routing only, and proxyfile.js beside it; other keys are refused
 proxyfile render --target haproxy -o haproxy.cfg  # refused: no generator for haproxy in this version
 ```
 
@@ -115,8 +115,8 @@ go install github.com/kitecorp/proxyfile/v2/cmd/proxyfile@v2.1.0
 ## Commands
 
 ```
-usage: proxyfile render [<file>] -o <output> [--target envoy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
-       proxyfile check [<file>] -o <output> [--target envoy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+usage: proxyfile render [<file>] -o <output> [--target envoy|nginx] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+       proxyfile check [<file>] -o <output> [--target envoy|nginx] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
        proxyfile schema
        proxyfile version
 ```
@@ -134,14 +134,16 @@ flowchart LR
     protos[".proto files"] -->|rpc.proto| render
     render --> generated["generated configuration<br/>committed"]
     generated --> check["proxyfile check<br/>in the build: renders again,<br/>fails when the file differs"]
-    check --> validate["the proxy's own check in the image<br/>Envoy: envoy --mode validate"]
+    check --> validate["the proxy's own check in the image<br/>Envoy: envoy --mode validate<br/>nginx: nginx -t"]
     validate --> running["the proxy running"]
 ```
 
-proxyfile does not run the proxy. The Envoy generator writes for Envoy 1.40, and an image build can load the committed
-file with `envoy --mode validate`, as this repository's [`scripts/validate-envoy.sh`](scripts/validate-envoy.sh) does
-for the examples. The [conformance battery](docs/conformance.md) runs Envoy on the rendered full and portable examples
-and checks its answers to the same requests every proxy will get.
+proxyfile does not run the proxy. The Envoy generator writes for Envoy 1.40 and the nginx generator for nginx 1.30 and
+1.31, and an image build can load the committed file with `envoy --mode validate` or `nginx -t`, as this repository's
+[`scripts/validate-envoy.sh`](scripts/validate-envoy.sh) and [`scripts/validate-nginx.sh`](scripts/validate-nginx.sh)
+do for the examples. The [conformance battery](docs/conformance.md) runs Envoy on the rendered full and portable
+examples and on nginx's own file, and nginx 1.30 and 1.31 on that file, and checks each proxy's answers to the same
+requests.
 
 [docs/commands.md](docs/commands.md) gives the flags, the file names proxyfile looks for, the exit codes and how a
 problem is printed.
@@ -181,8 +183,8 @@ whose block holds it ([docs/portability.md](docs/portability.md)).
 - [`log`](docs/log.md) (core): Which requests the request log writes.
 - [`tracing`](docs/tracing.md) (core): A trace span for each sampled request, sent to AWS X-Ray or to an OpenTelemetry collector.
 - [`envoy`](docs/envoy.md) (envoy): The settings only the Envoy generator reads: the namespace of the gateway's metadata, its heap budget, the old place of tracing and the Connect bridge.
-- [`nginx`](docs/portability.md) (nginx): The settings only nginx will read; this version has no nginx generator, so it takes no key.
-- [`haproxy`](docs/portability.md) (haproxy): The settings only HAProxy will read; this version has no HAProxy generator, so it takes no key.
+- [`nginx`](docs/portability.md) (nginx): The settings only nginx reads beyond the core keys; this version holds none, so the block takes no key.
+- [`haproxy`](docs/portability.md) (haproxy): The settings only HAProxy reads beyond the core keys; this version holds none, so the block takes no key.
 
 ## Editors
 

@@ -1,0 +1,15 @@
+examples/otel/yaml/proxyfile.yaml:8:29: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/otel/yaml/proxyfile.yaml:12:1: "tracing" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/otel/yaml/proxyfile.yaml:13:3: "tracing.provider" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/otel/yaml/proxyfile.yaml:14:5: "tracing.provider.otel" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/otel/yaml/proxyfile.yaml:15:7: "tracing.provider.otel.endpoint" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/otel/yaml/proxyfile.yaml:16:7: "tracing.provider.otel.service" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/otel/yaml/proxyfile.yaml:17:7: "tracing.provider.otel.sample" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/otel/yaml/proxyfile.yaml:17:16: "tracing.provider.otel.sample.rate" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/otel/yaml/proxyfile.yaml:18:3: "tracing.tags" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/otel/yaml/proxyfile.yaml:19:5: "tracing.tags.<tag name>" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/otel/yaml/proxyfile.yaml:19:19: "tracing.tags.<tag name>.env" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/otel/yaml/proxyfile.yaml:19:41: "tracing.tags.<tag name>.default" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/otel/yaml/proxyfile.yaml:20:5: "tracing.tags.<tag name>" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/otel/yaml/proxyfile.yaml:20:18: "tracing.tags.<tag name>.header" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/otel/yaml/proxyfile.yaml:21:3: "tracing.path_in_url" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

@@ -35,11 +35,12 @@ func rendered(ts []target) (map[string][]fileKeys, error) {
 	return byEntry, nil
 }
 
-// envoyFiles returns the rendered files of every Envoy entry, where every row's literals were measured.
-func envoyFiles(ts []target, byEntry map[string][]fileKeys) []fileKeys {
+// filesOf returns the rendered files of every entry of the target named name. Envoy's are where every row's literals
+// were measured, and another target's where its own literals were.
+func filesOf(name string, ts []target, byEntry map[string][]fileKeys) []fileKeys {
 	var files []fileKeys
 	for _, tg := range ts {
-		if tg.name == "envoy" {
+		if tg.name == name {
 			files = append(files, byEntry[tg.label]...)
 		}
 	}
@@ -49,6 +50,17 @@ func envoyFiles(ts []target, byEntry map[string][]fileKeys) []fileKeys {
 // runsOnAny reports whether e runs on one of files.
 func runsOnAny(e exchange, files []fileKeys) bool {
 	return slices.ContainsFunc(files, func(f fileKeys) bool { return runsOn(e, f.keys) })
+}
+
+// labelled returns the files of files whose label is label.
+func labelled(files []fileKeys, label string) []fileKeys {
+	var found []fileKeys
+	for _, f := range files {
+		if f.label == label {
+			found = append(found, f)
+		}
+	}
+	return found
 }
 
 // refusesAny reports whether the target named name declares one of keys refused.
@@ -77,7 +89,7 @@ func exercised(files []fileKeys) []string {
 // on, or its target must say it refuses the key. An Envoy entry is held to the same, so an Envoy entry that runs fewer
 // files is held to the keys of the others.
 func coverage(ts []target, byEntry map[string][]fileKeys) []string {
-	envoy := exercised(envoyFiles(ts, byEntry))
+	envoy := exercised(filesOf("envoy", ts, byEntry))
 	var lines []string
 	for _, tg := range ts {
 		keys := exercised(byEntry[tg.label])
@@ -95,7 +107,7 @@ func coverage(ts []target, byEntry map[string][]fileKeys) []string {
 // row's keys between them, each key exercised by other rows, while the row itself runs on none of them. An Envoy entry
 // is held to the same.
 func rowCoverage(ts []target, byEntry map[string][]fileKeys) []string {
-	envoy := envoyFiles(ts, byEntry)
+	envoy := filesOf("envoy", ts, byEntry)
 	var lines []string
 	for _, tg := range ts {
 		for _, s := range scenarios {
@@ -110,9 +122,11 @@ func rowCoverage(ts []target, byEntry map[string][]fileKeys) []string {
 	return lines
 }
 
-// rowProblems returns a line for each literal of a row that no run reads, on a label no entry's file carries or on
-// a file the row does not run on, and for each row that runs on no file of an Envoy entry, whose literal no proxy was
-// measured on.
+// rowProblems returns a line for each literal of a row that no run reads: one on a label no entry's file carries, one
+// on a file the row does not run on, a target's own literal on a row that runs on none of the files of the target's
+// entries, and one held on a file label that names no file of the target's entries the row runs on. It also returns a line for each target's own literal whose difference the target does not declare
+// partial, a difference docs/portability.md would not show, and for each row that runs on no file of an Envoy entry,
+// whose literal no proxy was measured on.
 func rowProblems(ts []target, byEntry map[string][]fileKeys) []string {
 	labels := map[string]bool{}
 	byLabel := map[string][]fileKeys{}
@@ -124,7 +138,7 @@ func rowProblems(ts []target, byEntry map[string][]fileKeys) []string {
 			byLabel[f.label] = append(byLabel[f.label], f)
 		}
 	}
-	envoy := envoyFiles(ts, byEntry)
+	envoy := filesOf("envoy", ts, byEntry)
 	var lines []string
 	for _, s := range scenarios {
 		for _, e := range s.exchanges {
@@ -134,6 +148,23 @@ func rowProblems(ts []target, byEntry map[string][]fileKeys) []string {
 					lines = append(lines, fmt.Sprintf("row %q of %q has a literal on %q, the label of no target's file", e.name, s.name, label))
 				case !runsOnAny(e, byLabel[label]):
 					lines = append(lines, fmt.Sprintf("row %q of %q has a literal on %q, a file it does not run on", e.name, s.name, label))
+				}
+			}
+			for _, name := range slices.Sorted(maps.Keys(e.by)) {
+				declared, _ := format.TargetNamed(name)
+				if difference := e.by[name].difference; declared.Keys[difference].Level != format.Partial {
+					lines = append(lines, fmt.Sprintf("row %q of %q has %s's own literal for %q, which %s does not declare partial",
+						e.name, s.name, name, difference, name))
+				}
+				if !runsOnAny(e, filesOf(name, ts, byEntry)) {
+					lines = append(lines, fmt.Sprintf("row %q of %q has %s's own literal, but runs on none of the files of the %s entries",
+						e.name, s.name, name, name))
+				}
+				for _, label := range e.by[name].files {
+					if !runsOnAny(e, labelled(filesOf(name, ts, byEntry), label)) {
+						lines = append(lines, fmt.Sprintf("row %q of %q has %s's own literal on %q, no file of the %s entries the row runs on",
+							e.name, s.name, name, label, name))
+					}
 				}
 			}
 			if !runsOnAny(e, envoy) {

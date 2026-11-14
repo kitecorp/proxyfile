@@ -1,11 +1,12 @@
-// Package conformance runs a proxy among stub backends on what proxyfile renders for it from each example an entry
-// of targets names (examples/full and examples/portable for Envoy), and checks that it answers every row as the
-// Proxyfile says. Its files are test files only, so the released program never carries them, and only
-// battery_test.go, built with the tag conformance, starts containers.
+// Package conformance runs a proxy among stub backends on what proxyfile renders for it from each proxyfile an entry
+// of targets names (for Envoy, examples/full, examples/portable and each other target's own files in testdata), and
+// checks that it answers every row as the Proxyfile says. Its files are test files only, so the released program
+// never carries them, and only battery_test.go, built with the tag conformance, starts containers.
 package conformance
 
 import (
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -33,7 +34,9 @@ type file struct{ label, proxyfile string }
 
 // targets returns every proxy the battery runs. Envoy's image is read from the file scripts/validate-envoy.sh reads,
 // so an Envoy upgrade changes one line for both. Its admin listener answers /ready on 127.0.0.1 only, which is why
-// the battery fetches it from inside the proxy's network namespace.
+// the battery fetches it from inside the proxy's network namespace. Every other proxy's entries come from a file of
+// their own (nginxEntries), so a proxy added later adds its file and one call on the return line. Envoy runs each
+// other target's own file too, so each literal on it is Envoy's measured answer, as rowProblems requires of every row.
 func targets(t testing.TB) []target {
 	pin, err := os.ReadFile("../scripts/envoy-image")
 	if err != nil {
@@ -46,17 +49,20 @@ func targets(t testing.TB) []target {
 		t.Fatalf("../scripts/envoy-image holds %q, not the Envoy image pinned by digest (<image>@sha256:<digest>)", image)
 	}
 	envoy, _ := render.TargetNamed("envoy")
-	return []target{{
+	envoyEntry := target{
 		name:  "envoy",
 		label: "envoy-1.40",
 		files: []file{
 			{label: "full", proxyfile: "../examples/full/hocon/Proxyfile"},
 			{label: "portable", proxyfile: "../examples/portable/hocon/Proxyfile"},
+			{label: "nginx-file", proxyfile: "testdata/nginx.yaml"},
+			{label: "nginx-plain", proxyfile: "testdata/nginx-plain.yaml"},
 		},
 		image: image,
 		args:  []string{"-c", "/config/" + envoy.Config},
 		ready: "http://127.0.0.1:9901/ready",
 		// The header docs/auth.md names for when_unavailable: allow, whatever the proxy, so a service reads one name.
 		mark: "x-envoy-auth-failure-mode-allowed",
-	}}
+	}
+	return slices.Concat([]target{envoyEntry}, nginxEntries(t))
 }

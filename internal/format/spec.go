@@ -60,8 +60,8 @@ type Field struct {
 	// Moved names, by key, the keys of a Map that proxyfile 1.x read here and 2.0 reads at another place, with that place,
 	// so the check names it instead of calling the key unknown.
 	Moved map[string]string
-	// Reserved marks the block of a proxy proxyfile has no generator for yet (Map): it is accepted empty, and every key
-	// written in it is refused with NoGenerator.
+	// Reserved marks a proxy's own block (Map) that takes no key in this version: it is accepted empty, and every key
+	// written in it is refused with the check's message for a reserved block.
 	Reserved bool
 	// Class is the proxy whose generator alone reads the key and every key under it that names no class of its own:
 	// envoy, nginx or haproxy. A key that names none, held by none that does, is core: every proxy can carry it
@@ -108,7 +108,7 @@ const (
 	EndpointExpect = "an IP address or a DNS name, and a port, such as 127.0.0.1:4317 or [fd00::40]:4317"
 )
 
-// NoGenerator says why a target and a key of its block are refused: proxyfile has no generator for that proxy yet.
+// NoGenerator says why a target is refused: proxyfile has no generator for that proxy yet.
 func NoGenerator(backend string) string {
 	return "no generator for " + backend + " in this version; see docs/portability.md"
 }
@@ -419,10 +419,11 @@ var jwtField = Field{Name: "jwt", Doc: "The proxy verifies a signed token (a JWT
 				Expect: "a claim name, with dots for a nested claim, such as realm.roles"}},
 	}}
 
-// reserved is the block, named name, of a proxy that has no generator in this version. It is accepted empty, so a file
-// can hold it before the generator comes, and a key in it is refused rather than left unread.
+// reserved is the block, named name, of a proxy whose own settings this version does not hold yet. It is accepted
+// empty, and a key in it is refused rather than left unread, so a file written for a later version that reads the key
+// is never rendered as if the key were not there.
 func reserved(name, proxy string) Field {
-	return Field{Name: name, Doc: "The settings only " + proxy + " will read; this version has no " + proxy + " generator, so it takes no key.",
+	return Field{Name: name, Doc: "The settings only " + proxy + " reads beyond the core keys; this version holds none, so the block takes no key.",
 		Kind: Map, Reserved: true, Class: name}
 }
 

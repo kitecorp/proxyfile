@@ -111,7 +111,8 @@ func TestTargetDeclarations(t *testing.T) {
 
 // A key the target refuses is named at its own position, also inside a Dict's value or a list item, and in the origins
 // file and the methods file by the path the proxyfile writes it at; a file that writes none of them has no problem. A
-// form refused for another key reads that key in the proxyfile, also for a key of a methods file.
+// form refused for another key reads that key in the proxyfile, also for a key of a methods file. nginx's own
+// declarations refuse each form in the words nginx's users read, and leave the form beside it alone.
 func TestRefusals(t *testing.T) {
 	lean := Target{Name: "lean", Title: "Lean", Keys: map[string]Support{}}
 	for _, key := range CoreKeys(Proxyfile) {
@@ -139,6 +140,17 @@ func TestRefusals(t *testing.T) {
 			Applies: func(value, root *tree.Node) bool {
 				return net.ParseIP(value.Text) == nil && root.Get("dns").Get("resolver") == nil
 			}}}}}}
+	// The words of nginx's refusals, which several of its rows repeat.
+	const (
+		notWrittenWords = "is refused by --target nginx: not written by this version's nginx generator; render it for envoy"
+		jwtWords        = "is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy"
+		healthWords     = "is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool"
+		xrayWords       = "is refused by --target nginx: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter"
+		zoneWords       = "nginx reads no zone in a backend's address; give the service an address without one"
+		pathWords       = "holding %, a character Envoy escapes before it picks a route (\" < > ^ ` { | }) or one outside ASCII is refused by --target nginx: nginx matches a path holding a character Envoy escapes as it decodes it, where Envoy matches the escape, so a prefix or a path with % or such a character would take other requests on nginx than on Envoy; write it without them, as a pattern, or render it for envoy"
+		rewriteWords    = "holding a character nginx escapes again is refused by --target nginx: nginx escapes the new path before it sends it, so the service would receive that character escaped, where the Envoy output sends it as written; write the rewrite without it, or render it for envoy"
+		hostDotWords    = "holding a host that starts or ends with . is refused by --target nginx: nginx reads a dot at a host's start as every name under it and drops one at its end; write the host without it, or render it for envoy"
+	)
 	cases := []struct {
 		name   string
 		spec   Field
@@ -193,6 +205,68 @@ func TestRefusals(t *testing.T) {
 		{name: "the same environment in the proxyfile, at its key", spec: Proxyfile, target: oneHost,
 			document: m.Replaced(4, 4, "origins: {all: {hosts: [localhost]}}"),
 			want:     []string{`g.yaml:4:11: "origins.<environment name>" is refused by --target one-host: one-host serves one host`}},
+		{name: "a whole-request limit", spec: Proxyfile, target: nginxTarget, document: m.Inserted(7, "timeouts: {request: 30s}"),
+			want: []string{`g.yaml:7:12: "timeouts.request" a time is refused by --target nginx: nginx has no limit on a whole request (its time limits count the time between two reads or writes); write timeouts.request: none, or render it for envoy`}},
+		{name: "no whole-request limit", spec: Proxyfile, target: nginxTarget, document: m.Inserted(7, "timeouts: {request: none}"), want: nil},
+		{name: "an address by name", spec: Proxyfile, target: nginxTarget, document: m.Replaced(3, 3, "  app: {http: 3000, address: catalog.internal}"),
+			want: []string{`g.yaml:3:21: "services.<service name>.address" a DNS name is refused by --target nginx: not written by this version's nginx generator; render it for envoy`}},
+		{name: "an address by IP", spec: Proxyfile, target: nginxTarget, document: m.Replaced(3, 3, "  app: {http: 3000, address: 10.0.2.21}"), want: nil},
+		// The reader takes a zoned IPv6 address as an IP address (netip.ParseAddr); nginx loads none in an upstream.
+		{name: "a zoned IPv6 address", spec: Proxyfile, target: nginxTarget, document: m.Replaced(3, 3, `  app: {http: 3000, address: "fe80::1%en0"}`),
+			want: []string{`g.yaml:3:21: "services.<service name>.address" a zoned IPv6 address is refused by --target nginx: ` + zoneWords}},
+		{name: "a zoned IPv6 address in addresses", spec: Proxyfile, target: nginxTarget,
+			document: m.Replaced(3, 3, `  app: {http: 3000, addresses: ["10.0.2.21", "fe80::1%en0"]}`),
+			want:     []string{`g.yaml:3:21: "services.<service name>.addresses" holding a zoned IPv6 address is refused by --target nginx: ` + zoneWords}},
+		{name: "an IPv6 address with no zone", spec: Proxyfile, target: nginxTarget, document: m.Replaced(3, 3, `  app: {http: 3000, addresses: ["10.0.2.21", "fe80::1"]}`),
+			want: nil},
+		{name: "a rewrite holding ?", spec: Proxyfile, target: nginxTarget, document: m.Replaced(6, 6, `  - {name: app, prefix: /, to: app, rewrite: "/hooks?x=1"}`),
+			want: []string{`g.yaml:6:37: "routes[].rewrite" holding ? is refused by --target nginx: nginx reads a ? in a rewrite as the start of new arguments, after which it adds the client's; write the path without ?`}},
+		{name: "a rewrite with no ?", spec: Proxyfile, target: nginxTarget, document: m.Replaced(6, 6, "  - {name: app, prefix: /, to: app, rewrite: /hooks}"), want: nil},
+		// nginx matches a path holding a character Envoy escapes before it matches on the path it has decoded, so a
+		// prefix or a path with % or with such a character takes other requests on nginx; every other character is
+		// matched alike, on the path as the client wrote it or on the one both proxies normalise.
+		{name: "a prefix holding an escape", spec: Proxyfile, target: nginxTarget, document: m.Replaced(6, 6, "  - {name: app, prefix: /a%20b/, to: app}"),
+			want: []string{`g.yaml:6:17: "routes[].prefix" ` + pathWords}},
+		{name: "a prefix holding |", spec: Proxyfile, target: nginxTarget, document: m.Replaced(6, 6, "  - {name: app, prefix: /a|b/, to: app}"),
+			want: []string{`g.yaml:6:17: "routes[].prefix" ` + pathWords}},
+		{name: "a prefix holding a reserved character", spec: Proxyfile, target: nginxTarget, document: m.Replaced(6, 6, "  - {name: app, prefix: /a+b/, to: app}"),
+			want: nil},
+		{name: "a prefix holding nginx's own syntax", spec: Proxyfile, target: nginxTarget, document: m.Replaced(6, 6, `  - {name: app, prefix: "/s;c{d}#e/", to: app}`),
+			want: []string{`g.yaml:6:17: "routes[].prefix" ` + pathWords}},
+		{name: "a prefix of unreserved characters", spec: Proxyfile, target: nginxTarget, document: m.Replaced(6, 6, "  - {name: app, prefix: /a-b.c_d~e/9/, to: app}"),
+			want: nil},
+		{name: "a path holding :", spec: Proxyfile, target: nginxTarget, document: m.Replaced(6, 6, "  - {name: app, path: /v1/x:list, to: app}"),
+			want: nil},
+		{name: "a path holding a letter outside ASCII", spec: Proxyfile, target: nginxTarget, document: m.Replaced(6, 6, "  - {name: app, path: /é, to: app}"),
+			want: []string{`g.yaml:6:17: "routes[].path" ` + pathWords}},
+		{name: "a rewrite holding %", spec: Proxyfile, target: nginxTarget, document: m.Replaced(6, 6, `  - {name: app, prefix: /, to: app, rewrite: "/t%20u/"}`),
+			want: []string{`g.yaml:6:37: "routes[].rewrite" ` + rewriteWords}},
+		{name: "a rewrite holding #", spec: Proxyfile, target: nginxTarget, document: m.Replaced(6, 6, `  - {name: app, prefix: /, to: app, rewrite: "/r#x/"}`),
+			want: []string{`g.yaml:6:37: "routes[].rewrite" ` + rewriteWords}},
+		{name: "a rewrite of characters both proxies send as written", spec: Proxyfile, target: nginxTarget,
+			document: m.Replaced(6, 6, `  - {name: app, prefix: /, to: app, rewrite: "/q[x]'y$z;w!&()*+,=:@-._~/"}`), want: nil},
+		{name: "a host with a dot at its start", spec: Proxyfile, target: nginxTarget, document: m.Replaced(4, 4, "origins: {all: {hosts: [.example.com]}}"),
+			want: []string{`g.yaml:4:17: "origins.<environment name>.hosts" ` + hostDotWords}},
+		{name: "a host with a dot at its end", spec: Proxyfile, target: nginxTarget, document: m.Replaced(4, 4, "origins: {all: {hosts: [example.com.]}}"),
+			want: []string{`g.yaml:4:17: "origins.<environment name>.hosts" ` + hostDotWords}},
+		{name: "the host .", spec: Proxyfile, target: nginxTarget, document: m.Replaced(4, 4, `origins: {all: {hosts: ["."]}}`),
+			want: []string{`g.yaml:4:17: "origins.<environment name>.hosts" ` + hostDotWords}},
+		{name: "a host with a dot at its start in an origins file", spec: Origins, target: nginxTarget, beside: m.String(),
+			document: `{"environments": [{"name": "all", "hosts": [".example.com"]}]}`,
+			want:     []string{`g.yaml:1:35: "origins.<environment name>.hosts" ` + hostDotWords}},
+		{name: "a host with dots inside", spec: Proxyfile, target: nginxTarget, document: m.Replaced(4, 4, "origins: {all: {hosts: [api.example.com]}}"), want: nil},
+		{name: "health", spec: Proxyfile, target: nginxTarget, document: m.Replaced(3, 3, "  app: {http: 3000, health: {path: /health}}"),
+			want: []string{`g.yaml:3:21: "services.<service name>.health" ` + healthWords, `g.yaml:3:30: "services.<service name>.health.path" ` + healthWords}},
+		// auth.jwt as examples/jwt writes it: a line for each key under it, and the not-written line of auth itself.
+		{name: "a token verified at the proxy", spec: Proxyfile, target: nginxTarget,
+			document: m.Inserted(7, "auth:\n  jwt:\n    issuer: https://login.example.com\n    audiences: [api.example.com]\n"+
+				"    keys: /etc/gateway/jwt/jwks.json\n    claims:\n      x-user-id: sub\n      x-user-roles: realm.roles"),
+			want: []string{`g.yaml:7:1: "auth" ` + notWrittenWords, `g.yaml:8:3: "auth.jwt" ` + jwtWords, `g.yaml:9:5: "auth.jwt.issuer" ` + jwtWords,
+				`g.yaml:10:5: "auth.jwt.audiences" ` + jwtWords, `g.yaml:11:5: "auth.jwt.keys" ` + jwtWords, `g.yaml:12:5: "auth.jwt.claims" ` + jwtWords,
+				`g.yaml:13:7: "auth.jwt.claims.<header name>" ` + jwtWords, `g.yaml:14:7: "auth.jwt.claims.<header name>" ` + jwtWords}},
+		{name: "an X-Ray tracer", spec: Proxyfile, target: nginxTarget, document: m.Inserted(7, "tracing: {provider: {xray: {segment: s}}}"),
+			want: []string{`g.yaml:7:1: "tracing" ` + notWrittenWords, `g.yaml:7:11: "tracing.provider" ` + notWrittenWords,
+				`g.yaml:7:22: "tracing.provider.xray" ` + xrayWords, `g.yaml:7:29: "tracing.provider.xray.segment" ` + xrayWords}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

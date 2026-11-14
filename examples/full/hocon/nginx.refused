@@ -1,0 +1,91 @@
+examples/full/hocon/Proxyfile: auth: "auth" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: auth.accept: "auth.accept" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: auth.ask: "auth.ask" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: auth.enabled: "auth.enabled" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: auth.jwt: "auth.jwt" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
+examples/full/hocon/Proxyfile: auth.jwt.audiences: "auth.jwt.audiences" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
+examples/full/hocon/Proxyfile: auth.jwt.ca: "auth.jwt.ca" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
+examples/full/hocon/Proxyfile: auth.jwt.claims: "auth.jwt.claims" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
+examples/full/hocon/Proxyfile: auth.jwt.claims.x-roles: "auth.jwt.claims.<header name>" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
+examples/full/hocon/Proxyfile: auth.jwt.claims.x-subject: "auth.jwt.claims.<header name>" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
+examples/full/hocon/Proxyfile: auth.jwt.header: "auth.jwt.header" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
+examples/full/hocon/Proxyfile: auth.jwt.issuer: "auth.jwt.issuer" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
+examples/full/hocon/Proxyfile: auth.jwt.keys: "auth.jwt.keys" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
+examples/full/hocon/Proxyfile: auth.jwt.optional: "auth.jwt.optional" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
+examples/full/hocon/Proxyfile: auth.only_with_header: "auth.only_with_header" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: auth.send: "auth.send" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: auth.send_request: "auth.send_request" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: auth.timeout: "auth.timeout" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: auth.when_unavailable: "auth.when_unavailable" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: client_address: "client_address" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: cors: "cors" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: cors.allow_headers: "cors.allow_headers" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: cors.allow_methods: "cors.allow_methods" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: cors.expose_headers: "cors.expose_headers" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: cors.max_age: "cors.max_age" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: dns: "dns" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: dns.resolver: "dns.resolver" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: limits: "limits" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: limits.connections: "limits.connections" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: limits.request_headers: "limits.request_headers" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: limits.request_headers.count: "limits.request_headers.count" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: limits.request_headers.size: "limits.request_headers.size" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: log: "log" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: log.sample: "log.sample" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: log.status_from: "log.status_from" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: origins.live.origins: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: origins.live.patterns: "origins.<environment name>.patterns" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: origins.local.origins: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: origins.local.patterns: "origins.<environment name>.patterns" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: origins.test.origins: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: origins.test.patterns: "origins.<environment name>.patterns" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: remove_from_clients: "remove_from_clients" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: routes[0].auth: "routes[].auth" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: routes[1].rpc.rate_limit: "routes[].rpc.rate_limit" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: routes[1].rpc.rate_limit.by: "routes[].rpc.rate_limit.by" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: routes[1].rpc.rate_limit.per: "routes[].rpc.rate_limit.per" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: routes[1].rpc.rate_limit.requests: "routes[].rpc.rate_limit.requests" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: routes[1].rpc.retries: "routes[].rpc.retries" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: routes[2].auth: "routes[].auth" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: routes[3].rate_limit: "routes[].rate_limit" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: routes[3].rate_limit.burst: "routes[].rate_limit.burst" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: routes[3].rate_limit.by: "routes[].rate_limit.by" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: routes[3].rate_limit.per: "routes[].rate_limit.per" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: routes[3].rate_limit.requests: "routes[].rate_limit.requests" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: routes[4].retries: "routes[].retries" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: rpc.methods[0].action: "rpc.methods[].action" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: rpc.methods[2].action: "rpc.methods[].action" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: rpc.methods[2].reports: "rpc.methods[].reports" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: services.catalog.address: "services.<service name>.address" a DNS name is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: services.catalog.balance: "services.<service name>.balance" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: services.catalog.hash: "services.<service name>.hash" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: services.catalog.hash.header: "services.<service name>.hash.header" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: services.shop.balance: "services.<service name>.balance" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: services.shop.health: "services.<service name>.health" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
+examples/full/hocon/Proxyfile: services.shop.health.grpc: "services.<service name>.health.grpc" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
+examples/full/hocon/Proxyfile: services.shop.health.healthy: "services.<service name>.health.healthy" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
+examples/full/hocon/Proxyfile: services.shop.health.interval: "services.<service name>.health.interval" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
+examples/full/hocon/Proxyfile: services.shop.health.path: "services.<service name>.health.path" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
+examples/full/hocon/Proxyfile: services.shop.health.timeout: "services.<service name>.health.timeout" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
+examples/full/hocon/Proxyfile: services.shop.health.unhealthy: "services.<service name>.health.unhealthy" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
+examples/full/hocon/Proxyfile: timeouts.idle: "timeouts.idle" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: timeouts.upstream_idle: "timeouts.upstream_idle" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: tls: "tls" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: tls.certificate: "tls.certificate" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: tls.clients: "tls.clients" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: tls.clients.ca: "tls.clients.ca" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: tls.key: "tls.key" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: tracing: "tracing" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: tracing.path_in_url: "tracing.path_in_url" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: tracing.provider: "tracing.provider" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: tracing.provider.otel: "tracing.provider.otel" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: tracing.provider.otel.endpoint: "tracing.provider.otel.endpoint" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: tracing.provider.otel.sample: "tracing.provider.otel.sample" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: tracing.provider.otel.sample.rate: "tracing.provider.otel.sample.rate" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: tracing.provider.otel.service: "tracing.provider.otel.service" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: tracing.tags: "tracing.tags" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: tracing.tags.environment: "tracing.tags.<tag name>" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: tracing.tags.environment.default: "tracing.tags.<tag name>.default" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: tracing.tags.environment.env: "tracing.tags.<tag name>.env" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: tracing.tags.request_id: "tracing.tags.<tag name>" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: tracing.tags.request_id.header: "tracing.tags.<tag name>.header" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

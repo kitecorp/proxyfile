@@ -1,0 +1,15 @@
+examples/partial/hocon/Proxyfile: auth: "auth" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/hocon/Proxyfile: auth.accept: "auth.accept" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/hocon/Proxyfile: auth.ask: "auth.ask" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/hocon/Proxyfile: auth.enabled: "auth.enabled" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/hocon/Proxyfile: auth.send: "auth.send" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/hocon/Proxyfile: auth.timeout: "auth.timeout" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/hocon/Proxyfile: auth.when_unavailable: "auth.when_unavailable" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/hocon/Proxyfile: log: "log" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/hocon/Proxyfile: log.sample: "log.sample" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/hocon/Proxyfile: log.status_from: "log.status_from" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/hocon/Proxyfile: origins.only.origins: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/hocon/Proxyfile: routes[1].auth: "routes[].auth" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/hocon/Proxyfile: rpc.methods[0].action: "rpc.methods[].action" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/hocon/Proxyfile: rpc.methods[0].reports: "rpc.methods[].reports" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/partial/hocon/Proxyfile: timeouts.request: "timeouts.request" a time is refused by --target nginx: nginx has no limit on a whole request (its time limits count the time between two reads or writes); write timeouts.request: none, or render it for envoy

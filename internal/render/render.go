@@ -4,6 +4,7 @@ package render
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -12,6 +13,7 @@ import (
 	"github.com/kitecorp/proxyfile/v2/internal/format"
 	"github.com/kitecorp/proxyfile/v2/internal/generator"
 	"github.com/kitecorp/proxyfile/v2/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/nginx"
 	"github.com/kitecorp/proxyfile/v2/internal/origins"
 	"github.com/kitecorp/proxyfile/v2/internal/protofiles"
 	"github.com/kitecorp/proxyfile/v2/internal/read"
@@ -39,7 +41,10 @@ type Target struct {
 // Targets are the proxies with a generator: the one list render picks a generator from, which cli reads too to accept
 // a --target. format.Targets declares each one's support of every key and cannot hold the generators itself: every
 // generator depends on format, through origins and rpc, so format importing one would be an import cycle.
-var Targets = []Target{{Name: "envoy", Config: "envoy.yaml", Generate: envoy.Generate}}
+var Targets = []Target{
+	{Name: "envoy", Config: "envoy.yaml", Generate: envoy.Generate},
+	{Name: "nginx", Config: "nginx.conf", Generate: nginx.Generate},
+}
 
 // TargetNamed returns the target whose Name is name. It reads Targets at each call, so a test may declare its own.
 func TargetNamed(name string) (Target, bool) {
@@ -86,6 +91,16 @@ func Read(req Request) (*Run, []model.Problem) {
 		return nil, problems
 	}
 	g, file := proxyfile.Gateway, proxyfile.Origins
+	// A render for one proxy reads the core keys and its own block and leaves the other blocks alone, so one file
+	// carries what each proxy needs; none of their keys is refused. The envoy block holds what only Envoy reads, and
+	// envoy.tracing, the old place of tracing, fills the field tracing fills. The reader refuses a file that writes
+	// both, so a Tracing read while envoy.tracing is written came from the block.
+	if name != "envoy" {
+		if proxyfile.Tree.Get("envoy").Entry("tracing") != nil {
+			g.Tracing = nil
+		}
+		g.Envoy = model.Envoy{}
+	}
 	inputPaths := append([]string{req.Proxyfile}, proxyfile.Included...)
 	var all []model.Problem
 	if file == nil {
@@ -163,9 +178,13 @@ func (r *Run) HasMethods() bool {
 // Files returns every output, in memory and in this order: each file the target's generator returns, then RPCTable.
 // The configuration, the file with no name, goes at Out, and a file the configuration loads goes beside it under its
 // own name, because the configuration names it by that name. A name that holds a folder, or is . or .., would put the
-// file outside the folder of Out, so it is refused as the bug in proxyfile it is.
+// file outside the folder of Out, so it is refused as the bug in proxyfile it is. A value the generator refuses as it
+// writes it (generator.Refused) is reported as a refusal at the value.
 func (r *Run) Files() ([]File, []model.Problem) {
 	generated, err := r.generate(r.input)
+	if refused, ok := errors.AsType[generator.Refused](err); ok {
+		return nil, refused.Problems
+	}
 	if err != nil {
 		return nil, bug(r.req.Out, err.Error())
 	}

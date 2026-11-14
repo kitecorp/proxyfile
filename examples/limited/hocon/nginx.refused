@@ -1,0 +1,9 @@
+examples/limited/hocon/Proxyfile: origins.all.origins: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/limited/hocon/Proxyfile: routes[0].rpc.rate_limit: "routes[].rpc.rate_limit" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/limited/hocon/Proxyfile: routes[0].rpc.rate_limit.by: "routes[].rpc.rate_limit.by" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/limited/hocon/Proxyfile: routes[0].rpc.rate_limit.per: "routes[].rpc.rate_limit.per" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/limited/hocon/Proxyfile: routes[0].rpc.rate_limit.requests: "routes[].rpc.rate_limit.requests" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/limited/hocon/Proxyfile: routes[1].rate_limit: "routes[].rate_limit" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/limited/hocon/Proxyfile: routes[1].rate_limit.burst: "routes[].rate_limit.burst" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/limited/hocon/Proxyfile: routes[1].rate_limit.per: "routes[].rate_limit.per" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/limited/hocon/Proxyfile: routes[1].rate_limit.requests: "routes[].rate_limit.requests" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

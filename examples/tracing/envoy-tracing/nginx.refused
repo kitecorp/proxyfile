@@ -1,0 +1,8 @@
+examples/tracing/envoy-tracing/proxyfile.yaml:8:1: "auth" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/tracing/envoy-tracing/proxyfile.yaml:9:3: "auth.ask" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/tracing/envoy-tracing/proxyfile.yaml:10:3: "auth.timeout" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/tracing/envoy-tracing/proxyfile.yaml:11:3: "auth.enabled" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/tracing/envoy-tracing/proxyfile.yaml:12:3: "auth.when_unavailable" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/tracing/envoy-tracing/proxyfile.yaml:13:3: "auth.accept" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/tracing/envoy-tracing/proxyfile.yaml:14:1: "remove_from_clients" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/tracing/envoy-tracing/proxyfile.yaml:16:29: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

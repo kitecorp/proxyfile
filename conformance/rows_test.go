@@ -57,9 +57,13 @@ func runsOn(e exchange, written []string) bool {
 	return true
 }
 
-// literalOn returns what e wants on the file labelled label: its literal there when e.on holds one, and otherwise
-// e.want and e.admitted.
-func literalOn(e exchange, label string) literal {
+// literalFor returns what e wants from the target named target on the file labelled label: the target's own literal
+// when e.by holds one on that file, then e's literal on the file when e.on holds one, and otherwise e.want and
+// e.admitted.
+func literalFor(e exchange, target, label string) literal {
+	if o, ok := e.by[target]; ok && (o.files == nil || slices.Contains(o.files, label)) {
+		return o.literal
+	}
 	if l, ok := e.on[label]; ok {
 		return l
 	}
