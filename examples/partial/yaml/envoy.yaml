@@ -231,7 +231,7 @@ static_resources:
                   forward_not_matching_preflights: false
               routes:
               - name: "refused:dot-segment-with-parameter"
-                match: {safe_regex: {regex: ".*/\\.\\.?;.*"}}
+                match: {safe_regex: {regex: ".*/\\.\\.?(?:;|%3[Bb]).*"}}
                 direct_response: {status: 400}
               - {name: "backend-rpc", match: {path: "/example.backend.v1.ReportService/ListReports"}, metadata: {filter_metadata: {"proxyfile": {action: "read"}}}, typed_per_filter_config: {envoy.filters.http.header_mutation: {"@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutationPerRoute, mutations: {request_mutations: [{append: {header: {key: x-gateway-action, value: "read"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}, {append: {header: {key: x-gateway-reports, value: "export,share"}, append_action: OVERWRITE_IF_EXISTS_OR_ADD}}]}}, envoy.filters.http.connect_grpc_bridge: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}, envoy.filters.http.lua: {"@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {}}}, route: {cluster: "backend_grpc", timeout: 30s}}
               - name: "login"

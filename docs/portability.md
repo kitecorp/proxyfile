@@ -224,7 +224,7 @@ generator:
 | What | Envoy | nginx | HAProxy | Class |
 |---|---|---|---|---|
 | The request's path normalised before a route is picked | `normalize_path: true`, `merge_slashes: true` and `path_with_escaped_slashes_action: UNESCAPE_AND_FORWARD`: dot segments resolved, repeated slashes merged, `%2F` read as `/` | `location` matches a normalised URI: `%XX` decoded, `.` and `..` resolved, adjacent slashes merged (`merge_slashes`, on by default) | `http-request normalize-uri` with `path-merge-slashes`, `percent-decode-unreserved`, `path-strip-dot` and `path-strip-dotdot`, which its manual calls an experimental technical preview that needs `expose-experimental-directives`; `percent-decode-unreserved` decodes only letters, digits, `-`, `.`, `_` and `~`, so `%2F` stays as sent | core; HAProxy differs as its column says |
-| A path that still holds a dot segment with a `;` parameter after normalisation answered `400` | the first route of every virtual host, `refused:dot-segment-with-parameter`: `safe_regex` `.*/\.\.?;.*` with `direct_response` `400` | to be settled with that generator | to be settled with that generator | core |
+| A path that still holds a dot segment with a `;` parameter after normalisation answered `400`, the `;` written or escaped once (`%3B`, `%3b`) | the first route of every virtual host, `refused:dot-segment-with-parameter`: `safe_regex` `.*/\.\.?(?:;\|%3[Bb]).*` with `direct_response` `400` | to be settled with that generator | to be settled with that generator | core |
 
 The rest belong to Envoy:
 

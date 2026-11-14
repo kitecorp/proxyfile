@@ -47,11 +47,19 @@ what that is.
   slashes merged, and `%2F`, a backslash and `%5C` read as `/`, so the route, a rate limit, the token, the check and
   the service all read the path the service receives. A `;` parameter on a name and the case of letters are kept as
   sent, and a `;` parameter on a dot segment written with dots is dropped with the segment resolved. Measured on Envoy
-  1.40.2 ([`routes`](routes.md), [A route with `auth: off`](auth.md#a-route-with-auth-off)).
-- **A path that still holds a dot segment with a `;` parameter is answered `400`.** The first route of every virtual
-  host, `refused:dot-segment-with-parameter`, takes a path that holds `/.;` or `/..;` after normalisation, so no route
-  of the proxyfile takes it and it reaches no service. The route does not turn `auth` off, so the token filter and the
-  check still run before its `400` ([A route with `auth: off`](auth.md#a-route-with-auth-off)).
+  1.40.2 ([`routes`](routes.md), [A route with `auth: off`](auth.md#a-route-with-auth-off)). Envoy drops that
+  parameter itself from 1.40.0, and from 1.36.10, 1.37.6, 1.38.4 and 1.39.1 on the older release lines, as their
+  release notes say, while the runtime setting `envoy.reloadable_features.strip_dotdot_segments_with_parameters` is
+  on, its default. On an older Envoy, or with the setting off, the segment stays in the path and is answered `400` by
+  the rule below: measured on Envoy 1.33.14, and on 1.40.2 with the setting off.
+- **A path that still holds a dot segment with a `;` parameter, the `;` written or escaped once, is answered `400`.**
+  The first route of every virtual host, `refused:dot-segment-with-parameter`, takes a path that holds `/.;`, `/..;`,
+  `/.%3B` or `/..%3B` after normalisation, with the hex in either case, so no route of the proxyfile takes it and it
+  reaches no service. Envoy keeps `%3B` escaped as sent, so a hop between the gateway and the service that decodes it
+  once would hand the service the `..;` that [A route with `auth: off`](auth.md#a-route-with-auth-off) describes. A
+  `;` escaped twice (`%253B`), a `;` on any other segment and the query reach the service as sent. Measured on Envoy
+  1.40.2 and 1.33.14. The route does not turn `auth` off, so the token filter and the check still run before its
+  `400`.
 - **WebSocket is the one upgrade passed on.** Envoy answers any other `Upgrade` to a route with `403` and an empty
   body.
 - **A service that cannot be reached answers `502` with an empty body**, where Envoy's own answer is a `503` or a `502`
@@ -120,7 +128,7 @@ runtime value, for example, looks it up by its key.
 | Name | What it is |
 |---|---|
 | `public` | The listener, its `stat_prefix` and the route table. |
-| `refused:dot-segment-with-parameter` | The first route of every virtual host, which answers `400` to a path that still holds `/.;` or `/..;` after normalisation. The request log writes it as `route`. No route of the file can take the name, because a route name holds no colon. |
+| `refused:dot-segment-with-parameter` | The first route of every virtual host, which answers `400` to a path that still holds `/.;`, `/..;`, `/.%3B` or `/..%3B` (the hex in either case) after normalisation. The request log writes it as `route`. No route of the file can take the name, because a route name holds no colon. |
 | `gateway.ext_authz.enabled` | The runtime key that switches the auth check, written with `auth.ask`. Its default comes from `auth.enabled`. |
 | `gateway.request_log.min_status` | The runtime key for the lowest status that is always logged, written with `log`. Its default comes from `log.status_from`. |
 | `gateway.request_log.sample` | The runtime key for the share of other requests that is logged, written with `log`. Its default comes from `log.sample`. |

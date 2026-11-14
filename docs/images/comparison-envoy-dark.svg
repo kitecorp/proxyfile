@@ -149,7 +149,7 @@
 <text x="901.5" y="565.3" xml:space="preserve">                  forward_not_matching_preflights: false</text>
 <text x="901.5" y="576.3" xml:space="preserve">              routes:</text>
 <text x="901.5" y="587.3" xml:space="preserve">              - name: &#34;refused:dot-segment-with-parameter&#34;</text>
-<text x="901.5" y="598.3" xml:space="preserve">                match: {safe_regex: {regex: &#34;.*/\\.\\.?;.*&#34;}}</text>
+<text x="901.5" y="598.3" xml:space="preserve">                match: {safe_regex: {regex: &#34;.*/\\.\\.?(?:;|%3[Bb]).*&#34;}}</text>
 <text x="901.5" y="609.3" xml:space="preserve">                direct_response: {status: 400}</text>
 <text x="901.5" y="620.3" xml:space="preserve">              - name: &#34;app&#34;</text>
 <text x="901.5" y="631.3" xml:space="preserve">                match: {prefix: &#34;/&#34;}</text>

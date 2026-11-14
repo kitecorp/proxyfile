@@ -6,7 +6,8 @@ How routes are matched:
 
 - The routes are tried in the order written, and the first that matches wins. Every environment gets the same list. Put
   a `prefix: /` route last, because it matches every path. The generated file's first route, before every route written
-  here, answers `400` to a path that still holds `/.;` or `/..;` after normalisation.
+  here, answers `400` to a path that still holds `/.;`, `/..;`, `/.%3B` or `/..%3B` (the hex in either case) after
+  normalisation ([Defaults](defaults.md)).
 - Write exactly one of `prefix`, `path` and `pattern` on each route.
 - A route matches the request's path after the proxy normalises it: dot segments resolved, repeated slashes merged,
   `%2F` and a backslash read as `/`, and an escaped letter written out (`%61` as `a`). The service receives that path:
