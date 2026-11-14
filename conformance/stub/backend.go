@@ -56,7 +56,7 @@ func (b *backend) reply(w http.ResponseWriter, r *http.Request) {
 	if code, err := strconv.Atoi(r.Header.Get("x-stub-status")); err == nil {
 		status = code
 	}
-	askRedirect(w, r)
+	askHeaders(w, r)
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(status)
 	e := b.describe(r, attempt)
@@ -64,13 +64,20 @@ func (b *backend) reply(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(e)
 }
 
-// askRedirect answers X-Accel-Redirect with the value of the request's x-stub-accel-redirect, when it has one. nginx
-// answers with the URI an upstream names there, in place of the upstream's answer, unless told to ignore the header
-// (proxy_ignore_headers), so a service could serve the client a location no route gives it; a scenario asks for one
-// to see that the proxy passes it on instead.
-func askRedirect(w http.ResponseWriter, r *http.Request) {
-	if value := r.Header.Get("x-stub-accel-redirect"); value != "" {
-		w.Header().Set("X-Accel-Redirect", value)
+// asked holds, by the request header that asks for it, an answer header the stub sets to that header's value.
+// X-Accel-Redirect: nginx answers with the URI an upstream names there, in place of the upstream's answer, unless told
+// to ignore the header (proxy_ignore_headers), so a service could serve the client a location no route gives it; a
+// scenario asks for one to see that the proxy passes it on instead. Keep-Alive: the time a service keeps its own
+// connection open, which says nothing true of the client's connection, so a scenario asks for one to see that the
+// proxy removes it, as Envoy does.
+var asked = map[string]string{"x-stub-accel-redirect": "X-Accel-Redirect", "x-stub-keep-alive": "Keep-Alive"}
+
+// askHeaders sets each answer header the request asks for (asked).
+func askHeaders(w http.ResponseWriter, r *http.Request) {
+	for control, header := range asked {
+		if value := r.Header.Get(control); value != "" {
+			w.Header().Set(header, value)
+		}
 	}
 }
 
@@ -127,7 +134,9 @@ type echo struct {
 	Path    string `json:"path"`
 	Host    string `json:"host"`
 	Attempt int    `json:"attempt"`
-	// Headers holds every request header by its lower-case name, its values joined with ",".
+	// Headers holds every request header by its lower-case name, its lines joined with a line break, which no value
+	// holds, so a row tells one line holding a comma from two lines: Envoy joins the lines of some headers into one,
+	// and a service that reads only the first line of a header reads another value when a proxy passes both.
 	Headers map[string]string `json:"headers"`
 	// Body is the request body as read, on a plain HTTP request; Trailers holds the request's trailers as Headers holds
 	// its headers, read once the body has ended, including those no Trailer header declared.
@@ -142,14 +151,14 @@ func (b *backend) describe(r *http.Request, attempt int) echo {
 	}
 	headers := map[string]string{}
 	for name, values := range r.Header {
-		headers[strings.ToLower(name)] = strings.Join(values, ",")
+		headers[strings.ToLower(name)] = strings.Join(values, "\n")
 	}
 	var trailers map[string]string
 	for name, values := range r.Trailer {
 		if trailers == nil {
 			trailers = map[string]string{}
 		}
-		trailers[strings.ToLower(name)] = strings.Join(values, ",")
+		trailers[strings.ToLower(name)] = strings.Join(values, "\n")
 	}
 	return echo{Service: b.service, Instance: b.instance, Port: port, Proto: r.Proto, Method: r.Method,
 		Path: r.RequestURI, Host: r.Host, Attempt: attempt, Headers: headers, Trailers: trailers}

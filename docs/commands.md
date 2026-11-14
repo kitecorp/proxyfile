@@ -17,12 +17,24 @@ directory, and exactly one of them must exist.
 `--help`, `-h` and `help` print the usage text on standard output and exit with 0.
 
 The flags may stand before or after the file. `--target` names the proxy the configuration is for: `envoy` (the
-default), `nginx` or `haproxy`; a target with no generator in this version is refused, and
-[Portability](portability.md) has a column for each one that has one, with the keys it refuses. A proxyfile with an rpc
-entry (`- rpc:` in YAML, `{ rpc { ... } }` in HOCON) takes its methods from exactly one of `rpc.methods`, `rpc.proto`
-and `--rpc-methods`, and methods given with no rpc entry are refused. `--rpc-table` needs one of the three. An output
-path may not name the proxyfile, a file it includes, its origins file, its methods file or a `.proto` file it reads, nor
-another output.
+default), `nginx` or `haproxy`, and [Portability](portability.md) has a column for each, with the keys it refuses. A
+proxyfile with an rpc entry (`- rpc:` in YAML, `{ rpc { ... } }` in HOCON) takes its methods from exactly one of
+`rpc.methods`, `rpc.proto` and `--rpc-methods`, and methods given with no rpc entry are refused. `--rpc-table` needs one
+of the three. An output path may not name the proxyfile, a file it includes, its origins file, its methods file or a
+`.proto` file it reads, nor another output.
+
+After `render --target nginx` or `--target haproxy` has written its files, it prints one line on standard error that
+counts the ways that output is less strict than the Envoy output, serving a request the Envoy output refuses or ends,
+or sending a service what the Envoy output would not, and names the page that lists them, with its exit code
+unchanged:
+
+```
+proxyfile render: this HAProxy configuration is less strict than the Envoy output in 9 ways; docs/haproxy.md lists them under "Where HAProxy is less strict than the Envoy output"
+```
+
+nginx's line names [`docs/nginx.md`](nginx.md#where-nginx-is-less-strict-than-the-envoy-output), HAProxy's
+[`docs/haproxy.md`](haproxy.md#where-haproxy-is-less-strict-than-the-envoy-output). A render for Envoy prints no such
+line, and neither does `check`.
 
 The generated file starts with this line, and the same input always gives the same bytes:
 

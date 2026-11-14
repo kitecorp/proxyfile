@@ -44,39 +44,6 @@ func script() []byte {
 	return []byte("// " + strings.TrimPrefix(generator.Header, "# ") + "\n" + scriptBody)
 }
 
-// removedByEnvoy are the request headers the Envoy output removes before the service, measured on Envoy 1.40.2 by
-// sending each of the 41 x-envoy- headers its headers.h names, with and without a private X-Forwarded-For: these 16
-// steer an Envoy between the gateway and the service (retries, timeouts, tracing, an internal request) and reach no
-// service whatever X-Forwarded-For says. Proxy-Connection and X-Forwarded-Client-Cert are removed too. nginx passes
-// every client header on unless a location sets it empty.
-var removedByEnvoy = []string{
-	"proxy-connection",
-	"x-envoy-expected-rq-timeout-ms",
-	"x-envoy-force-trace",
-	"x-envoy-hedge-on-per-try-timeout",
-	"x-envoy-internal",
-	"x-envoy-ip-tags",
-	"x-envoy-max-retries",
-	"x-envoy-original-url",
-	"x-envoy-retriable-header-names",
-	"x-envoy-retriable-status-codes",
-	"x-envoy-retry-grpc-on",
-	"x-envoy-retry-on",
-	"x-envoy-upstream-alt-stat-name",
-	"x-envoy-upstream-rq-per-try-timeout-ms",
-	"x-envoy-upstream-rq-timeout-alt-response",
-	"x-envoy-upstream-rq-timeout-ms",
-	"x-envoy-upstream-stream-duration-ms",
-	"x-forwarded-client-cert",
-}
-
-// envoyMethods are the methods Envoy's HTTP/1 parser takes (kValidMethods in source/common/http/http1/balsa_parser.cc
-// of Envoy 1.40.2); it answers any other 400 (measured with FOO), and over HTTP/2 it takes any method.
-var envoyMethods = []string{"ACL", "BIND", "CHECKOUT", "CONNECT", "COPY", "DELETE", "GET", "HEAD", "LINK", "LOCK", "MERGE",
-	"MKACTIVITY", "MKCALENDAR", "MKCOL", "MOVE", "MSEARCH", "NOTIFY", "OPTIONS", "PATCH", "POST", "PROPFIND", "PROPPATCH",
-	"PURGE", "PUT", "QUERY", "REBIND", "REPORT", "SEARCH", "SOURCE", "SUBSCRIBE", "TRACE", "UNBIND", "UNLINK", "UNLOCK",
-	"UNSUBSCRIBE"}
-
 // readTimeout is how long nginx waits for a service's answer, counted from the request's end and then between two
 // reads. Without timeouts.request the Envoy output ends a request 15 s after its end (the route's timeout, Envoy's
 // default), which nginx cannot write for a whole answer: 15 s between two reads gives a service that says nothing the
@@ -88,11 +55,6 @@ func readTimeout(request *model.Time) string {
 	}
 	return "5m"
 }
-
-// connectionTokens are the Connection tokens Envoy keeps a request whole with; it removes each header another token
-// names, or refuses the request (source/common/http/utility.cc, sanitizeConnectionHeader), and it refuses ten tokens or
-// more. nginx cannot remove a header a request names, so it refuses any other token, which no service then receives.
-const connectionTokens = `(?:close|keep-alive|upgrade|http2-settings|te)`
 
 // Generate returns the whole nginx.conf as the configuration and the script it loads, proxyfile.js. Its error is a
 // generator.Refused that names each value whose nginx form is longer than nginx reads, by its key; any other error
@@ -353,11 +315,11 @@ func writeRequestChecks(w *writer) {
 	w.lines(
 		// Over HTTP/1 Envoy answers 400 to a method its parser does not know, where nginx sends any method on.
 		`  map "$server_protocol:$request_method" $pf_f_method { `+regexKey(`^HTTP/2\.0:`)+` 0; `+
-			regexKey(`^[^:]*:(?:`+strings.Join(envoyMethods, "|")+`)\z`)+` 0; default 1; }`,
+			regexKey(`^[^:]*:(?:`+strings.Join(generator.EnvoyMethods, "|")+`)\z`)+` 0; default 1; }`,
 		// A Connection token compares as any letter case (RFC 9110), and Envoy takes an empty element of the list, as
 		// in close, or ,close (measured).
 		`  map $http_connection $pf_f_connection { "" 0; `+
-			quoted(`~*^[ \t,]*(?:`+connectionTokens+`[ \t]*(?:,[ \t,]*`+connectionTokens+`[ \t]*){0,8})?[ \t,]*\z`)+` 0; default 1; }`,
+			quoted(`~*^[ \t,]*(?:`+generator.ConnectionTokens+`[ \t]*(?:,[ \t,]*`+generator.ConnectionTokens+`[ \t]*){0,`+strconv.Itoa(generator.MostConnectionTokens-1)+`})?[ \t,]*\z`)+` 0; default 1; }`,
 		// Envoy's HTTP/1 parser takes no byte outside ! to ~ in a request line's target but a tab and a form feed,
 		// where nginx escapes a byte above 0x7F and sends it on.
 		`  map "$server_protocol:$request_uri" $pf_f_raw { `+regexKey(`^HTTP/2\.0:`)+` 0; `+
@@ -440,7 +402,7 @@ func writePathClasses(w *writer, hasPattern bool) {
 		`  map $request_uri $pf_rawpath { `+regexKey(`^(?<pf_p>/[^?]*)`)+` $pf_p; `+regexKey(`^\z`)+` /; default ""; }`,
 		`  map $pf_rawpath $pf_c_n { `+regexKey(`//|/\.\.?(?:/|\z)|%(?:`+decodedHex+`)`)+` 1; `+regexKey(`^/`)+` 0; default e; }`,
 		`  map $pf_rawpath $pf_c_k { `+regexKey(`%(?!`+decodedHex+`)[0-9A-Fa-f]{2}`)+` 1; `+regexKey(`^/`)+` 0; default e; }`,
-		`  map $pf_rawpath $pf_c_e { `+regexKey("[\"<>^`{|}\\x80-\\xFF]")+` 1; `+regexKey(`^/`)+` 0; default e; }`,
+		`  map $pf_rawpath $pf_c_e { `+regexKey("["+generator.EscapedInPath+`\x80-\xFF]`)+` 1; `+regexKey(`^/`)+` 0; default e; }`,
 		`  map $request_uri $pf_c_q { `+regexKey(`^[^?]*\?\z`)+` 1; `+regexKey(`^`)+` 0; default e; }`,
 		`  map "$pf_c_n$pf_c_k$pf_c_e$pf_c_q" $pf_mode { `+modes+`default refused; }`,
 		`  map $pf_mode $pf_path { raw $pf_rawpath; rawk $pf_rawpath; uri $uri; default ""; }`,
@@ -755,7 +717,7 @@ func writeLocation(w *writer, name, path string, r route) {
 			"      proxy_set_header TE $pf_te;",
 		)
 	}
-	for _, header := range removedByEnvoy {
+	for _, header := range generator.RemovedByEnvoy {
 		w.lines("      " + set + " " + header + ` "";`)
 	}
 	if r.grpc {

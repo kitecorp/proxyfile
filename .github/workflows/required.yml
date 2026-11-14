@@ -30,6 +30,8 @@ jobs:
         run: scripts/validate-envoy.sh examples/*/*/envoy.yaml
       - name: nginx 1.30 and 1.31 load every generated example
         run: scripts/validate-nginx.sh examples/*/*/nginx.conf
+      - name: HAProxy 3.2 and 3.4 load every generated example
+        run: scripts/validate-haproxy.sh examples/*/*/haproxy.cfg
       # The same requests against each proxy running the rendered file of each proxyfile its entry names in
       # conformance/targets_test.go, in Docker, among stub backends. Its tests are behind the conformance build tag, so
       # the test step above starts no container.

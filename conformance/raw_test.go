@@ -20,8 +20,8 @@ import (
 // both its clients refuse, a request line with other than one space between its parts, a header value that holds a
 // line break, and a trailer of any name. Over http/1.1 it writes the request line, r.line when set and otherwise the
 // method, the path and HTTP/1.1 with one space between them, then Host and each header in the order of their names,
-// then, with r.body or r.trailers, Transfer-Encoding: chunked and the body as one chunk ended by the trailers, and
-// reads the answer with net/http's reader. Over h2 it writes the connection preface, an empty SETTINGS frame and one
+// then, with r.body or r.trailers, Transfer-Encoding: chunked and the body as one chunk ended by the trailers, or with
+// r.unframed the body as it is, and reads the answer with net/http's reader. Over h2 it writes the connection preface, an empty SETTINGS frame and one
 // HEADERS frame of the same fields, each a literal HPACK field with no index and no Huffman coding, then the body as a
 // DATA frame and the trailers as a second HEADERS frame, and reads frames until the stream ends. A closed or reset connection, or a
 // GOAWAY, before the answer is an error, as a client sees a proxy that refused the request so. The connection is the
@@ -52,9 +52,12 @@ func (w *world) sendRaw(r request) result {
 	for _, name := range names {
 		text.WriteString(name + ": " + r.headers[name] + "\r\n")
 	}
-	if r.body == "" && r.trailers == nil {
+	switch {
+	case r.body == "" && r.trailers == nil:
 		text.WriteString("\r\n")
-	} else {
+	case r.unframed:
+		text.WriteString("\r\n" + r.body)
+	default:
 		text.WriteString("Transfer-Encoding: chunked\r\n\r\n")
 		if r.body != "" {
 			fmt.Fprintf(&text, "%x\r\n%s\r\n", len(r.body), r.body)

@@ -156,9 +156,17 @@ func keyTables(text string) ([]keyTable, error) {
 
 // tableNamed returns the table a marker names: "." holds the keys at the top of a proxyfile that hold no keys of
 // their own, "origins file" and "methods file" the keys of those files, "support by proxy" each target's support of
-// every row of MatrixRows, and any other name is the path of a key of the proxyfile, whose table holds that key and
-// every key under it, in the class of the key that holds it.
+// every row of MatrixRows, "less strict: <target>" the list of the ways that target is less strict than the Envoy
+// output, and any other name is the path of a key of the proxyfile, whose table holds that key and every key under it,
+// in the class of the key that holds it.
 func tableNamed(name string) (string, error) {
+	if target, found := strings.CutPrefix(name, "less strict: "); found {
+		t, known := TargetNamed(target)
+		if !known {
+			return "", fmt.Errorf("a list names %q, which is no target", target)
+		}
+		return string(LessStrictList(t)), nil
+	}
 	switch name {
 	case ".":
 		leaves := slices.DeleteFunc(slices.Clone(Proxyfile.Fields), holdsKeys)

@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -16,8 +17,8 @@ import (
 	"github.com/kitecorp/proxyfile/v2/internal/tree"
 )
 
-const usageText = `usage: proxyfile render [<file>] -o <output> [--target envoy|nginx] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
-       proxyfile check [<file>] -o <output> [--target envoy|nginx] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+const usageText = `usage: proxyfile render [<file>] -o <output> [--target envoy|nginx|haproxy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
+       proxyfile check [<file>] -o <output> [--target envoy|nginx|haproxy] [--rpc-methods <methods.json>] [--rpc-table <table.json>]
        proxyfile schema
        proxyfile version
 `
@@ -52,6 +53,20 @@ func TestRun(t *testing.T) {
 		stdout, stderr string
 		also           func(t *testing.T, tmp string) // checks the files after Run when set
 	}{
+		// After it writes, render for a proxy whose output is less strict than the Envoy output says in how many ways
+		// and where they are listed, with the exit code of a render that wrote its files; Envoy's own output and check
+		// print nothing.
+		{name: "render for haproxy counts the ways it is less strict", setup: copyMinimal,
+			args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/haproxy.cfg --target haproxy",
+			stderr: "proxyfile render: this HAProxy configuration is less strict than the Envoy output in 9 ways; " +
+				"docs/haproxy.md lists them under \"Where HAProxy is less strict than the Envoy output\"\n"},
+		{name: "render for nginx counts the ways it is less strict", setup: func(t *testing.T, tmp string) { copyExample(t, tmp, "grpc") },
+			args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/nginx.conf --target nginx",
+			stderr: "proxyfile render: this nginx configuration is less strict than the Envoy output in 5 ways; " +
+				"docs/nginx.md lists them under \"Where nginx is less strict than the Envoy output\"\n"},
+		{name: "render for envoy counts nothing", setup: copyMinimal, args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/envoy.yaml"},
+		{name: "check for haproxy counts nothing", args: "check <ex>/minimal/yaml/proxyfile.yaml -o <ex>/minimal/yaml/haproxy.cfg --target haproxy"},
+		{name: "check for nginx counts nothing", args: "check <ex>/grpc/yaml/proxyfile.yaml -o <ex>/grpc/yaml/nginx.conf --target nginx"},
 		{name: "check full",
 			args: "check <ex>/full/yaml/proxyfile.yaml -o <ex>/full/yaml/envoy.yaml --rpc-table <ex>/full/yaml/rpc-table.json"},
 		{name: "file after flags", args: "check -o <ex>/minimal/yaml/envoy.yaml <ex>/minimal/yaml/proxyfile.yaml"},
@@ -235,9 +250,6 @@ func TestRun(t *testing.T) {
 		{name: "no -o", args: "render a.yaml", exit: 2, stderr: "proxyfile render: -o is required\n"},
 		{name: "two files", args: "render a.yaml b.yaml -o c.yaml", exit: 2, stderr: "proxyfile render: give exactly one file\n"},
 		{name: "target envoy", args: "check <ex>/minimal/yaml/proxyfile.yaml -o <ex>/minimal/yaml/envoy.yaml --target envoy"},
-		// haproxy has no generator in this version, so it is refused before any file is read, and a.yaml need not exist.
-		{name: "target haproxy", args: "check a.yaml -o b.yaml --target haproxy", exit: 2,
-			stderr: "proxyfile check: --target haproxy: no generator for haproxy in this version; see docs/portability.md\n"},
 		// The targets with a generator are the ones render.Targets holds, the list render picks the generator from, so
 		// a target it does not hold is refused before any file is read.
 		{name: "a target with no generator", setup: func(t *testing.T, tmp string) {
@@ -636,5 +648,44 @@ func TestLongValuesForNginx(t *testing.T) {
 			}
 			absent(t, tmp, "nginx.conf", "proxyfile.js")
 		})
+	}
+}
+
+// Two HAProxy files rendered into one folder share the script beside them, whose bytes are the same for every file, so
+// check finds each current, and each file carries its own pattern's program to it.
+func TestTwoHAProxyFilesInOneFolder(t *testing.T) {
+	tmp := t.TempDir()
+	proxyfile := func(pattern string) string {
+		return "listen: 8000\nservices:\n  app: {http: 3000, address: 127.0.0.1}\norigins:\n  all: {hosts: [localhost]}\n" +
+			"routes:\n  - {name: p, pattern: \"" + pattern + "\", to: app}\n  - {name: app, prefix: /, to: app}\n"
+	}
+	testsupport.WriteFile(t, filepath.Join(tmp, "a.yaml"), proxyfile("^/a$"))
+	testsupport.WriteFile(t, filepath.Join(tmp, "b.yaml"), proxyfile("^/b$"))
+	out := filepath.Join(tmp, "out")
+	if err := os.Mkdir(out, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	for _, name := range []string{"a", "b"} {
+		var stdout, stderr bytes.Buffer
+		args := []string{"render", filepath.Join(tmp, name+".yaml"), "-o", filepath.Join(out, name+".cfg"), "--target", "haproxy"}
+		if exit := Run(args, &stdout, &stderr, "v9.9.9"); exit != 0 {
+			t.Fatalf("render %s: exit %d, stderr %q", name, exit, stderr.String())
+		}
+	}
+	// Each file is checked after both are written, so b's render is the last to have written the script.
+	for _, name := range []string{"a", "b"} {
+		var stdout, stderr bytes.Buffer
+		args := []string{"check", filepath.Join(tmp, name+".yaml"), "-o", filepath.Join(out, name+".cfg"), "--target", "haproxy"}
+		if exit := Run(args, &stdout, &stderr, "v9.9.9"); exit != 0 || stderr.String() != "" {
+			t.Errorf("check %s: exit %d and stderr %q, want exit 0 and nothing", name, exit, stderr.String())
+		}
+	}
+	for name, line := range map[string]string{
+		"a": "  http-request lua.pf_route 1 's2;f;e3,4;r4,47,47;r5,97,97;e6,8;m' if !{ var(txn.route) -m found }",
+		"b": "  http-request lua.pf_route 1 's2;f;e3,4;r4,47,47;r5,98,98;e6,8;m' if !{ var(txn.route) -m found }",
+	} {
+		if !slices.Contains(strings.Split(string(testsupport.ReadFile(t, filepath.Join(out, name+".cfg"))), "\n"), line) {
+			t.Errorf("%s.cfg does not hold its own program's line %q", name, line)
+		}
 	}
 }

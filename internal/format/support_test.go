@@ -1,6 +1,7 @@
 package format
 
 import (
+	"maps"
 	"net"
 	"os"
 	"slices"
@@ -57,10 +58,11 @@ func TestSupportMatrix(t *testing.T) {
 	targets := []Target{
 		{Name: "envoy", Title: "Envoy", Keys: map[string]Support{"a": {Level: Supported}, "b": {Level: Supported}}},
 		{Name: "lean", Title: "Lean", Keys: map[string]Support{"a": {Level: Partial, Note: "counts | per second", Refuses: []Refusal{{Form: "above 10", Instead: "write 10 or less"}}},
-			"b": {Level: Refused, Note: "a `b` of its own"}}},
+			"b": {Level: Refused, Note: "a `b` of its own"}},
+			LessStrict: []LessStrict{{Row: "a", Name: "a | served", Measured: "m"}, {Row: "a", Name: "two", Measured: "m"}}},
 	}
 	want := "| Key | Envoy | Lean |\n|---|---|---|\n" +
-		"| `a` | supported | partial: counts \\| per second; refuses above 10: write 10 or less |\n" +
+		"| `a` | supported | partial: counts \\| per second; refuses above 10: write 10 or less; less strict than the Envoy output: a \\| served; two |\n" +
 		"| `b` | supported | refused: a \\`b\\` of its own |\n"
 	if got := string(SupportMatrix(CoreKeys(spec), targets)); got != want {
 		t.Errorf("SupportMatrix = %q, want %q", got, want)
@@ -105,6 +107,18 @@ func TestTargetDeclarations(t *testing.T) {
 			if support := target.Keys[row]; support.Level == Refused || support.Refuses != nil {
 				t.Errorf("%s refuses %q, which every configuration holds", target.Name, row)
 			}
+		}
+		// A less strict way is a difference, so its row is partial, and the page and the cell tell the ways apart by
+		// name.
+		var lessStrict []string
+		for _, way := range target.LessStrict {
+			if target.Keys[way.Row].Level != Partial {
+				t.Errorf("%s: %q is on %q, which it does not declare partial", target.Name, way.Name, way.Row)
+			}
+			if way.Name == "" || way.Measured == "" || slices.Contains(lessStrict, way.Name) {
+				t.Errorf("%s: a less strict way named %q, with %q measured, is unnamed, says nothing or has a name twice", target.Name, way.Name, way.Measured)
+			}
+			lessStrict = append(lessStrict, way.Name)
 		}
 	}
 }
@@ -267,6 +281,21 @@ func TestRefusals(t *testing.T) {
 		{name: "an X-Ray tracer", spec: Proxyfile, target: nginxTarget, document: m.Inserted(7, "tracing: {provider: {xray: {segment: s}}}"),
 			want: []string{`g.yaml:7:1: "tracing" ` + notWrittenWords, `g.yaml:7:11: "tracing.provider" ` + notWrittenWords,
 				`g.yaml:7:22: "tracing.provider.xray" ` + xrayWords, `g.yaml:7:29: "tracing.provider.xray.segment" ` + xrayWords}},
+		// HAProxy's refused forms, each beside the form of the same key it writes.
+		{name: "HAProxy: an address naming a host", spec: Proxyfile, target: haproxyTarget, document: m.Replaced(3, 3, "  app: {http: 3000, address: app.internal}"),
+			want: []string{`g.yaml:3:21: "services.<service name>.address" a DNS name is refused by --target haproxy: this version's HAProxy generator writes no DNS name; give the service's IP address, or render it for envoy`}},
+		{name: "HAProxy: an IP address", spec: Proxyfile, target: haproxyTarget, document: m.Replaced(3, 3, "  app: {http: 3000, address: 10.0.2.21}"), want: nil},
+		// The reader takes a zoned IPv6 address as an IP address (netip.ParseAddr); HAProxy loads none in a server line.
+		{name: "HAProxy: a zoned IPv6 address", spec: Proxyfile, target: haproxyTarget, document: m.Replaced(3, 3, `  app: {http: 3000, address: "fe80::1%en0"}`),
+			want: []string{`g.yaml:3:21: "services.<service name>.address" a zoned IPv6 address is refused by --target haproxy: HAProxy 3.2 and 3.4 load no zone in a server's address; give the service an address without one`}},
+		{name: "HAProxy: a zoned IPv6 address in addresses", spec: Proxyfile, target: haproxyTarget,
+			document: m.Replaced(3, 3, `  app: {http: 3000, addresses: ["10.0.2.21", "fe80::1%en0"]}`),
+			want:     []string{`g.yaml:3:21: "services.<service name>.addresses" holding a zoned IPv6 address is refused by --target haproxy: HAProxy 3.2 and 3.4 load no zone in a server's address; give the service an address without one`}},
+		{name: "HAProxy: an IPv6 address with no zone", spec: Proxyfile, target: haproxyTarget,
+			document: m.Replaced(3, 3, `  app: {http: 3000, addresses: ["10.0.2.21", "fe80::1"]}`), want: nil},
+		{name: "HAProxy: a whole-request time", spec: Proxyfile, target: haproxyTarget, document: m.Inserted(7, "timeouts: {request: 30s}"),
+			want: []string{`g.yaml:7:12: "timeouts.request" a time is refused by --target haproxy: HAProxy has no limit on a whole request (timeout server is the time without data, timeouts.idle); write timeouts.request: none`}},
+		{name: "HAProxy: no whole-request limit", spec: Proxyfile, target: haproxyTarget, document: m.Inserted(7, "timeouts: {request: none}"), want: nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -292,6 +321,193 @@ func TestRefusals(t *testing.T) {
 				t.Errorf("Refusals = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// Render counts the ways a target is less strict than the Envoy output after it writes, and names the page and the
+// heading that list them; the Envoy output is the measure of the others, so it has none and render prints nothing.
+func TestLessStrictWarning(t *testing.T) {
+	for _, c := range []struct{ target, want string }{
+		{"envoy", ""},
+		{"nginx", `this nginx configuration is less strict than the Envoy output in 5 ways; docs/nginx.md lists them under "Where nginx is less strict than the Envoy output"`},
+		{"haproxy", `this HAProxy configuration is less strict than the Envoy output in 9 ways; docs/haproxy.md lists them under "Where HAProxy is less strict than the Envoy output"`},
+	} {
+		target, _ := TargetNamed(c.target)
+		if got := LessStrictWarning(target); got != c.want {
+			t.Errorf("LessStrictWarning(%s) = %q, want %q", c.target, got, c.want)
+		}
+	}
+}
+
+// The page's list gives each less strict way by its name, then what was measured, in the declaration's order.
+func TestLessStrictList(t *testing.T) {
+	target := Target{Name: "lean", Title: "Lean", LessStrict: []LessStrict{{Row: "a", Name: "one", Measured: "`x` served, where Envoy answers `400`."},
+		{Row: "b", Name: "two", Measured: "y."}}}
+	want := "- **one**: `x` served, where Envoy answers `400`.\n- **two**: y.\n"
+	if got := string(LessStrictList(target)); got != want {
+		t.Errorf("LessStrictList = %q, want %q", got, want)
+	}
+}
+
+// HAProxy and nginx name the ways their pages list, each on the row the support table gives it.
+func TestLessStrictWays(t *testing.T) {
+	const line = "the request line and header names read before a route is picked"
+	type way struct{ row, name string }
+	for _, c := range []struct {
+		target string
+		want   []way
+	}{
+		{"haproxy", []way{
+			{line, "an HTTP/2 :authority with a default or empty port reaches the service without it"},
+			{line, "ten Connection tokens close or keep-alive are served"},
+			{line, "a request with no body reaches the service without content-length: 0"},
+			{line, "two Host lines of one host are served"},
+			{line, "two Content-Length lines of one value are served"},
+			{line, "Content-Length beside Transfer-Encoding: chunked is served"},
+			{line, "over HTTP/2, two host fields and no :authority are served"},
+			{line, "a WebSocket upgrade a service answers without switching passes the service's body"},
+			{"timeouts.request", "without timeouts.request, an answer that keeps arriving runs past 15 s"},
+		}},
+		{"nginx", []way{
+			{line, "a request trailer whose name is outside the token characters is served over HTTP/1.1"},
+			{line, "a Connection token and nine elements of white space are served"},
+			{line, "a request with no body reaches the service without content-length: 0"},
+			{line, "a WebSocket upgrade a service answers without switching passes the service's body"},
+			{"timeouts.request", "without timeouts.request, an answer that keeps arriving runs past 15 s"},
+		}},
+	} {
+		target, _ := TargetNamed(c.target)
+		var got []way
+		for _, w := range target.LessStrict {
+			got = append(got, way{w.Row, w.Name})
+		}
+		if !slices.Equal(got, c.want) {
+			t.Errorf("%s's less strict ways = %q\nwant %q", c.target, got, c.want)
+		}
+	}
+}
+
+// HAProxy's declaration writes the rows below, each as the format describes it or with the difference its note names,
+// and refuses every other row by name: a key this version's generator does not write yet says so, and a key HAProxy
+// cannot carry says what to write instead. The words are the ones the support table and a refused render print.
+func TestHAProxyWrites(t *testing.T) {
+	type declared struct {
+		key   string
+		level Level
+		// note is the declaration's Note, and refuses each refused form of a partial key as "form: instead".
+		note, refuses string
+	}
+	var written []declared
+	refused := map[string][]string{}
+	for _, key := range MatrixRows() {
+		support := haproxyTarget.Keys[key]
+		if support.Level == Refused {
+			refused[support.Note] = append(refused[support.Note], key)
+			continue
+		}
+		var forms []string
+		for _, refusal := range support.Refuses {
+			forms = append(forms, refusal.Form+": "+refusal.Instead)
+		}
+		written = append(written, declared{key: key, level: support.Level, note: support.Note, refuses: strings.Join(forms, "; ")})
+	}
+	wantWritten := []declared{
+		{key: "listen", level: Supported},
+		{key: "admin", level: Partial, note: "/ready answers 200 while HAProxy runs, not when the server is ready; no other admin path in this version"},
+		{key: "tls", level: Partial, note: "of the TLS 1.2 suites both take, HAProxy picks by its own order, where Envoy takes the client's among suites it holds equal: a client that offers OpenSSL's default list is given ECDHE-RSA-AES128-GCM-SHA256, where Envoy gives ECDHE-RSA-CHACHA20-POLY1305"},
+		{key: "tls.certificate", level: Supported},
+		{key: "tls.key", level: Supported},
+		{key: "tls.clients", level: Supported},
+		{key: "tls.clients.ca", level: Partial, note: "a client certificate that is not valid yet is refused with the alert bad_certificate, where Envoy sends certificate_expired"},
+		{key: "client_address", level: Supported},
+		{key: "timeouts", level: Supported},
+		{key: "timeouts.request", level: Partial,
+			note:    "without the key a service that sends nothing for 15 s is answered 504, as by Envoy; HAProxy's limits count the time without data",
+			refuses: "a time: HAProxy has no limit on a whole request (timeout server is the time without data, timeouts.idle); write timeouts.request: none"},
+		{key: "services", level: Supported},
+		{key: "services.<service name>", level: Supported},
+		{key: "services.<service name>.http", level: Supported},
+		{key: "services.<service name>.grpc", level: Supported},
+		{key: "services.<service name>.host_header", level: Supported},
+		{key: "services.<service name>.address", level: Partial, note: "an IP address with no zone",
+			refuses: "a DNS name: this version's HAProxy generator writes no DNS name; give the service's IP address, or render it for envoy; " +
+				"a zoned IPv6 address: HAProxy 3.2 and 3.4 load no zone in a server's address; give the service an address without one"},
+		{key: "services.<service name>.addresses", level: Partial, note: "IP addresses with no zone",
+			refuses: "holding a zoned IPv6 address: HAProxy 3.2 and 3.4 load no zone in a server's address; give the service an address without one"},
+		{key: "remove_from_clients", level: Supported},
+		{key: "cors", level: Supported},
+		{key: "cors.allow_methods", level: Supported},
+		{key: "cors.allow_headers", level: Partial, note: "an empty Access-Control-Allow-Headers is left out of a preflight's answer, where Envoy sends it empty"},
+		{key: "cors.expose_headers", level: Supported},
+		{key: "cors.max_age", level: Supported},
+		{key: "origins", level: Supported},
+		{key: "origins.<environment name>", level: Supported},
+		{key: "origins.<environment name>.hosts", level: Supported},
+		{key: "origins.<environment name>.origins", level: Supported},
+		{key: "origins.<environment name>.patterns", level: Supported},
+		{key: "routes", level: Supported},
+		{key: "routes[].rpc", level: Supported},
+		{key: "routes[].rpc.to", level: Supported},
+		{key: "routes[].rpc.to.<package pattern>", level: Supported},
+		{key: "routes[].rpc.to.<package pattern>.service", level: Supported},
+		{key: "routes[].rpc.to.<package pattern>.name", level: Supported},
+		{key: "routes[].name", level: Supported},
+		{key: "routes[].prefix", level: Supported},
+		{key: "routes[].path", level: Supported},
+		{key: "routes[].pattern", level: Partial,
+			note: "a request whose pattern routes take more than proxyfile.lua's budget of work, about 24 ms of CPU for one request alone and 33 ms for each of many at once, such as a path of 14,000 bytes that 80 pattern routes read to its end, is answered 400, where Envoy's RE2 always decides, in under 1 ms of CPU; the states the patterns build take up to about 1 MB on each HAProxy thread, and a flood of new paths grew HAProxy by about 48 MB with 12 threads, where it grew Envoy by about 76 MB; a pattern whose program is longer than 65,536 bytes is refused, where Envoy refuses an RE2 program of more than 100 instructions"},
+		{key: "routes[].method", level: Supported},
+		{key: "routes[].to", level: Supported},
+		{key: "routes[].rewrite", level: Supported},
+		{key: "rpc", level: Supported},
+		{key: "rpc.methods", level: Supported},
+		{key: "rpc.methods[].service", level: Supported},
+		{key: "rpc.methods[].method", level: Supported},
+		{key: "rpc.proto", level: Supported},
+		{key: "rpc.proto.roots", level: Supported},
+		{key: "rpc.proto.option", level: Supported},
+		{key: "the request's path normalised before a route is picked", level: Supported},
+		{key: "a dot segment with a ; parameter answered 400", level: Partial,
+			note: "a dot segment whose ; parameter is written with dots, such as /a/..;/b, is answered 400, where Envoy 1.40 drops the parameter and resolves the segment"},
+		{key: "the request line and header names read before a route is picked", level: Partial,
+			note: "over HTTP/1.1 an absolute target is answered 400, where Envoy routes it by its host and sends the path alone with that host as Host, or answers 404 when no environment has the host, and OPTIONS * and CONNECT are answered 400, where Envoy answers 404; HTTP/0.9 is answered 400, where Envoy answers 426; a Connection token other than close, keep-alive, upgrade, HTTP2-Settings and te is answered 400, where Envoy removes the header the token names and serves the request; ten Connection elements or more, an empty one counted but for an empty last one, are answered 400, where Envoy counts no empty element and serves a token with ten; an h2c upgrade is answered 400, where Envoy serves it as a plain request; a header line folded onto the next, and a header value that holds three spaces or tabs in a row, are answered 400, where Envoy serves them; a WebSocket upgrade with no Sec-WebSocket-Key is answered 400, where Envoy passes it on, or answers 403 to an origin it does not admit; more than 100 header lines are answered 431 or, from 102, 400, where Envoy answers 431, and 101 lines or more of a header Envoy joins into one line are answered 400, where Envoy serves them; two Host lines of different hosts, and a Host that holds a comma, are answered 400, where Envoy answers 404; Transfer-Encoding: chunked on two lines is answered 400, and Transfer-Encoding: gzip, chunked 422, where Envoy answers 501; a header of 20000 bytes is answered 431 and a path of 20000 bytes 414, where Envoy, under its default limit of 60 KiB, serves both; over HTTP/2 a request with 97 header fields or more is answered 400, where Envoy resets its stream, and so is one with fewer whose cookies, counted one a field, reach 97, and one with 97 fields or more of a header Envoy joins, which Envoy serves, is answered 400 or, with 120, its stream reset; a WebSocket, an extended CONNECT, is answered 400, where Envoy closes the connection; a path whose escaped form outgrows HAProxy's buffer, such as one of 7000 bytes above 0x7F, is answered 400 by HAProxy 3.4.7 and 500 by 3.2.26, where Envoy serves it; a header or trailer name outside RFC 9110's token characters resets the stream, where Envoy closes the connection; a # in :path resets the stream, where Envoy answers 400; and a request with neither :authority nor host is answered 404, where Envoy closes the connection; over HTTP/1.1 a request trailer whose name is outside those characters ends the connection with no answer when the body comes after the headers, where Envoy answers 400"},
+	}
+	wantRefused := map[string][]string{
+		"not written by this version's HAProxy generator; render it for envoy": {
+			"limits", "limits.connections", "limits.request_headers", "limits.request_headers.size", "limits.request_headers.count",
+			"timeouts.idle", "timeouts.upstream_idle",
+			"services.<service name>.balance", "services.<service name>.hash", "services.<service name>.hash.header", "services.<service name>.hash.client",
+			"services.<service name>.health", "services.<service name>.health.path", "services.<service name>.health.grpc",
+			"services.<service name>.health.interval", "services.<service name>.health.timeout", "services.<service name>.health.healthy",
+			"services.<service name>.health.unhealthy",
+			"dns", "dns.resolver",
+			"auth", "auth.ask", "auth.timeout", "auth.enabled", "auth.when_unavailable", "auth.only_with_header", "auth.send", "auth.accept",
+			"auth.send_request",
+			"routes[].rpc.retries", "routes[].rpc.rate_limit", "routes[].rpc.rate_limit.requests", "routes[].rpc.rate_limit.per",
+			"routes[].rpc.rate_limit.burst", "routes[].rpc.rate_limit.by",
+			"routes[].auth", "routes[].retries", "routes[].rate_limit", "routes[].rate_limit.requests", "routes[].rate_limit.per",
+			"routes[].rate_limit.burst", "routes[].rate_limit.by",
+			"rpc.methods[].action", "rpc.methods[].reports",
+			"log.status_from", "log.sample"},
+		"not written by this version's HAProxy generator, and without it HAProxy logs no request, where the Envoy output logs every request; render it for envoy": {
+			"log"},
+		"HAProxy's jwt_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names": {
+			"auth.jwt", "auth.jwt.issuer", "auth.jwt.audiences", "auth.jwt.keys", "auth.jwt.ca", "auth.jwt.header", "auth.jwt.optional",
+			"auth.jwt.claims", "auth.jwt.claims.<header name>"},
+		"the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy": {
+			"tracing", "tracing.provider", "tracing.provider.xray", "tracing.provider.xray.agent", "tracing.provider.xray.segment",
+			"tracing.provider.xray.sample", "tracing.provider.xray.sample.first", "tracing.provider.xray.sample.rate",
+			"tracing.provider.xray.sample.rules", "tracing.provider.xray.sample.rules[].host", "tracing.provider.xray.sample.rules[].method",
+			"tracing.provider.xray.sample.rules[].path", "tracing.provider.xray.sample.rules[].first", "tracing.provider.xray.sample.rules[].rate",
+			"tracing.provider.otel", "tracing.provider.otel.endpoint", "tracing.provider.otel.service", "tracing.provider.otel.sample",
+			"tracing.provider.otel.sample.rate", "tracing.tags", "tracing.tags.<tag name>", "tracing.tags.<tag name>.env",
+			"tracing.tags.<tag name>.header", "tracing.tags.<tag name>.default", "tracing.path_in_url"},
+	}
+	if !slices.Equal(written, wantWritten) {
+		t.Errorf("the rows haproxyTarget writes = %+v\nwant %+v", written, wantWritten)
+	}
+	if !maps.EqualFunc(refused, wantRefused, slices.Equal[[]string]) {
+		t.Errorf("the rows haproxyTarget refuses, by note = %q\nwant %q", refused, wantRefused)
 	}
 }
 

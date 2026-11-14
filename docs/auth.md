@@ -8,7 +8,7 @@
   ([Portability](portability.md)).
 - `jwt` makes the proxy verify a signed token on the request itself, with no service of yours to ask
   ([Tokens](#tokens)). nginx open source has no token verification, and HAProxy's takes no key set, so their
-  generators will refuse it ([Portability](portability.md)).
+  generators refuse it ([Portability](portability.md)).
 
 The rest of this page up to [Tokens](#tokens) is about `ask`, which the page calls the check.
 

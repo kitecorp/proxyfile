@@ -6,6 +6,7 @@ package conformance
 
 import (
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -35,8 +36,9 @@ type file struct{ label, proxyfile string }
 // targets returns every proxy the battery runs. Envoy's image is read from the file scripts/validate-envoy.sh reads,
 // so an Envoy upgrade changes one line for both. Its admin listener answers /ready on 127.0.0.1 only, which is why
 // the battery fetches it from inside the proxy's network namespace. Every other proxy's entries come from a file of
-// their own (nginxEntries), so a proxy added later adds its file and one call on the return line. Envoy runs each
-// other target's own file too, so each literal on it is Envoy's measured answer, as rowProblems requires of every row.
+// their own (nginxEntries, haproxyEntries), so a proxy added later adds its file and one call on the return line.
+// Envoy runs each other target's own file too, so each literal on it is Envoy's measured answer, as rowProblems
+// requires of every row.
 func targets(t testing.TB) []target {
 	pin, err := os.ReadFile("../scripts/envoy-image")
 	if err != nil {
@@ -57,6 +59,7 @@ func targets(t testing.TB) []target {
 			{label: "portable", proxyfile: "../examples/portable/hocon/Proxyfile"},
 			{label: "nginx-file", proxyfile: "testdata/nginx.yaml"},
 			{label: "nginx-plain", proxyfile: "testdata/nginx-plain.yaml"},
+			{label: "haproxy-file", proxyfile: "testdata/haproxy.yaml"},
 		},
 		image: image,
 		args:  []string{"-c", "/config/" + envoy.Config},
@@ -64,5 +67,35 @@ func targets(t testing.TB) []target {
 		// The header docs/auth.md names for when_unavailable: allow, whatever the proxy, so a service reads one name.
 		mark: "x-envoy-auth-failure-mode-allowed",
 	}
-	return slices.Concat([]target{envoyEntry}, nginxEntries(t))
+	return slices.Concat([]target{envoyEntry}, nginxEntries(t), haproxyEntries(t))
+}
+
+// pinnedImage is a line of scripts/<proxy>-images: an image tagged with its version and pinned by digest. The
+// validators read the same files with the same rule, in scripts/pinned-images.sh.
+var pinnedImage = regexp.MustCompile(`^[^\s@]+:([0-9]+)\.([0-9]+)\.[0-9]+@sha256:[0-9a-f]{64}$`)
+
+// pin is one line of scripts/<proxy>-images: the image, and the label of the entry that runs it.
+type pin struct{ image, label string }
+
+// pinnedImages returns the images scripts/<proxy>-images pins, one a line, in the file's order, each labelled
+// <proxy>-<major>.<minor>, so a row one version answers differently fails in that entry alone. A missing or empty file,
+// or a line that is not an image tagged with its version and pinned by digest, fails the run with the file's name: a
+// name with no digest would run whatever its tag pointed to that day.
+func pinnedImages(t testing.TB, proxy string) []pin {
+	path := "../scripts/" + proxy + "-images"
+	lines, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the %s images: %v", proxy, err)
+	}
+	var pins []pin
+	for _, image := range strings.Split(strings.TrimSuffix(string(lines), "\n"), "\n") {
+		version := pinnedImage.FindStringSubmatch(image)
+		if version == nil {
+			t.Fatalf("%s holds %q, not one %s image a line, tagged with its version and pinned by digest "+
+				"(%s:<major>.<minor>.<patch>@sha256:<digest>)",
+				path, image, proxy, proxy)
+		}
+		pins = append(pins, pin{image: image, label: proxy + "-" + version[1] + "." + version[2]})
+	}
+	return pins
 }

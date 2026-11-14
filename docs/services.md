@@ -104,7 +104,8 @@ The proxy asks the name server in `dns.resolver` when it is written, and otherwi
 configuration, for a service's address, the name of the [tracing endpoint](tracing.md#opentelemetry) and the host of
 the [keys URL](auth.md#tokens) alike. Each of these names is looked up for its IPv4 and IPv6 addresses both, and each
 address is a backend, as [Backends and balancing](#backends-and-balancing) says for a service.
-nginx reads no `/etc/resolv.conf`, so it will refuse a name without `dns.resolver`.
+In this version the nginx and HAProxy generators write no DNS name: each refuses one in `address`, and refuses `dns`
+([Portability](portability.md#support-by-proxy-from-the-generators)).
 
 [`examples/dns`](../examples/dns/) writes a DNS name in `address`, `hash` and `dns.resolver` in
 [YAML](../examples/dns/yaml/proxyfile.yaml) and [HOCON](../examples/dns/hocon/Proxyfile), each beside the

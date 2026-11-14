@@ -73,6 +73,114 @@ func RemovedFromClients(g *model.Gateway) []model.Header {
 	return removed
 }
 
+// RemovedByEnvoy are the request headers the Envoy output removes before the service, measured on Envoy 1.40.2 by
+// sending each of the 41 x-envoy- headers its headers.h names, with and without a private X-Forwarded-For: these 16
+// steer an Envoy between the gateway and the service (retries, timeouts, tracing, an internal request) and reach no
+// service whatever X-Forwarded-For says. Proxy-Connection and X-Forwarded-Client-Cert are removed too. nginx and HAProxy
+// pass every client header on unless the file removes it, so each generator removes these.
+var RemovedByEnvoy = []string{
+	"proxy-connection",
+	"x-envoy-expected-rq-timeout-ms",
+	"x-envoy-force-trace",
+	"x-envoy-hedge-on-per-try-timeout",
+	"x-envoy-internal",
+	"x-envoy-ip-tags",
+	"x-envoy-max-retries",
+	"x-envoy-original-url",
+	"x-envoy-retriable-header-names",
+	"x-envoy-retriable-status-codes",
+	"x-envoy-retry-grpc-on",
+	"x-envoy-retry-on",
+	"x-envoy-upstream-alt-stat-name",
+	"x-envoy-upstream-rq-per-try-timeout-ms",
+	"x-envoy-upstream-rq-timeout-alt-response",
+	"x-envoy-upstream-rq-timeout-ms",
+	"x-envoy-upstream-stream-duration-ms",
+	"x-forwarded-client-cert",
+}
+
+// RemovedByEnvoyFacingClients are the request headers the Envoy output removes too with client_address = connection,
+// where it takes each client for one it faces, and passes on with forwarded: those only a proxy in front may send
+// (measured on Envoy 1.40.2 with every x-envoy- header its headers.h names).
+var RemovedByEnvoyFacingClients = []string{
+	"x-envoy-decorator-operation",
+	"x-envoy-downstream-service-cluster",
+	"x-envoy-downstream-service-node",
+	"x-envoy-original-host",
+	"x-envoy-original-path",
+}
+
+// JoinedByEnvoy are the request headers whose lines Envoy 1.40.2 joins into one line before anything reads them or
+// the service receives them: the values that are not empty, in the order sent, joined with a comma, or one empty line
+// when every line is empty. They are the headers of its request header map (the list Envoy logs at start after
+// "request header map") that it neither removes (RemovedByEnvoy) nor reads as the request's framing or connection,
+// each measured by sending it twice; the lines of any other header, such as Cookie or X-Custom, reach the service as
+// sent, through Envoy as through nginx and HAProxy.
+var JoinedByEnvoy = []string{
+	"accept",
+	"accept-encoding",
+	"access-control-request-headers",
+	"access-control-request-method",
+	"access-control-request-private-network",
+	"authentication",
+	"authorization",
+	"cache-control",
+	"cdn-loop",
+	"content-encoding",
+	"content-type",
+	"expect",
+	"grpc-accept-encoding",
+	"grpc-timeout",
+	"if-match",
+	"if-modified-since",
+	"if-none-match",
+	"if-range",
+	"if-unmodified-since",
+	"origin",
+	"pragma",
+	"proxy-status",
+	"referer",
+	"upgrade",
+	"user-agent",
+	"via",
+	"x-client-trace-id",
+	"x-envoy-attempt-count",
+	"x-envoy-decorator-operation",
+	"x-envoy-downstream-service-cluster",
+	"x-envoy-downstream-service-node",
+	"x-envoy-external-address",
+	"x-envoy-is-timeout-retry",
+	"x-envoy-original-host",
+	"x-envoy-original-path",
+	"x-forwarded-for",
+	"x-forwarded-host",
+	"x-forwarded-port",
+	"x-forwarded-proto",
+	"x-request-id",
+}
+
+// EnvoyMethods are the methods Envoy's HTTP/1 parser takes (kValidMethods in source/common/http/http1/balsa_parser.cc
+// of Envoy 1.40.2); it answers any other 400 (measured with FOO), and over HTTP/2 it takes any method.
+var EnvoyMethods = []string{"ACL", "BIND", "CHECKOUT", "CONNECT", "COPY", "DELETE", "GET", "HEAD", "LINK", "LOCK", "MERGE",
+	"MKACTIVITY", "MKCALENDAR", "MKCOL", "MOVE", "MSEARCH", "NOTIFY", "OPTIONS", "PATCH", "POST", "PROPFIND", "PROPPATCH",
+	"PURGE", "PUT", "QUERY", "REBIND", "REPORT", "SEARCH", "SOURCE", "SUBSCRIBE", "TRACE", "UNBIND", "UNLINK", "UNLOCK",
+	"UNSUBSCRIBE"}
+
+// ConnectionTokens are the Connection tokens Envoy keeps a request whole with, as a regular expression's group; it
+// removes each header another token names, or refuses the request (source/common/http/utility.cc,
+// sanitizeConnectionHeader), and it refuses ten tokens or more (MostConnectionTokens). nginx and HAProxy cannot remove
+// a header a request names, so each refuses any other token, which no service then receives.
+const ConnectionTokens = `(?:close|keep-alive|upgrade|http2-settings|te)`
+
+// MostConnectionTokens is the most Connection tokens Envoy 1.40.2 serves a request with: it answered ten 400 and
+// served nine (measured with te ten times, on one line and on ten).
+const MostConnectionTokens = 9
+
+// EscapedInPath are the bytes of a path Envoy escapes, in upper case hex, before it picks a route, beside every byte
+// above 0x7F, which it escapes too (measured on Envoy 1.40.2). Each generator writes them into a character class of
+// its own syntax.
+const EscapedInPath = "\"<>^`{|}"
+
 // LimitOf is the limit of one entry of routes: the rpc entry's or the route's own, nil without one.
 func LimitOf(route *model.Route) *model.RateLimit {
 	if route.RPC != nil {

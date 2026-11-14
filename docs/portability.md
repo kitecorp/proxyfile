@@ -1,18 +1,17 @@
 # Portability
 
-proxyfile writes Envoy's configuration and nginx's, and the format is written so that the same file can drive HAProxy
-once it has a generator. nginx's generator writes routing in this version and refuses by name each key it does not
-write yet (its column below). Every key is **core** or belongs to one proxy. A core key is one every proxy can
-carry, at times with a difference this page names, or one a proxy refuses by name where it cannot carry it. A key that
-belongs to one proxy lives in that proxy's block at the top of the file: `envoy`, `nginx` or `haproxy`. A render for
-one target reads the core keys and its own block and leaves the other blocks alone, so one file can hold what each
-proxy needs. The split follows the Kubernetes Gateway API, which sorts its features into core, extended and
-implementation-specific ones and is implemented by Envoy, nginx and HAProxy alike.
+proxyfile writes Envoy's configuration, nginx's and HAProxy's from the same file. In this version nginx's generator
+writes routing and HAProxy's routing, TLS and CORS, and each refuses by name every key it does not write yet (its column
+below). Every key is **core** or belongs to one proxy. A core key is one every proxy can carry, at times with a
+difference this page names, or one a proxy refuses by name where it cannot carry it. A key that belongs to one proxy
+lives in that proxy's block at the top of the file: `envoy`, `nginx` or `haproxy`. A render for one target reads the
+core keys and its own block and leaves the other blocks alone, so one file can hold what each proxy needs. The split
+follows the Kubernetes Gateway API, which sorts its features into core, extended and implementation-specific ones and is
+implemented by Envoy, nginx and HAProxy alike.
 
-`proxyfile render --target envoy` is the default. A target with no generator in this version is refused, and so is any
-key written in the `nginx` or `haproxy` block, which take no key yet. A target that cannot carry a key the file uses
-will refuse the file, naming the key and what that proxy offers instead; it never writes a quietly weaker
-configuration.
+`proxyfile render --target envoy` is the default. Any key written in the `nginx` or `haproxy` block is refused, as
+neither block takes a key yet. A target that cannot carry a key the file uses refuses the file, naming the key and what
+that proxy offers instead; it never writes a quietly weaker configuration.
 
 ## The keys, by proxy
 
@@ -27,7 +26,7 @@ is deprecated (it goes in 3.5).
 | `admin` | the admin listener: `/ready`, `/stats`, `/server_info` | `stub_status` on its own port, other paths | the `stats` page or `monitor-uri`, other paths | core; the paths differ by proxy |
 | `tls.certificate`, `tls.key` | the listener's TLS transport socket, with ALPN `h2` and `http/1.1` | `listen <port> ssl`, `ssl_certificate`, `ssl_certificate_key` | `bind :<port> ssl crt <file>`, which reads the key from the certificate file or a `.key` file beside it | core |
 | `tls.clients.ca` | `validation_context.trusted_ca` with `require_client_certificate` | `ssl_client_certificate` with `ssl_verify_client on` | `verify required ca-file <ca>` | core |
-| `client_address` | `use_remote_address` `false` (`forwarded`) or `true` (`connection`) | `forwarded` is `set_real_ip_from 0.0.0.0/0`, `real_ip_header X-Forwarded-For` and `real_ip_recursive off`; `connection` writes nothing | `forwarded` is `http-request set-src hdr_ip(X-Forwarded-For,-1)`; `connection` writes nothing | core |
+| `client_address` | `use_remote_address` `false` (`forwarded`) or `true` (`connection`) | `forwarded` is `set_real_ip_from 0.0.0.0/0`, `real_ip_header X-Forwarded-For` and `real_ip_recursive off`; `connection` writes nothing | `forwarded` writes no address rule, so the client's `X-Forwarded-For` passes as sent; `connection` is `http-request set-header x-forwarded-for` with the peer's address, `%[src]`, after the client's, and `x-envoy-external-address` set to it | core |
 | `limits.connections` | the overload manager | `worker_connections` | `maxconn` | core |
 | `envoy.heap` | the overload manager: shrink at 90%, refuse at 98% | none | none | envoy |
 | `limits.request_headers.size` | `max_request_headers_kb` | `large_client_header_buffers` | `tune.bufsize` | core |
@@ -76,164 +75,163 @@ mapping, is core. The cost of another proxy is its generator and the proof that 
 Each generator declares, for every core key, how it carries the key: `supported`, `partial` with the difference, or
 `refused` with what that proxy offers instead. Its last two rows are the two behaviours every configuration holds with
 no key (below): each generator declares them as it declares a key, and none may refuse them. `proxyfile render` and
-`proxyfile check` with `--target <proxy>` refuse a file that writes a key its target refuses, naming the key where it
-is written and what the proxy offers instead. This table is written from those declarations and has a column for each
-proxy with a generator; the table above stays until every proxy's column is written here. A partial cell that names a
-refused form (`refuses <form>: <what to write instead>`) is refused as a refused key is: render and check name the key
-where it is written. What a proxy writes differently with no key is on its own page: [nginx](nginx.md). The
-[conformance battery](conformance.md) sends the same requests to each proxy, and checks the refusal for a key the proxy
-refuses.
+`proxyfile check` with `--target <proxy>` refuse a file that writes a key its target refuses, naming the key where it is
+written and what the proxy offers instead. This table is written from those declarations and has a column for each proxy
+with a generator; the table above stays until every proxy's column is written here. A partial cell that names a refused
+form (`refuses <form>: <what to write instead>`) is refused as a refused key is: render and check name the key where it
+is written. What a proxy writes differently with no key is on its own page: [nginx](nginx.md), [HAProxy](haproxy.md).
+The [conformance battery](conformance.md) sends the same requests to each proxy, and checks the refusal for a key the
+proxy refuses.
 
 <!-- keys: support by proxy -->
-| Key | Envoy | nginx |
-|---|---|---|
-| `listen` | supported | supported |
-| `admin` | supported | partial: answers /ready alone; every other path of the admin port is 404 |
-| `tls` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `tls.certificate` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `tls.key` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `tls.clients` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `tls.clients.ca` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `client_address` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `limits` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `limits.connections` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `limits.request_headers` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `limits.request_headers.size` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `limits.request_headers.count` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `timeouts` | supported | supported |
-| `timeouts.request` | supported | partial: without the key nginx answers 504 to a service silent for 15 s after the request, as the Envoy output does, but lets an answer that keeps coming run past the 15 s at which Envoy ends it; with none, nginx ends a request after 5 minutes with nothing read or written, as Envoy does; refuses a time: nginx has no limit on a whole request (its time limits count the time between two reads or writes); write timeouts.request: none, or render it for envoy |
-| `timeouts.idle` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `timeouts.upstream_idle` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `services` | supported | supported |
-| `services.<service name>` | supported | supported |
-| `services.<service name>.http` | supported | supported |
-| `services.<service name>.grpc` | supported | supported |
-| `services.<service name>.host_header` | supported | supported |
-| `services.<service name>.address` | supported | partial: an IP address with no zone; refuses a DNS name: not written by this version's nginx generator; render it for envoy; refuses a zoned IPv6 address: nginx reads no zone in a backend's address; give the service an address without one |
-| `services.<service name>.addresses` | supported | partial: IP addresses with no zone; refuses holding a zoned IPv6 address: nginx reads no zone in a backend's address; give the service an address without one |
-| `services.<service name>.balance` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `services.<service name>.hash` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `services.<service name>.hash.header` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `services.<service name>.hash.client` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `services.<service name>.health` | supported | refused: nginx open source has no active health checks (nginx Plus's health\_check); remove health, and nginx keeps every backend in the pool |
-| `services.<service name>.health.path` | supported | refused: nginx open source has no active health checks (nginx Plus's health\_check); remove health, and nginx keeps every backend in the pool |
-| `services.<service name>.health.grpc` | supported | refused: nginx open source has no active health checks (nginx Plus's health\_check); remove health, and nginx keeps every backend in the pool |
-| `services.<service name>.health.interval` | supported | refused: nginx open source has no active health checks (nginx Plus's health\_check); remove health, and nginx keeps every backend in the pool |
-| `services.<service name>.health.timeout` | supported | refused: nginx open source has no active health checks (nginx Plus's health\_check); remove health, and nginx keeps every backend in the pool |
-| `services.<service name>.health.healthy` | supported | refused: nginx open source has no active health checks (nginx Plus's health\_check); remove health, and nginx keeps every backend in the pool |
-| `services.<service name>.health.unhealthy` | supported | refused: nginx open source has no active health checks (nginx Plus's health\_check); remove health, and nginx keeps every backend in the pool |
-| `dns` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `dns.resolver` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `auth` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `auth.ask` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `auth.timeout` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `auth.enabled` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `auth.when_unavailable` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `auth.only_with_header` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `auth.send` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `auth.accept` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `auth.send_request` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `auth.jwt` | supported | refused: nginx open source cannot verify a token (nginx Plus's auth\_jwt); verify it in the service, or render it for envoy |
-| `auth.jwt.issuer` | supported | refused: nginx open source cannot verify a token (nginx Plus's auth\_jwt); verify it in the service, or render it for envoy |
-| `auth.jwt.audiences` | supported | refused: nginx open source cannot verify a token (nginx Plus's auth\_jwt); verify it in the service, or render it for envoy |
-| `auth.jwt.keys` | supported | refused: nginx open source cannot verify a token (nginx Plus's auth\_jwt); verify it in the service, or render it for envoy |
-| `auth.jwt.ca` | supported | refused: nginx open source cannot verify a token (nginx Plus's auth\_jwt); verify it in the service, or render it for envoy |
-| `auth.jwt.header` | supported | refused: nginx open source cannot verify a token (nginx Plus's auth\_jwt); verify it in the service, or render it for envoy |
-| `auth.jwt.optional` | supported | refused: nginx open source cannot verify a token (nginx Plus's auth\_jwt); verify it in the service, or render it for envoy |
-| `auth.jwt.claims` | supported | refused: nginx open source cannot verify a token (nginx Plus's auth\_jwt); verify it in the service, or render it for envoy |
-| `auth.jwt.claims.<header name>` | supported | refused: nginx open source cannot verify a token (nginx Plus's auth\_jwt); verify it in the service, or render it for envoy |
-| `remove_from_clients` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `cors` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `cors.allow_methods` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `cors.allow_headers` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `cors.expose_headers` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `cors.max_age` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `origins` | supported | supported |
-| `origins.<environment name>` | supported | supported |
-| `origins.<environment name>.hosts` | supported | partial: an empty Origin passes as none, where Envoy answers 403, and no browser sends one; a foreign origin to a path no route takes gets 403, where Envoy answers 404; refuses holding a host that starts or ends with .: nginx reads a dot at a host's start as every name under it and drops one at its end; write the host without it, or render it for envoy |
-| `origins.<environment name>.origins` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `origins.<environment name>.patterns` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `routes` | supported | supported |
-| `routes[].rpc` | supported | supported |
-| `routes[].rpc.retries` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `routes[].rpc.rate_limit` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `routes[].rpc.rate_limit.requests` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `routes[].rpc.rate_limit.per` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `routes[].rpc.rate_limit.burst` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `routes[].rpc.rate_limit.by` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `routes[].rpc.to` | supported | supported |
-| `routes[].rpc.to.<package pattern>` | supported | supported |
-| `routes[].rpc.to.<package pattern>.service` | supported | supported |
-| `routes[].rpc.to.<package pattern>.name` | supported | supported |
-| `routes[].name` | supported | supported |
-| `routes[].prefix` | supported | partial: any character but %, one Envoy escapes before it picks a route (" \< > ^ \` { \| }) and one outside ASCII; refuses holding %, a character Envoy escapes before it picks a route (" \< > ^ \` { \| }) or one outside ASCII: nginx matches a path holding a character Envoy escapes as it decodes it, where Envoy matches the escape, so a prefix or a path with % or such a character would take other requests on nginx than on Envoy; write it without them, as a pattern, or render it for envoy |
-| `routes[].path` | supported | partial: any character but %, one Envoy escapes before it picks a route (" \< > ^ \` { \| }) and one outside ASCII; refuses holding %, a character Envoy escapes before it picks a route (" \< > ^ \` { \| }) or one outside ASCII: nginx matches a path holding a character Envoy escapes as it decodes it, where Envoy matches the escape, so a prefix or a path with % or such a character would take other requests on nginx than on Envoy; write it without them, as a pattern, or render it for envoy |
-| `routes[].pattern` | supported | partial: matched on the path as the client wrote it, or on the one nginx has normalised when it holds //, a dot segment, an escaped unreserved character or %2F, as Envoy matches it; in a file with a pattern route, a path holding a character Envoy escapes before it matches (" \< > ^ \` { \| } or one outside ASCII) is answered 400, where Envoy matches the escape; a path PCRE2 gives up on past its match limit, as it does for (a\|aa)+ and a long run of a with another character after it, is answered 400, where Envoy's RE2 always decides whether the pattern takes it |
-| `routes[].method` | supported | supported |
-| `routes[].to` | supported | supported |
-| `routes[].rewrite` | supported | partial: letters, digits and - . \_ ~ / ! $ & ' ( ) \* + , ; = : @ \[ \] alone; a request whose path keeps an escape Envoy does not decode, such as %3B or %20, or whose target ends in an empty query, a ? with nothing after it, is answered 400 on a route with a rewrite, where Envoy sends the rewritten path on; refuses holding ?: nginx reads a ? in a rewrite as the start of new arguments, after which it adds the client's; write the path without ?; refuses holding a character nginx escapes again: nginx escapes the new path before it sends it, so the service would receive that character escaped, where the Envoy output sends it as written; write the rewrite without it, or render it for envoy |
-| `routes[].auth` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `routes[].retries` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `routes[].rate_limit` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `routes[].rate_limit.requests` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `routes[].rate_limit.per` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `routes[].rate_limit.burst` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `routes[].rate_limit.by` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `rpc` | supported | supported |
-| `rpc.methods` | supported | supported |
-| `rpc.methods[].service` | supported | supported |
-| `rpc.methods[].method` | supported | supported |
-| `rpc.methods[].action` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `rpc.methods[].reports` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `rpc.proto` | supported | supported |
-| `rpc.proto.roots` | supported | supported |
-| `rpc.proto.option` | supported | supported |
-| `log` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `log.status_from` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `log.sample` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `tracing` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `tracing.provider` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `tracing.provider.xray` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter |
-| `tracing.provider.xray.agent` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter |
-| `tracing.provider.xray.segment` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter |
-| `tracing.provider.xray.sample` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter |
-| `tracing.provider.xray.sample.first` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter |
-| `tracing.provider.xray.sample.rate` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter |
-| `tracing.provider.xray.sample.rules` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter |
-| `tracing.provider.xray.sample.rules[].host` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter |
-| `tracing.provider.xray.sample.rules[].method` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter |
-| `tracing.provider.xray.sample.rules[].path` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter |
-| `tracing.provider.xray.sample.rules[].first` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter |
-| `tracing.provider.xray.sample.rules[].rate` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter |
-| `tracing.provider.otel` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `tracing.provider.otel.endpoint` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `tracing.provider.otel.service` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `tracing.provider.otel.sample` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `tracing.provider.otel.sample.rate` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `tracing.tags` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `tracing.tags.<tag name>` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `tracing.tags.<tag name>.env` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `tracing.tags.<tag name>.header` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `tracing.tags.<tag name>.default` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| `tracing.path_in_url` | supported | refused: not written by this version's nginx generator; render it for envoy |
-| the request's path normalised before a route is picked | supported | partial: a path that holds //, a dot segment, an escaped unreserved character or %2F and also an escape Envoy keeps, such as %3B, is answered 400, and so is one that holds such an escape beside a character Envoy escapes before it matches (" \< > ^ \` { \| } or one outside ASCII), where Envoy normalises the path and keeps the escape; an empty query, a ? with nothing after it, after a path that needs normalising or holds such a character is answered 400, where Envoy sends the ? on; a backslash, %5C and a control character, written or escaped, are answered 400, and so is an invalid escape such as %zz, which Envoy passes on |
-| a dot segment with a ; parameter answered 400 | supported | partial: /a/..;/b is answered 400 where Envoy 1.40 resolves it |
-| the request line and header names read before a route is picked | supported | partial: a tab between the method and the target, an absolute target with user information, with no Host header or with a query or a fragment right after its host, and OPTIONS \* are answered 400, TRACE and CONNECT 405, and HTTP/0.9 gets no answer, where Envoy serves the first two and TRACE, answers OPTIONS \*, CONNECT and that absolute target 404, and HTTP/0.9 426; a header name outside RFC 9110's token characters is answered 400 over HTTP/1.1 and HTTP/2, where Envoy answers 400 over HTTP/1.1 and closes the connection over HTTP/2; a request trailer is never read, so over HTTP/1.1 one whose name is outside those characters is let through, not refused, where Envoy answers 400 (the service receives the body and no trailer through either), and over HTTP/2 any trailer ends the connection, where Envoy serves the request; a header line folded onto the next and a Host whose port is past 65535 or holds a sign are answered 400, where Envoy serves them |
+| Key | Envoy | nginx | HAProxy |
+|---|---|---|---|
+| `listen` | supported | supported | supported |
+| `admin` | supported | partial: answers /ready alone; every other path of the admin port is 404 | partial: /ready answers 200 while HAProxy runs, not when the server is ready; no other admin path in this version |
+| `tls` | supported | refused: not written by this version's nginx generator; render it for envoy | partial: of the TLS 1.2 suites both take, HAProxy picks by its own order, where Envoy takes the client's among suites it holds equal: a client that offers OpenSSL's default list is given ECDHE-RSA-AES128-GCM-SHA256, where Envoy gives ECDHE-RSA-CHACHA20-POLY1305 |
+| `tls.certificate` | supported | refused: not written by this version's nginx generator; render it for envoy | supported |
+| `tls.key` | supported | refused: not written by this version's nginx generator; render it for envoy | supported |
+| `tls.clients` | supported | refused: not written by this version's nginx generator; render it for envoy | supported |
+| `tls.clients.ca` | supported | refused: not written by this version's nginx generator; render it for envoy | partial: a client certificate that is not valid yet is refused with the alert bad\_certificate, where Envoy sends certificate\_expired |
+| `client_address` | supported | refused: not written by this version's nginx generator; render it for envoy | supported |
+| `limits` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `limits.connections` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `limits.request_headers` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `limits.request_headers.size` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `limits.request_headers.count` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `timeouts` | supported | supported | supported |
+| `timeouts.request` | supported | partial: without the key nginx answers 504 to a service silent for 15 s after the request, as the Envoy output does; with none, nginx ends a request after 5 minutes with nothing read or written, as Envoy does; refuses a time: nginx has no limit on a whole request (its time limits count the time between two reads or writes); write timeouts.request: none, or render it for envoy; less strict than the Envoy output: without timeouts.request, an answer that keeps arriving runs past 15 s | partial: without the key a service that sends nothing for 15 s is answered 504, as by Envoy; HAProxy's limits count the time without data; refuses a time: HAProxy has no limit on a whole request (timeout server is the time without data, timeouts.idle); write timeouts.request: none; less strict than the Envoy output: without timeouts.request, an answer that keeps arriving runs past 15 s |
+| `timeouts.idle` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `timeouts.upstream_idle` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `services` | supported | supported | supported |
+| `services.<service name>` | supported | supported | supported |
+| `services.<service name>.http` | supported | supported | supported |
+| `services.<service name>.grpc` | supported | supported | supported |
+| `services.<service name>.host_header` | supported | supported | supported |
+| `services.<service name>.address` | supported | partial: an IP address with no zone; refuses a DNS name: not written by this version's nginx generator; render it for envoy; refuses a zoned IPv6 address: nginx reads no zone in a backend's address; give the service an address without one | partial: an IP address with no zone; refuses a DNS name: this version's HAProxy generator writes no DNS name; give the service's IP address, or render it for envoy; refuses a zoned IPv6 address: HAProxy 3.2 and 3.4 load no zone in a server's address; give the service an address without one |
+| `services.<service name>.addresses` | supported | partial: IP addresses with no zone; refuses holding a zoned IPv6 address: nginx reads no zone in a backend's address; give the service an address without one | partial: IP addresses with no zone; refuses holding a zoned IPv6 address: HAProxy 3.2 and 3.4 load no zone in a server's address; give the service an address without one |
+| `services.<service name>.balance` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `services.<service name>.hash` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `services.<service name>.hash.header` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `services.<service name>.hash.client` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `services.<service name>.health` | supported | refused: nginx open source has no active health checks (nginx Plus's health\_check); remove health, and nginx keeps every backend in the pool | refused: not written by this version's HAProxy generator; render it for envoy |
+| `services.<service name>.health.path` | supported | refused: nginx open source has no active health checks (nginx Plus's health\_check); remove health, and nginx keeps every backend in the pool | refused: not written by this version's HAProxy generator; render it for envoy |
+| `services.<service name>.health.grpc` | supported | refused: nginx open source has no active health checks (nginx Plus's health\_check); remove health, and nginx keeps every backend in the pool | refused: not written by this version's HAProxy generator; render it for envoy |
+| `services.<service name>.health.interval` | supported | refused: nginx open source has no active health checks (nginx Plus's health\_check); remove health, and nginx keeps every backend in the pool | refused: not written by this version's HAProxy generator; render it for envoy |
+| `services.<service name>.health.timeout` | supported | refused: nginx open source has no active health checks (nginx Plus's health\_check); remove health, and nginx keeps every backend in the pool | refused: not written by this version's HAProxy generator; render it for envoy |
+| `services.<service name>.health.healthy` | supported | refused: nginx open source has no active health checks (nginx Plus's health\_check); remove health, and nginx keeps every backend in the pool | refused: not written by this version's HAProxy generator; render it for envoy |
+| `services.<service name>.health.unhealthy` | supported | refused: nginx open source has no active health checks (nginx Plus's health\_check); remove health, and nginx keeps every backend in the pool | refused: not written by this version's HAProxy generator; render it for envoy |
+| `dns` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `dns.resolver` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `auth` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `auth.ask` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `auth.timeout` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `auth.enabled` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `auth.when_unavailable` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `auth.only_with_header` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `auth.send` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `auth.accept` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `auth.send_request` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `auth.jwt` | supported | refused: nginx open source cannot verify a token (nginx Plus's auth\_jwt); verify it in the service, or render it for envoy | refused: HAProxy's jwt\_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names |
+| `auth.jwt.issuer` | supported | refused: nginx open source cannot verify a token (nginx Plus's auth\_jwt); verify it in the service, or render it for envoy | refused: HAProxy's jwt\_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names |
+| `auth.jwt.audiences` | supported | refused: nginx open source cannot verify a token (nginx Plus's auth\_jwt); verify it in the service, or render it for envoy | refused: HAProxy's jwt\_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names |
+| `auth.jwt.keys` | supported | refused: nginx open source cannot verify a token (nginx Plus's auth\_jwt); verify it in the service, or render it for envoy | refused: HAProxy's jwt\_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names |
+| `auth.jwt.ca` | supported | refused: nginx open source cannot verify a token (nginx Plus's auth\_jwt); verify it in the service, or render it for envoy | refused: HAProxy's jwt\_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names |
+| `auth.jwt.header` | supported | refused: nginx open source cannot verify a token (nginx Plus's auth\_jwt); verify it in the service, or render it for envoy | refused: HAProxy's jwt\_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names |
+| `auth.jwt.optional` | supported | refused: nginx open source cannot verify a token (nginx Plus's auth\_jwt); verify it in the service, or render it for envoy | refused: HAProxy's jwt\_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names |
+| `auth.jwt.claims` | supported | refused: nginx open source cannot verify a token (nginx Plus's auth\_jwt); verify it in the service, or render it for envoy | refused: HAProxy's jwt\_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names |
+| `auth.jwt.claims.<header name>` | supported | refused: nginx open source cannot verify a token (nginx Plus's auth\_jwt); verify it in the service, or render it for envoy | refused: HAProxy's jwt\_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names |
+| `remove_from_clients` | supported | refused: not written by this version's nginx generator; render it for envoy | supported |
+| `cors` | supported | refused: not written by this version's nginx generator; render it for envoy | supported |
+| `cors.allow_methods` | supported | refused: not written by this version's nginx generator; render it for envoy | supported |
+| `cors.allow_headers` | supported | refused: not written by this version's nginx generator; render it for envoy | partial: an empty Access-Control-Allow-Headers is left out of a preflight's answer, where Envoy sends it empty |
+| `cors.expose_headers` | supported | refused: not written by this version's nginx generator; render it for envoy | supported |
+| `cors.max_age` | supported | refused: not written by this version's nginx generator; render it for envoy | supported |
+| `origins` | supported | supported | supported |
+| `origins.<environment name>` | supported | supported | supported |
+| `origins.<environment name>.hosts` | supported | partial: an empty Origin passes as none, where Envoy answers 403, and no browser sends one; a foreign origin to a path no route takes gets 403, where Envoy answers 404; refuses holding a host that starts or ends with .: nginx reads a dot at a host's start as every name under it and drops one at its end; write the host without it, or render it for envoy | supported |
+| `origins.<environment name>.origins` | supported | refused: not written by this version's nginx generator; render it for envoy | supported |
+| `origins.<environment name>.patterns` | supported | refused: not written by this version's nginx generator; render it for envoy | supported |
+| `routes` | supported | supported | supported |
+| `routes[].rpc` | supported | supported | supported |
+| `routes[].rpc.retries` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `routes[].rpc.rate_limit` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `routes[].rpc.rate_limit.requests` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `routes[].rpc.rate_limit.per` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `routes[].rpc.rate_limit.burst` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `routes[].rpc.rate_limit.by` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `routes[].rpc.to` | supported | supported | supported |
+| `routes[].rpc.to.<package pattern>` | supported | supported | supported |
+| `routes[].rpc.to.<package pattern>.service` | supported | supported | supported |
+| `routes[].rpc.to.<package pattern>.name` | supported | supported | supported |
+| `routes[].name` | supported | supported | supported |
+| `routes[].prefix` | supported | partial: any character but %, one Envoy escapes before it picks a route (" \< > ^ \` { \| }) and one outside ASCII; refuses holding %, a character Envoy escapes before it picks a route (" \< > ^ \` { \| }) or one outside ASCII: nginx matches a path holding a character Envoy escapes as it decodes it, where Envoy matches the escape, so a prefix or a path with % or such a character would take other requests on nginx than on Envoy; write it without them, as a pattern, or render it for envoy | supported |
+| `routes[].path` | supported | partial: any character but %, one Envoy escapes before it picks a route (" \< > ^ \` { \| }) and one outside ASCII; refuses holding %, a character Envoy escapes before it picks a route (" \< > ^ \` { \| }) or one outside ASCII: nginx matches a path holding a character Envoy escapes as it decodes it, where Envoy matches the escape, so a prefix or a path with % or such a character would take other requests on nginx than on Envoy; write it without them, as a pattern, or render it for envoy | supported |
+| `routes[].pattern` | supported | partial: matched on the path as the client wrote it, or on the one nginx has normalised when it holds //, a dot segment, an escaped unreserved character or %2F, as Envoy matches it; in a file with a pattern route, a path holding a character Envoy escapes before it matches (" \< > ^ \` { \| } or one outside ASCII) is answered 400, where Envoy matches the escape; a path PCRE2 gives up on past its match limit, as it does for (a\|aa)+ and a long run of a with another character after it, is answered 400, where Envoy's RE2 always decides whether the pattern takes it | partial: a request whose pattern routes take more than proxyfile.lua's budget of work, about 24 ms of CPU for one request alone and 33 ms for each of many at once, such as a path of 14,000 bytes that 80 pattern routes read to its end, is answered 400, where Envoy's RE2 always decides, in under 1 ms of CPU; the states the patterns build take up to about 1 MB on each HAProxy thread, and a flood of new paths grew HAProxy by about 48 MB with 12 threads, where it grew Envoy by about 76 MB; a pattern whose program is longer than 65,536 bytes is refused, where Envoy refuses an RE2 program of more than 100 instructions |
+| `routes[].method` | supported | supported | supported |
+| `routes[].to` | supported | supported | supported |
+| `routes[].rewrite` | supported | partial: letters, digits and - . \_ ~ / ! $ & ' ( ) \* + , ; = : @ \[ \] alone; a request whose path keeps an escape Envoy does not decode, such as %3B or %20, or whose target ends in an empty query, a ? with nothing after it, is answered 400 on a route with a rewrite, where Envoy sends the rewritten path on; refuses holding ?: nginx reads a ? in a rewrite as the start of new arguments, after which it adds the client's; write the path without ?; refuses holding a character nginx escapes again: nginx escapes the new path before it sends it, so the service would receive that character escaped, where the Envoy output sends it as written; write the rewrite without it, or render it for envoy | supported |
+| `routes[].auth` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `routes[].retries` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `routes[].rate_limit` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `routes[].rate_limit.requests` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `routes[].rate_limit.per` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `routes[].rate_limit.burst` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `routes[].rate_limit.by` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `rpc` | supported | supported | supported |
+| `rpc.methods` | supported | supported | supported |
+| `rpc.methods[].service` | supported | supported | supported |
+| `rpc.methods[].method` | supported | supported | supported |
+| `rpc.methods[].action` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `rpc.methods[].reports` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `rpc.proto` | supported | supported | supported |
+| `rpc.proto.roots` | supported | supported | supported |
+| `rpc.proto.option` | supported | supported | supported |
+| `log` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator, and without it HAProxy logs no request, where the Envoy output logs every request; render it for envoy |
+| `log.status_from` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `log.sample` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: not written by this version's HAProxy generator; render it for envoy |
+| `tracing` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.provider` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.provider.xray` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.provider.xray.agent` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.provider.xray.segment` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.provider.xray.sample` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.provider.xray.sample.first` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.provider.xray.sample.rate` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.provider.xray.sample.rules` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.provider.xray.sample.rules[].host` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.provider.xray.sample.rules[].method` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.provider.xray.sample.rules[].path` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.provider.xray.sample.rules[].first` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.provider.xray.sample.rules[].rate` | supported | refused: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.provider.otel` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.provider.otel.endpoint` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.provider.otel.service` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.provider.otel.sample` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.provider.otel.sample.rate` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.tags` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.tags.<tag name>` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.tags.<tag name>.env` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.tags.<tag name>.header` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.tags.<tag name>.default` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| `tracing.path_in_url` | supported | refused: not written by this version's nginx generator; render it for envoy | refused: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy |
+| the request's path normalised before a route is picked | supported | partial: a path that holds //, a dot segment, an escaped unreserved character or %2F and also an escape Envoy keeps, such as %3B, is answered 400, and so is one that holds such an escape beside a character Envoy escapes before it matches (" \< > ^ \` { \| } or one outside ASCII), where Envoy normalises the path and keeps the escape; an empty query, a ? with nothing after it, after a path that needs normalising or holds such a character is answered 400, where Envoy sends the ? on; a backslash, %5C and a control character, written or escaped, are answered 400, and so is an invalid escape such as %zz, which Envoy passes on | supported |
+| a dot segment with a ; parameter answered 400 | supported | partial: /a/..;/b is answered 400 where Envoy 1.40 resolves it | partial: a dot segment whose ; parameter is written with dots, such as /a/..;/b, is answered 400, where Envoy 1.40 drops the parameter and resolves the segment |
+| the request line and header names read before a route is picked | supported | partial: a tab between the method and the target, an absolute target with user information, with no Host header or with a query or a fragment right after its host, and OPTIONS \* are answered 400, TRACE and CONNECT 405, and HTTP/0.9 gets no answer, where Envoy serves the first two and TRACE, answers OPTIONS \*, CONNECT and that absolute target 404, and HTTP/0.9 426; a header name outside RFC 9110's token characters is answered 400 over HTTP/1.1 and HTTP/2, where Envoy answers 400 over HTTP/1.1 and closes the connection over HTTP/2; over HTTP/2 any request trailer ends the connection, where Envoy serves the request; a header line folded onto the next and a Host whose port is past 65535 or holds a sign are answered 400, where Envoy serves them; less strict than the Envoy output: a request trailer whose name is outside the token characters is served over HTTP/1.1; a Connection token and nine elements of white space are served; a request with no body reaches the service without content-length: 0; a WebSocket upgrade a service answers without switching passes the service's body | partial: over HTTP/1.1 an absolute target is answered 400, where Envoy routes it by its host and sends the path alone with that host as Host, or answers 404 when no environment has the host, and OPTIONS \* and CONNECT are answered 400, where Envoy answers 404; HTTP/0.9 is answered 400, where Envoy answers 426; a Connection token other than close, keep-alive, upgrade, HTTP2-Settings and te is answered 400, where Envoy removes the header the token names and serves the request; ten Connection elements or more, an empty one counted but for an empty last one, are answered 400, where Envoy counts no empty element and serves a token with ten; an h2c upgrade is answered 400, where Envoy serves it as a plain request; a header line folded onto the next, and a header value that holds three spaces or tabs in a row, are answered 400, where Envoy serves them; a WebSocket upgrade with no Sec-WebSocket-Key is answered 400, where Envoy passes it on, or answers 403 to an origin it does not admit; more than 100 header lines are answered 431 or, from 102, 400, where Envoy answers 431, and 101 lines or more of a header Envoy joins into one line are answered 400, where Envoy serves them; two Host lines of different hosts, and a Host that holds a comma, are answered 400, where Envoy answers 404; Transfer-Encoding: chunked on two lines is answered 400, and Transfer-Encoding: gzip, chunked 422, where Envoy answers 501; a header of 20000 bytes is answered 431 and a path of 20000 bytes 414, where Envoy, under its default limit of 60 KiB, serves both; over HTTP/2 a request with 97 header fields or more is answered 400, where Envoy resets its stream, and so is one with fewer whose cookies, counted one a field, reach 97, and one with 97 fields or more of a header Envoy joins, which Envoy serves, is answered 400 or, with 120, its stream reset; a WebSocket, an extended CONNECT, is answered 400, where Envoy closes the connection; a path whose escaped form outgrows HAProxy's buffer, such as one of 7000 bytes above 0x7F, is answered 400 by HAProxy 3.4.7 and 500 by 3.2.26, where Envoy serves it; a header or trailer name outside RFC 9110's token characters resets the stream, where Envoy closes the connection; a # in :path resets the stream, where Envoy answers 400; and a request with neither :authority nor host is answered 404, where Envoy closes the connection; over HTTP/1.1 a request trailer whose name is outside those characters ends the connection with no answer when the body comes after the headers, where Envoy answers 400; less strict than the Envoy output: an HTTP/2 :authority with a default or empty port reaches the service without it; ten Connection tokens close or keep-alive are served; a request with no body reaches the service without content-length: 0; two Host lines of one host are served; two Content-Length lines of one value are served; Content-Length beside Transfer-Encoding: chunked is served; over HTTP/2, two host fields and no :authority are served; a WebSocket upgrade a service answers without switching passes the service's body |
 <!-- /keys -->
 
 ## Written with no key
 
-Each of these is part of every configuration the Envoy generator writes, with no key for it.
-[Defaults](defaults.md) says what each does. Path normalisation, the refusal of a dot segment with a `;` parameter and
-the reading of the request line and header names are core. All three are rows of the table above too, where every
-generator declares how it writes them. The nginx and HAProxy columns name what each proxy offers, or that it is to be
-settled with that proxy's generator:
+Each of these is part of every configuration the Envoy generator writes, with no key for it. [Defaults](defaults.md)
+says what each does. Path normalisation, the refusal of a dot segment with a `;` parameter and the reading of the
+request line and header names are core. All three are rows of the table above too, where every generator declares how it
+writes them. The nginx and HAProxy columns say what each of their generators writes for them:
 
 | What | Envoy | nginx | HAProxy | Class |
 |---|---|---|---|---|
-| The request's path normalised before a route is picked | `normalize_path: true`, `merge_slashes: true` and `path_with_escaped_slashes_action: UNESCAPE_AND_FORWARD`: dot segments resolved, repeated slashes merged, `%2F` read as `/` | maps read the path as the client wrote it: with nothing to normalise, or only an escape Envoy keeps (such as `%3B`), routes are matched on it and the request is sent on as written; with `//`, a dot segment, an escaped unreserved character or `%2F` and no kept escape, on nginx's normalised URI, `$uri`, which is sent; a path that needs both, or holds a character Envoy escapes before it matches beside a kept escape or in a file with a pattern route, is answered `400`, and so is an empty query, a `?` with nothing after it, after a path matched on `$uri` | `http-request normalize-uri` with `path-merge-slashes`, `percent-decode-unreserved`, `path-strip-dot` and `path-strip-dotdot`, which its manual calls an experimental technical preview that needs `expose-experimental-directives`; `percent-decode-unreserved` decodes only letters, digits, `-`, `.`, `_` and `~`, so `%2F` stays as sent | core; HAProxy differs as its column says |
-| A path that still holds a dot segment with a `;` parameter after normalisation answered `400`, the `;` written or escaped once (`%3B`, `%3b`) | the first route of every virtual host, `refused:dot-segment-with-parameter`: `safe_regex` `.*/\.\.?(?:;\|%3[Bb]).*` with `direct_response` `400` | a `map` on the decoded path, `$uri`, sets a flag for `/..;` and `/.;`, where an escaped `;` is decoded already, and the server answers the flag `400` before any route | to be settled with that generator | core |
-| The request line and the header names read before a route is picked | no setting: Envoy's own codecs take an absolute target's host as the request's authority and answer a header name outside RFC 9110's token characters `400` over HTTP/1.1, closing the connection over HTTP/2 | a `map` on `$request` takes an absolute target's host, after one or more spaces, as the authority, and an empty one is answered `400`; the njs script `proxyfile.js`, written beside the configuration, reads each header name as the client sent it, and a name outside the token characters is answered `400` | to be settled with that generator | core |
+| The request's path normalised before a route is picked | `normalize_path: true`, `merge_slashes: true` and `path_with_escaped_slashes_action: UNESCAPE_AND_FORWARD`: dot segments resolved, repeated slashes merged, `%2F` read as `/` | maps read the path as the client wrote it: with nothing to normalise, or only an escape Envoy keeps (such as `%3B`), routes are matched on it and the request is sent on as written; with `//`, a dot segment, an escaped unreserved character or `%2F` and no kept escape, on nginx's normalised URI, `$uri`, which is sent; a path that needs both, or holds a character Envoy escapes before it matches beside a kept escape or in a file with a pattern route, is answered `400`, and so is an empty query, a `?` with nothing after it, after a path matched on `$uri` | `proxyfile.lua`, the script beside the file, escapes a raw `"`, `<`, `>`, `^`, a backquote, `{`, a vertical bar, `}` and every byte above 0x7F in upper case hex, as Envoy does, then `regsub` rules read `%2F`, `%5C` and a backslash as `/` (`set-path`), then `http-request normalize-uri` with `percent-decode-unreserved`, `path-merge-slashes`, `path-strip-dot` and `path-strip-dotdot full`, which its manual calls an experimental technical preview that needs `expose-experimental-directives`: dot segments resolved and repeated slashes merged as by Envoy, every escape not decoded kept as written, an invalid one such as `%zz` too, and `%00` answered `400`, measured on HAProxy 3.2.26 and 3.4.7; the script matches a pattern route with the program Go's `regexp/syntax` compiles the pattern to, as an automaton built while it reads the path, and answers `400` to a request whose patterns pass the budget [HAProxy's page](haproxy.md#what-a-pattern-route-costs) gives, where RE2 always decides | core; nginx differs as its column says |
+| A path that still holds a dot segment with a `;` parameter after normalisation answered `400`, the `;` written or escaped once (`%3B`, `%3b`) | the first route of every virtual host, `refused:dot-segment-with-parameter`: `safe_regex` `.*/\.\.?(?:;\|%3[Bb]).*` with `direct_response` `400` | a `map` on the decoded path, `$uri`, sets a flag for `/..;` and `/.;`, where an escaped `;` is decoded already, and the server answers the flag `400` before any route | `acl dot_segment path_reg '/\.\.?(;\|%3[Bb])'` and `http-request return status 400 if dot_segment` after the route rules, the `404` of a request no route takes, the upgrade and the origin check, as Envoy orders its answers, and before every `replace-path`, on the path HAProxy has normalised, where an escaped dot is decoded already; `/..;/`, which `path-strip-dotdot` keeps, is answered `400`, where Envoy resolves it | core |
+| The request line and the header names read before a route is picked | no setting: Envoy's own codecs take an absolute target's host as the request's authority and answer a header name outside RFC 9110's token characters `400` over HTTP/1.1, closing the connection over HTTP/2 | a `map` on `$request` takes an absolute target's host, after one or more spaces, as the authority, and an empty one is answered `400`; the njs script `proxyfile.js`, written beside the configuration, reads each header name as the client sent it, and a name outside the token characters is answered `400` | `http-request` rules before any other answer what Envoy refuses and HAProxy's own parsers pass: HTTP/1.0 with `426`, and with `400` a method Envoy's HTTP/1 parser does not know, an absolute target, a `Connection` token other than `close`, `keep-alive`, `upgrade`, `HTTP2-Settings` and `te`, ten `Connection` elements, an `h2c` upgrade, a WebSocket over HTTP/2, a folded header line and an HTTP/2 request past Envoy's 100 header fields; HAProxy's parsers answer a header name outside RFC 9110's token characters `400` over HTTP/1.1 and reset the stream over HTTP/2, measured on HAProxy 3.2.26 and 3.4.7; the differences that stay are HAProxy's row in the table above | core |
 
 The rest belong to Envoy:
 

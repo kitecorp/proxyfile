@@ -138,3 +138,18 @@ holds it. Each was measured on nginx 1.30.6 and 1.31.8, and Envoy's answers on E
   Envoy does.
 - **A render for nginx reads no key of the [`envoy`](envoy.md) block and refuses none of them**, so tracing written at
   `envoy.tracing` is Envoy's alone; a render for Envoy reads it as before.
+
+## Where nginx is less strict than the Envoy output
+
+These differences are not stricter than the Envoy output: in each, nginx serves a request the Envoy output refuses or
+ends, or sends a service what the Envoy output would not. `proxyfile render --target nginx` counts them on standard
+error after it writes the files, and nginx's column in [Portability](portability.md#support-by-proxy-from-the-generators)
+names each on its row. Measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2:
+
+<!-- keys: less strict: nginx -->
+- **a request trailer whose name is outside the token characters is served over HTTP/1.1**: A chunked request whose trailer is `x@at: 2` is served, and the service receives its body and no trailer, where Envoy answers `400`: `proxyfile.js` runs before the body arrives and never reads a trailer.
+- **a Connection token and nine elements of white space are served**: `Connection: te, , , , , , , , , ,` is served, where Envoy counts each element of white space as a token and answers ten `400`.
+- **a request with no body reaches the service without content-length: 0**: A `POST` with no body reaches the service with no `Content-Length`, over HTTP/1.1 and HTTP/2, where Envoy adds `content-length: 0`.
+- **a WebSocket upgrade a service answers without switching passes the service's body**: A WebSocket upgrade a service answers `200` without switching reaches the client with the service's body, where Envoy passes the status and headers with no body.
+- **without timeouts.request, an answer that keeps arriving runs past 15 s**: Without `timeouts.request`, an answer that keeps coming runs past the 15 s at which the Envoy output ends a request: nginx counts its limits between two reads or writes.
+<!-- /keys -->

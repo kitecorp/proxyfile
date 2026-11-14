@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -139,7 +141,14 @@ func runFile(t *testing.T, tg target, f file, config string, lock func(*testing.
 					if e.refusing != "" {
 						w.refuse(t, e.refusing)
 					}
-					for _, difference := range sendRepeated(w, e, literalFor(e, tg.name, f.label)) {
+					l := literalFor(e, tg.name, f.label)
+					var differences []string
+					if e.flood != nil {
+						differences = sendFlood(w, e, l, t.Logf)
+					} else {
+						differences = sendRepeated(w, e, l)
+					}
+					for _, difference := range differences {
 						t.Error(difference)
 					}
 				})
@@ -183,6 +192,72 @@ func sendRepeated(w *world, e exchange, l literal) []string {
 		differences = append(differences, fmt.Sprintf("the %d requests took %s", count, time.Since(start).Round(time.Millisecond)))
 	}
 	return differences
+}
+
+// sendFlood sends e's flood and returns each way it differs from l: the first three answers that differ from l.want,
+// with how many did, and the proxy's memory when it grew by its bound or more (flood), or could not be read. It logs
+// the memory it read with logf, so a passing run shows how far under the bound it stayed. The flood has a client of
+// its own that keeps every connection it opens, so its connections stay the given number, as kept-alive clients' do,
+// and the other rows' connections are left as they were.
+func sendFlood(w *world, e exchange, l literal, logf func(format string, args ...any)) []string {
+	f := e.flood
+	if l.admitted > 0 || e.repeat > 0 || e.send.raw || e.send.proto != "http/1.1" {
+		// A flood is sent as it is, over http/1.1 through net/http; anything else is a mistake in the scenario data.
+		panic(fmt.Sprintf("exchange %q floods with a repeat, an admitted count, a raw request or %q", e.name, e.send.proto))
+	}
+	transport := w.http1.Transport.(*http.Transport).Clone()
+	transport.MaxIdleConnsPerHost = f.connections
+	client := &http.Client{Transport: transport, Timeout: w.http1.Timeout}
+	defer transport.CloseIdleConnections()
+	before, err := w.memory()
+	if err != nil {
+		return []string{err.Error()}
+	}
+	var (
+		next      atomic.Int64
+		mu        sync.Mutex
+		different []string
+		count     int
+		wg        sync.WaitGroup
+	)
+	start := time.Now()
+	for range f.connections {
+		wg.Go(func() {
+			for i := next.Add(1); i <= int64(f.requests); i = next.Add(1) {
+				r := e.send
+				r.path = f.path(int(i))
+				if differences := compare(l.want, w.sendOn(client, r), w.mark); differences != nil {
+					mu.Lock()
+					if count++; count <= 3 {
+						different = append(different, fmt.Sprintf("answer %d: %s", i, strings.Join(differences, "; ")))
+					}
+					mu.Unlock()
+				}
+			}
+		})
+	}
+	wg.Wait()
+	took := time.Since(start).Round(time.Millisecond)
+	if count > 0 {
+		different = append(different, fmt.Sprintf("%d of the %d answers differ; the flood took %s", count, f.requests, took))
+	}
+	after, err := w.memory()
+	if err != nil {
+		return append(different, err.Error())
+	}
+	threads, err := dockerCPUs()
+	if err != nil {
+		return append(different, err.Error())
+	}
+	bound := f.fixed + f.perThread*int64(threads)
+	measured := fmt.Sprintf("the proxy's memory grew from %d MiB to %d MiB, by %d MiB, against a bound of %d MiB, %d MiB "+
+		"and %d MiB for each of %d threads; %d requests over %d connections took %s", before>>20, after>>20,
+		(after-before)>>20, bound>>20, f.fixed>>20, f.perThread>>20, threads, f.requests, f.connections, took)
+	logf("%s", measured)
+	if after-before >= bound {
+		different = append(different, "the memory grew by the bound or more: "+measured)
+	}
+	return different
 }
 
 // checkRefused judges a file whose folder commits tg's refusal, so no proxy runs: render must fail for tg with

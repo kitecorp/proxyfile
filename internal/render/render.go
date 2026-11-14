@@ -12,6 +12,7 @@ import (
 	"github.com/kitecorp/proxyfile/v2/internal/envoy"
 	"github.com/kitecorp/proxyfile/v2/internal/format"
 	"github.com/kitecorp/proxyfile/v2/internal/generator"
+	"github.com/kitecorp/proxyfile/v2/internal/haproxy"
 	"github.com/kitecorp/proxyfile/v2/internal/model"
 	"github.com/kitecorp/proxyfile/v2/internal/nginx"
 	"github.com/kitecorp/proxyfile/v2/internal/origins"
@@ -44,6 +45,7 @@ type Target struct {
 var Targets = []Target{
 	{Name: "envoy", Config: "envoy.yaml", Generate: envoy.Generate},
 	{Name: "nginx", Config: "nginx.conf", Generate: nginx.Generate},
+	{Name: "haproxy", Config: "haproxy.cfg", Generate: haproxy.Generate},
 }
 
 // TargetNamed returns the target whose Name is name. It reads Targets at each call, so a test may declare its own.
