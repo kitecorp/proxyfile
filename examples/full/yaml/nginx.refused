@@ -1,9 +1,3 @@
-examples/full/yaml/proxyfile.yaml:5:1: "tls" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:6:3: "tls.certificate" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:7:3: "tls.key" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:8:3: "tls.clients" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:8:13: "tls.clients.ca" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:9:1: "client_address" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/yaml/proxyfile.yaml:10:1: "limits" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/yaml/proxyfile.yaml:11:3: "limits.connections" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/yaml/proxyfile.yaml:12:3: "limits.request_headers" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
@@ -44,18 +38,7 @@ examples/full/yaml/proxyfile.yaml:42:5: "auth.jwt.optional" is refused by --targ
 examples/full/yaml/proxyfile.yaml:43:5: "auth.jwt.claims" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
 examples/full/yaml/proxyfile.yaml:43:14: "auth.jwt.claims.<header name>" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
 examples/full/yaml/proxyfile.yaml:43:30: "auth.jwt.claims.<header name>" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
-examples/full/yaml/proxyfile.yaml:44:1: "remove_from_clients" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:45:1: "cors" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:46:3: "cors.allow_methods" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:47:3: "cors.allow_headers" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:48:3: "cors.expose_headers" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:49:3: "cors.max_age" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:53:5: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:54:5: "origins.<environment name>.patterns" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:57:5: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:58:5: "origins.<environment name>.patterns" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:61:5: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:62:5: "origins.<environment name>.patterns" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:44:1: "remove_from_clients" holding a name with a * prefix is refused by --target nginx: nginx takes each header by name; write each name in full
 examples/full/yaml/proxyfile.yaml:64:76: "routes[].auth" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/yaml/proxyfile.yaml:66:7: "routes[].rpc.retries" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/yaml/proxyfile.yaml:67:7: "routes[].rpc.rate_limit" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

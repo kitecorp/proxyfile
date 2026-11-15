@@ -9,6 +9,12 @@
 # loads proxyfile.lua, which render writes beside it, from its own folder, so the folder of the configuration is
 # mounted and holds both; the check needs no network.
 set -euo pipefail
+# Each file named is checked, so a run that names none would check nothing and exit 0, which reads as every file
+# loading.
+if (($# == 0)); then
+  echo "usage: validate-haproxy.sh <haproxy.cfg>..." >&2
+  exit 2
+fi
 
 source "$(dirname "$0")/pinned-images.sh"
 pinned_images haproxy HAProxy

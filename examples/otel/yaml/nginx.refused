@@ -1,4 +1,3 @@
-examples/otel/yaml/proxyfile.yaml:8:29: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/otel/yaml/proxyfile.yaml:12:1: "tracing" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/otel/yaml/proxyfile.yaml:13:3: "tracing.provider" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/otel/yaml/proxyfile.yaml:14:5: "tracing.provider.otel" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

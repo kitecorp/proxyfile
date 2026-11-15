@@ -54,7 +54,7 @@ var lowerTimeBounds = map[string]int64{"auth.timeout": largestAuthTimeoutSeconds
 
 func decode(root *tree.Node) (*model.Gateway, []model.Problem) {
 	d := decoder{}
-	tls := listenerTLS(root.Get("tls"))
+	tls := listenerTLS(root.Entry("tls"))
 	g := &model.Gateway{
 		Listen:            *port(root.Get("listen")),
 		Admin:             port(root.Get("admin")),
@@ -90,11 +90,13 @@ func decode(root *tree.Node) (*model.Gateway, []model.Problem) {
 
 // listenerTLS is nil when tls is not written, so the public listener serves plain HTTP. The check has made each path
 // absolute and required certificate, key and, with clients, ca.
-func listenerTLS(n *tree.Node) *model.TLS {
-	if n == nil {
+func listenerTLS(entry *tree.Entry) *model.TLS {
+	if entry == nil {
 		return nil
 	}
-	return &model.TLS{Certificate: n.GetText("certificate"), Key: n.GetText("key"), ClientsCA: n.Get("clients").GetText("ca")}
+	n := entry.Value
+	return &model.TLS{Certificate: n.GetText("certificate"), Key: n.GetText("key"), ClientsCA: n.Get("clients").GetText("ca"),
+		Pos: entry.KeyPos}
 }
 
 // clientAddress is the written client_address, else connection when the file writes tls and forwarded otherwise. A

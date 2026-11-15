@@ -70,7 +70,7 @@ type environment struct {
 	Comment  string
 	Hosts    []string
 	Origins  []string
-	Patterns []string // origins.PatternRegex of each pattern
+	Patterns []string // origins.PatternPCRE of each pattern
 	Own      []string // origins.SameOriginRegex of each host: an origin on one of the environment's own hosts
 	Listed   bool
 }
@@ -153,7 +153,7 @@ func Generate(in generator.Input) ([]generator.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("haproxy: %w", err)
 	}
-	if refused := values.refused(); refused != nil {
+	if refused := values.Err(); refused != nil {
 		return nil, refused
 	}
 	v.Backends = backends(g)
@@ -173,8 +173,7 @@ func environments(file *origins.File, v *values) ([]environment, originCheck) {
 	var list []environment
 	listed := false
 	for i, e := range file.Environments {
-		environment := environment{ID: "env" + strconv.Itoa(i+1), Comment: strconv.Quote(e.Name),
-			Listed: len(e.Origins) > 0 || len(e.Patterns) > 0}
+		environment := environment{ID: "env" + strconv.Itoa(i+1), Comment: strconv.Quote(e.Name), Listed: e.Listed()}
 		for _, host := range e.Hosts {
 			environment.Hosts = append(environment.Hosts, quote(host))
 			environment.Own = append(environment.Own, v.regex(hostsKey, e.Pos, origins.SameOriginRegex(host)))
@@ -183,7 +182,7 @@ func environments(file *origins.File, v *values) ([]environment, originCheck) {
 			environment.Origins = append(environment.Origins, quote(origin))
 		}
 		for _, pattern := range e.Patterns {
-			environment.Patterns = append(environment.Patterns, v.regex(patternsKey, e.Pos, patternRegex(pattern)))
+			environment.Patterns = append(environment.Patterns, v.regex(patternsKey, e.Pos, origins.PatternPCRE(pattern)))
 		}
 		listed = listed || environment.Listed
 		list = append(list, environment)
@@ -266,28 +265,6 @@ func routes(in generator.Input, v *values) ([]route, []rewrite, error) {
 		}
 	}
 	return list, rewrites, nil
-}
-
-// patternRegex is the PCRE2 expression of an origin pattern: origins.PatternRegex reads each * as .*, which PCRE2 tries
-// at every length when the text does not match, so one Origin of 8 KB against 64 patterns of two * each stopped
-// HAProxy 3.2.26 and 3.4.7 (measured). A text matches the pattern when it starts with the part before the first *, ends
-// with the part after the last, and holds each part between them in order; the first place of each such part leaves
-// the most room to the others, so each is matched there by an atomic group, which PCRE2 never tries again elsewhere,
-// and the time grows with the Origin's length alone. Each part is quoted by regexp.QuoteMeta, as PatternRegex quotes
-// it.
-func patternRegex(pattern string) string {
-	parts := strings.Split(pattern, "*")
-	for i, part := range parts {
-		parts[i] = regexp.QuoteMeta(part)
-	}
-	written := "^" + parts[0]
-	if last := len(parts) - 1; last > 0 {
-		for _, part := range parts[1:last] {
-			written += "(?>.*?" + part + ")"
-		}
-		written += ".*" + parts[last]
-	}
-	return written + "$"
 }
 
 // rpcGroup is the quoted paths of the RPC methods that go to one service, and that service's gRPC backend.

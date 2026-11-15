@@ -29,7 +29,7 @@ or sending a service what the Envoy output would not, and names the page that li
 unchanged:
 
 ```
-proxyfile render: this HAProxy configuration is less strict than the Envoy output in 9 ways; docs/haproxy.md lists them under "Where HAProxy is less strict than the Envoy output"
+proxyfile render: this HAProxy configuration is less strict than the Envoy output in 10 ways; docs/haproxy.md lists them under "Where HAProxy is less strict than the Envoy output"
 ```
 
 nginx's line names [`docs/nginx.md`](nginx.md#where-nginx-is-less-strict-than-the-envoy-output), HAProxy's

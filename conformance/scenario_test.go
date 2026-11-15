@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -86,6 +87,9 @@ type request struct {
 	headers       map[string]string
 	noCertificate bool
 	otherCA       bool // the client certificate is one a CA other than the clients CA signed, with the same name
+	expired       bool // the client certificate is one the clients CA signed whose validity ended
+	// serverName, when set, is the TLS server name the client asks for in place of the host's (serverNameFor).
+	serverName string
 	// offer, when set, is what the client offers in its TLS handshake in place of crypto/tls's defaults, over
 	// http/1.1 with the client certificate the clients CA signed.
 	offer *tlsOffer
@@ -130,10 +134,13 @@ type answer struct {
 	absent                          []string          // headers the stub must not have received
 	oneLine                         []string          // headers the stub must have received as one line each
 	replaced                        map[string]string // headers the client sent with these values; the stub must receive each with another value
-	body                            string            // the body the stub received; "" is not compared
-	noTrailers                      bool              // the stub must have received no trailer
-	marked                          string            // the value of the target's unchecked mark the stub must receive
-	unmarked                        bool              // the stub must not receive the target's unchecked mark
+	// forms holds headers the stub must have received with a value the regular expression matches, and that the answer
+	// must carry with the same value: a value the proxy makes anew for each request, such as a request id.
+	forms      map[string]*regexp.Regexp
+	body       string // the body the stub received; "" is not compared
+	noTrailers bool   // the stub must have received no trailer
+	marked     string // the value of the target's unchecked mark the stub must receive
+	unmarked   bool   // the stub must not receive the target's unchecked mark
 	// unreadable wants a stub's own answer to a request its HTTP server could not read (result.stubError): the proxy
 	// passed the request on as sent. No service is compared then, because that answer names none.
 	unreadable     bool
@@ -226,6 +233,15 @@ func compare(want answer, got result, mark string) []string {
 	for _, name := range slices.Sorted(maps.Keys(want.replaced)) {
 		if value, ok := e.Headers[name]; !ok || value == want.replaced[name] {
 			differ("received %s: got %q, want a value other than the client's %q", name, value, want.replaced[name])
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(want.forms)) {
+		value, ok := e.Headers[name]
+		if !ok || !want.forms[name].MatchString(value) {
+			differ("received %s: got %q, want a value %s matches", name, value, want.forms[name])
+		}
+		if answered := strings.Join(got.header.Values(name), ","); answered != value {
+			differ("header %s: got %q, want the %q the service received", name, answered, value)
 		}
 	}
 	if want.body != "" && e.Body != want.body {

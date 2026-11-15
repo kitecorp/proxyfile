@@ -8,7 +8,6 @@ examples/partial/hocon/Proxyfile: auth.when_unavailable: "auth.when_unavailable"
 examples/partial/hocon/Proxyfile: log: "log" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/partial/hocon/Proxyfile: log.sample: "log.sample" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/partial/hocon/Proxyfile: log.status_from: "log.status_from" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/partial/hocon/Proxyfile: origins.only.origins: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/partial/hocon/Proxyfile: routes[1].auth: "routes[].auth" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/partial/hocon/Proxyfile: rpc.methods[0].action: "rpc.methods[].action" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/partial/hocon/Proxyfile: rpc.methods[0].reports: "rpc.methods[].reports" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

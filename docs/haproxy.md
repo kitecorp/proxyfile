@@ -154,14 +154,14 @@ HAProxy 3.2.26 and 3.4.7 beside Envoy 1.40.2; one difference stays, named on HAP
 
 ## The request line and the headers
 
-Before any other rule the file answers what Envoy refuses and HAProxy's own parsers pass: HTTP/1.0 with `426`, and with
-`400` a method Envoy's HTTP/1 parser does not know (a known one in another letter case too), and over HTTP/2 a
-request past Envoy's 100 header fields. It removes the headers Envoy removes: `Keep-Alive`, `Proxy-Connection`,
-`X-Forwarded-Client-Cert`, the 16 `x-envoy-` headers that steer an Envoy, `Connection` but a WebSocket upgrade's, and a
-request's trailers. From a service's answer it removes `Keep-Alive`, which HAProxy would pass on to an HTTP/1.1
-client and Envoy does not. It sends `TE: trailers` in any letter case on when `Connection` names `te`, as Envoy does.
-HAProxy counts the request line among its 101 header lines, so 100 header lines are served and 101 refused, as by
-Envoy.
+Before any other rule the file answers what Envoy refuses and HAProxy's own parsers pass: every HTTP/1 version but 1.1
+with `426`, from `HTTP/0.0` to `HTTP/9.9`, and with `400` a method Envoy's HTTP/1 parser does not know (a known one in
+another letter case too), and over HTTP/2 a request past Envoy's 100 header fields. It removes the headers Envoy
+removes: `Keep-Alive`, `Proxy-Connection`, `X-Forwarded-Client-Cert`, the 16 `x-envoy-` headers that steer an Envoy,
+`Connection` but a WebSocket upgrade's, and a request's trailers. From a service's answer it removes `Keep-Alive`, which
+HAProxy would pass on to an HTTP/1.1 client and Envoy does not. It sends `TE: trailers` in any letter case on when
+`Connection` names `te`, as Envoy does. HAProxy counts the request line among its 101 header lines, so 100 header lines
+are served and 101 refused, as by Envoy.
 
 Measured on HAProxy 3.2.26 and 3.4.7 beside Envoy 1.40.2, the differences below refuse a request Envoy serves or
 answer one it refuses with another status. Each is named on HAProxy's row of the request line in
@@ -204,7 +204,7 @@ service what Envoy would not, are in [the next section](#where-haproxy-is-less-s
 - **A header of 20,000 bytes is answered `431`, and a path of 20,000 bytes `414`**, where Envoy, under its default limit
   of 60 KiB, serves both. Over HTTP/2, a path whose escaped form outgrows HAProxy's buffer, such as one of 7,000 bytes
   above 0x7F, is answered `400` by HAProxy 3.4.7 and `500` by 3.2.26, where Envoy serves it.
-- **HTTP/0.9 is answered `400`**, where Envoy answers `426`.
+- **A request line with no version, HTTP/0.9's own form, is answered `400`**, where Envoy answers `426`.
 - **Over HTTP/2, a header or trailer name outside RFC 9110's token characters or a `#` in `:path` resets the stream**,
   where Envoy closes the connection or answers `400`, and a request with neither `:authority` nor `host` is answered
   `404`, where Envoy closes the connection.
@@ -215,10 +215,11 @@ service what Envoy would not, are in [the next section](#where-haproxy-is-less-s
 
 These differences are not stricter than the Envoy output: in each, HAProxy serves a request the Envoy output refuses or
 ends, or sends a service what the Envoy output would not. HAProxy's parsers decide each before any rule of the file
-reads the request, and its timeout counts the time without data, so the file cannot close them.
+reads the request, and its timeout counts the time without data, so the file cannot close them, but for the one on a
+control byte in a value: that one is measured for every control byte, and this version writes no rule for it.
 `proxyfile render --target haproxy` counts them on standard error after it writes the files, and HAProxy's column in
-[Portability](portability.md#support-by-proxy-from-the-generators) names each on its row. Measured on HAProxy 3.2.26
-and 3.4.7 beside Envoy 1.40.2:
+[Portability](portability.md#support-by-proxy-from-the-generators) names each on its row. Measured on HAProxy 3.2.26 and
+3.4.7 beside Envoy 1.40.2:
 
 <!-- keys: less strict: haproxy -->
 - **an HTTP/2 :authority with a default or empty port reaches the service without it**: Over HTTP/2, `:authority: api.example.com:` and, over plain HTTP, `api.example.com:80` reach the service as `Host: api.example.com`, where the Envoy output sends them as written.
@@ -229,6 +230,7 @@ and 3.4.7 beside Envoy 1.40.2:
 - **Content-Length beside Transfer-Encoding: chunked is served**: `Content-Length: 3` beside `Transfer-Encoding: chunked`, with a chunked body, reaches the service chunked and with no `Content-Length`, where Envoy answers `400`.
 - **over HTTP/2, two host fields and no :authority are served**: Over HTTP/2 with no `:authority`, `host: api.example.com` and then `host: evil.example.net` reach the service as the first, and the same host twice as one, where Envoy closes the connection.
 - **a WebSocket upgrade a service answers without switching passes the service's body**: A WebSocket upgrade a service answers `200` without switching reaches the client with the service's body, where Envoy passes the status and headers with no body.
+- **a header or trailer value holding a control byte is served**: A header value holding one of the bytes 0x01 to 0x08, 0x0B, 0x0C, 0x0E to 0x1F or 0x7F reaches the service as sent, over HTTP/1.1 and HTTP/2, and a chunked request whose trailer value holds one is served, the service receiving its body and no trailer, where Envoy answers `400` over HTTP/1.1 and closes the connection over HTTP/2. HAProxy refuses 0x00, a line feed and a carriage return in either value, with `400` over HTTP/1.1 and a reset stream over HTTP/2.
 - **without timeouts.request, an answer that keeps arriving runs past 15 s**: Without `timeouts.request`, a service that keeps sending runs past 15 s, where the Envoy output ends a request 15 s after it starts: HAProxy's `timeout server` counts the time without data (on HAProxy 3.4.7, a service that sent one byte a second for 10 s under a 2 s `timeout server` was served).
 <!-- /keys -->
 

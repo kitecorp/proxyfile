@@ -6,5 +6,4 @@ examples/jwt/yaml/proxyfile.yaml:12:5: "auth.jwt.keys" is refused by --target ng
 examples/jwt/yaml/proxyfile.yaml:13:5: "auth.jwt.claims" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
 examples/jwt/yaml/proxyfile.yaml:14:7: "auth.jwt.claims.<header name>" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
 examples/jwt/yaml/proxyfile.yaml:15:7: "auth.jwt.claims.<header name>" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
-examples/jwt/yaml/proxyfile.yaml:17:29: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/jwt/yaml/proxyfile.yaml:19:52: "routes[].auth" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

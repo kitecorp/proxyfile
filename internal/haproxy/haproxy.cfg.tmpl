@@ -83,11 +83,14 @@ frontend public
 {{- end}}
   # what Envoy refuses before it reads a request further, and the headers it removes
   {{- /* Each answer was measured on Envoy 1.40.2 beside HAProxy 3.2.26 and 3.4.7, which answered alike. Envoy answers
-  HTTP/1.0 426, and over HTTP/1.1 a method its parser does not know 400 (a method in another letter case too), where
-  HAProxy served both. An absolute target, which HAProxy sends on in absolute form after it drops a default or empty
+  426 to every HTTP/1 version but 1.1, where HAProxy served 0.0 to 0.9 as written and 1.2 to 9.9 as HTTP/1.1, so that a
+  service answering HTTP/0.9 with its body alone had that body read as the answer's headers; req.ver gives the version
+  as sent, and 2.0 both for HTTP/2 and for HTTP/2.0 on an HTTP/1 connection, which fc_http_major tells apart. Over
+  HTTP/1.1 Envoy answers a method its parser does not know 400 (a method in another letter case too), where HAProxy
+  served it. An absolute target, which HAProxy sends on in absolute form after it drops a default or empty
   port from the target and the Host header, is answered 400: no rule sees the port it dropped, and Envoy sends the path
   alone with the line's host as Host, and answers an empty port 400. */}}
-  http-request return status 426 if { req.ver 1.0 }
+  http-request return status 426 if !{ req.ver 1.1 } !{ fc_http_major 2 }
   http-request return status 400 if { req.ver 1.1 } !{ method {{.Methods}} }
   http-request return status 400 if { req.ver 1.1 } !{ url_beg / }
   {{- /* A client's own upgrade field over HTTP/2 is refused by HAProxy's parser, so an HTTP/2 request that holds one is

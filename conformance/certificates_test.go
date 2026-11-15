@@ -16,19 +16,20 @@ import (
 )
 
 // tlsFiles are what certificates makes. tls and jwt are folders mounted at /etc/gateway/tls and /etc/gateway/jwt, the
-// paths the full example's tls keys and auth.jwt.ca name. client and otherCA are the clients' certificates with their
-// keys, kept in memory because the proxy never reads them: client is signed by the clients CA, and otherCA by a
-// second CA that carries the clients CA's name, so only a proxy that checks the signature refuses it.
+// paths the full example's tls keys and auth.jwt.ca name. client, otherCA and expired are the clients' certificates
+// with their keys, kept in memory because the proxy never reads them: client is signed by the clients CA, otherCA by
+// a second CA that carries the clients CA's name, so only a proxy that checks the signature refuses it, and expired by
+// the clients CA with a validity that ended, so only a proxy that checks the dates refuses it.
 type tlsFiles struct {
-	tls, jwt        string
-	client, otherCA tls.Certificate
+	tls, jwt                 string
+	client, otherCA, expired tls.Certificate
 }
 
 // certificates makes throwaway TLS files for one run under dir: a self-signed server certificate for localhost and
 // 127.0.0.1 with its key, a clients CA, and a copy of the server certificate as the CA bundle auth.jwt.ca names.
 // Folders are 0755 and files 0644 whatever the umask, because the proxy runs as an unprivileged user in its image and
-// must read the mounted files; the keys are made for this run alone and removed with dir. It also makes the two client
-// certificates, which stay in memory.
+// must read the mounted files; the keys are made for this run alone and removed with dir. It also makes the three
+// client certificates, which stay in memory.
 func certificates(t testing.TB, dir string) tlsFiles {
 	files := tlsFiles{tls: filepath.Join(dir, "tls"), jwt: filepath.Join(dir, "jwt")}
 	for _, folder := range []string{files.tls, files.jwt} {
@@ -54,6 +55,8 @@ func certificates(t testing.TB, dir string) tlsFiles {
 	_, serverPEM := sign(t, server, server, serverKey, serverKey)
 	caCertificate, caKey, caPEM := clientsCA(t)
 	files.client = clientCertificate(t, caCertificate, caKey)
+	// It ended a day ago, so a clock in the container's virtual machine a little behind the host's still refuses it.
+	files.expired = clientCertificate(t, caCertificate, caKey, time.Now().Add(-48*time.Hour), time.Now().Add(-24*time.Hour))
 	otherCertificate, otherKey, _ := clientsCA(t)
 	files.otherCA = clientCertificate(t, otherCertificate, otherKey)
 	for path, data := range map[string][]byte{
@@ -85,14 +88,18 @@ func clientsCA(t testing.TB) (*x509.Certificate, *rsa.PrivateKey, []byte) {
 	return certificate, key, certificatePEM
 }
 
-// clientCertificate makes a client certificate ca signs, with its key, as a TLS client presents it. The proxy checks
-// the certificate's purpose, so it carries the extended key usage client auth.
-func clientCertificate(t testing.TB, ca *x509.Certificate, caKey *rsa.PrivateKey) tls.Certificate {
+// clientCertificate makes a client certificate ca signs, with its key, as a TLS client presents it, valid from and to
+// the times given, or as sign makes it when none are. The proxy checks the certificate's purpose, so it carries the
+// extended key usage client auth.
+func clientCertificate(t testing.TB, ca *x509.Certificate, caKey *rsa.PrivateKey, validity ...time.Time) tls.Certificate {
 	key := newKey(t)
 	client := &x509.Certificate{
 		Subject:     pkix.Name{CommonName: "client"},
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	if len(validity) == 2 {
+		client.NotBefore, client.NotAfter = validity[0], validity[1]
 	}
 	certificate, _ := sign(t, client, ca, key, caKey)
 	return tls.Certificate{Certificate: [][]byte{certificate.Raw}, PrivateKey: key}
@@ -107,18 +114,20 @@ func newKey(t testing.TB) *rsa.PrivateKey {
 	return key
 }
 
-// sign fills in the serial number and validity of template, has parentKey sign it and returns the certificate, both
-// parsed and as PEM. The parsed one carries the subject key identifier CreateCertificate adds to a CA, so a
-// certificate it signs names its issuer's key. The validity starts an hour back, so a clock in the container's
-// virtual machine a little behind the host's still accepts it.
+// sign fills in the serial number of template, and its validity when template has none, has parentKey sign it and
+// returns the certificate, both parsed and as PEM. The parsed one carries the subject key identifier
+// CreateCertificate adds to a CA, so a certificate it signs names its issuer's key. The validity starts an hour back,
+// so a clock in the container's virtual machine a little behind the host's still accepts it.
 func sign(t testing.TB, template, parent *x509.Certificate, key, parentKey *rsa.PrivateKey) (*x509.Certificate, []byte) {
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
 	if err != nil {
 		t.Fatal(err)
 	}
 	template.SerialNumber = serial
-	template.NotBefore = time.Now().Add(-time.Hour)
-	template.NotAfter = time.Now().Add(24 * time.Hour)
+	if template.NotAfter.IsZero() {
+		template.NotBefore = time.Now().Add(-time.Hour)
+		template.NotAfter = time.Now().Add(24 * time.Hour)
+	}
 	der, err := x509.CreateCertificate(rand.Reader, template, parent, &key.PublicKey, parentKey)
 	if err != nil {
 		t.Fatal(err)

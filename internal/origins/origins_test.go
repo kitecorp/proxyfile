@@ -26,6 +26,23 @@ func TestPatternRegex(t *testing.T) {
 	}
 }
 
+// PatternPCRE takes what PatternRegex takes: each * but the last at the first place where the rest can follow, in an
+// atomic group PCRE2 never tries again elsewhere, and the last as .*; one * needs no group.
+func TestPatternPCRE(t *testing.T) {
+	cases := []struct{ name, pattern, want string }{
+		{"no *", "https://example.org", `^https://example\.org$`},
+		{"one *", "https://*.example.org", `^https://.*\.example\.org$`},
+		{"two *", "https://*.*.example.org", `^https://(?>.*?\.).*\.example\.org$`},
+		{"a * in the port", "http://*.example.com:*", `^http://(?>.*?\.example\.com:).*$`},
+		{"three * and two side by side", "https://**.a*.example.org", `^https://(?>.*?)(?>.*?\.a).*\.example\.org$`},
+	}
+	for _, c := range cases {
+		if got := PatternPCRE(c.pattern); got != c.want {
+			t.Errorf("%s: PatternPCRE(%q) = %q, want %q", c.name, c.pattern, got, c.want)
+		}
+	}
+}
+
 // Spring's breadth, kept on purpose: a * crosses dots, the dot before the domain is needed, and no port follows.
 func TestPatternMeaning(t *testing.T) {
 	corpus := []string{"https://shop.example.com", "https://a.b.example.com", "https://x.test.example.com",
@@ -62,6 +79,26 @@ var everyRule = testsupport.Document{
 	`     "hosts": ["a_b", "api.example.com"]}`,
 	`  ]`,
 	`}`,
+}
+
+// An environment that lists origins or patterns is listed; one with hosts alone is not.
+func TestListed(t *testing.T) {
+	cases := []struct {
+		name        string
+		environment Environment
+		want        bool
+	}{
+		{name: "hosts alone", environment: Environment{Hosts: []string{"example.com"}}, want: false},
+		{name: "origins", environment: Environment{Hosts: []string{"example.com"}, Origins: []string{"https://example.com"}}, want: true},
+		{name: "patterns", environment: Environment{Hosts: []string{"example.com"}, Patterns: []string{"https://*.example.com"}}, want: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.environment.Listed(); got != c.want {
+				t.Errorf("Listed() = %v, want %v", got, c.want)
+			}
+		})
+	}
 }
 
 func TestReadProblems(t *testing.T) {
@@ -156,7 +193,9 @@ func TestRead(t *testing.T) {
 			`  ]`,
 			`}`,
 		}.String(), want: File{
-			CORS: CORS{AllowMethods: "GET,POST", AllowHeaders: "authorization", ExposeHeaders: "x-request-id", MaxAge: "600"},
+			CORS: CORS{AllowMethods: "GET,POST", AllowHeaders: "authorization", ExposeHeaders: "x-request-id", MaxAge: "600",
+				KeyPos: map[string]model.Pos{"cors.allow_methods": {Line: 2, Column: 12}, "cors.allow_headers": {Line: 2, Column: 41},
+					"cors.expose_headers": {Line: 2, Column: 75}, "cors.max_age": {Line: 2, Column: 109}}},
 			Environments: []Environment{
 				{Name: "test", Hosts: []string{"api.example.com", "example.com"},
 					Origins:  []string{"https://example.com", "https://www.example.com"},
@@ -186,6 +225,10 @@ func TestRead(t *testing.T) {
 			for i := range c.want.Environments {
 				c.want.Environments[i].Pos.File = path
 			}
+			for key, pos := range c.want.CORS.KeyPos {
+				pos.File = path
+				c.want.CORS.KeyPos[key] = pos
+			}
 			if !reflect.DeepEqual(got, &c.want) {
 				t.Errorf("Read() = %#v, want %#v", got, &c.want)
 			}
@@ -207,7 +250,10 @@ func TestInline(t *testing.T) {
 			`  test: {hosts: [api.example.com, example.com], origins: ["https://example.com", "https://www.example.com"], patterns: ["http://localhost:*", "https://*.example.com"]}`,
 			`  live: {hosts: [api.example.org]}`,
 		}.String(), want: &File{
-			CORS: CORS{AllowMethods: "GET,POST", AllowHeaders: "authorization", ExposeHeaders: "x-request-id", MaxAge: "600"},
+			CORS: CORS{AllowMethods: "GET,POST", AllowHeaders: "authorization", ExposeHeaders: "x-request-id", MaxAge: "600",
+				KeyPos: map[string]model.Pos{"cors.allow_methods": {File: "g.yaml", Line: 1, Column: 8},
+					"cors.allow_headers": {File: "g.yaml", Line: 1, Column: 35}, "cors.expose_headers": {File: "g.yaml", Line: 1, Column: 65},
+					"cors.max_age": {File: "g.yaml", Line: 1, Column: 95}}},
 			Environments: []Environment{
 				{Name: "test", Hosts: []string{"api.example.com", "example.com"},
 					Origins:  []string{"https://example.com", "https://www.example.com"},

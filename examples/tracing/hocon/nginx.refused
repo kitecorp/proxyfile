@@ -4,8 +4,7 @@ examples/tracing/hocon/Proxyfile: auth.ask: "auth.ask" is refused by --target ng
 examples/tracing/hocon/Proxyfile: auth.enabled: "auth.enabled" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/tracing/hocon/Proxyfile: auth.timeout: "auth.timeout" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/tracing/hocon/Proxyfile: auth.when_unavailable: "auth.when_unavailable" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/tracing/hocon/Proxyfile: origins.all.origins: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/tracing/hocon/Proxyfile: remove_from_clients: "remove_from_clients" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/tracing/hocon/Proxyfile: remove_from_clients: "remove_from_clients" holding a name with a * prefix is refused by --target nginx: nginx takes each header by name; write each name in full
 examples/tracing/hocon/Proxyfile: tracing: "tracing" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/tracing/hocon/Proxyfile: tracing.path_in_url: "tracing.path_in_url" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/tracing/hocon/Proxyfile: tracing.provider: "tracing.provider" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

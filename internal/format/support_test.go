@@ -163,9 +163,10 @@ func TestRefusals(t *testing.T) {
 		zoneWords       = "nginx reads no zone in a backend's address; give the service an address without one"
 		pathWords       = "holding %, a character Envoy escapes before it picks a route (\" < > ^ ` { | }) or one outside ASCII is refused by --target nginx: nginx matches a path holding a character Envoy escapes as it decodes it, where Envoy matches the escape, so a prefix or a path with % or such a character would take other requests on nginx than on Envoy; write it without them, as a pattern, or render it for envoy"
 		rewriteWords    = "holding a character nginx escapes again is refused by --target nginx: nginx escapes the new path before it sends it, so the service would receive that character escaped, where the Envoy output sends it as written; write the rewrite without it, or render it for envoy"
+		dollarWords     = "nginx reads a $ in a certificate's or a key's path as the start of a variable, and a path written to keep the $ is read at each handshake, which nginx -t does not check; put the file at a path without $, or render it for envoy"
 		hostDotWords    = "holding a host that starts or ends with . is refused by --target nginx: nginx reads a dot at a host's start as every name under it and drops one at its end; write the host without it, or render it for envoy"
 	)
-	cases := []struct {
+	type refusalCase struct {
 		name   string
 		spec   Field
 		target Target
@@ -175,7 +176,8 @@ func TestRefusals(t *testing.T) {
 		// document is the proxyfile.
 		beside string
 		want   []string
-	}{
+	}
+	cases := []refusalCase{
 		{name: "nothing refused is written", spec: Proxyfile, target: lean, document: m.String(), want: nil},
 		{name: "a refused key", spec: Proxyfile, target: lean, document: m.Inserted(7, "timeouts: {idle: 30s}"),
 			want: []string{`g.yaml:7:12: "timeouts.idle" is refused by --target lean: lean has no idle timeout`}},
@@ -222,6 +224,16 @@ func TestRefusals(t *testing.T) {
 		{name: "a whole-request limit", spec: Proxyfile, target: nginxTarget, document: m.Inserted(7, "timeouts: {request: 30s}"),
 			want: []string{`g.yaml:7:12: "timeouts.request" a time is refused by --target nginx: nginx has no limit on a whole request (its time limits count the time between two reads or writes); write timeouts.request: none, or render it for envoy`}},
 		{name: "no whole-request limit", spec: Proxyfile, target: nginxTarget, document: m.Inserted(7, "timeouts: {request: none}"), want: nil},
+		// nginx reads a $ in a certificate's or a key's path as the start of a variable, and a CA's path as written
+		// (measured on nginx 1.30.6 and 1.31.8).
+		{name: "a $ in the certificate's path", spec: Proxyfile, target: nginxTarget,
+			document: m.Inserted(7, `tls: {certificate: "/etc/a$b/cert.pem", key: /etc/tls/key.pem}`),
+			want:     []string{`g.yaml:7:7: "tls.certificate" holding $ is refused by --target nginx: ` + dollarWords}},
+		{name: "a $ in the key's path", spec: Proxyfile, target: nginxTarget,
+			document: m.Inserted(7, `tls: {certificate: /etc/tls/cert.pem, key: "/etc/a$b/key.pem"}`),
+			want:     []string{`g.yaml:7:39: "tls.key" holding $ is refused by --target nginx: ` + dollarWords}},
+		{name: "a $ in the clients CA's path", spec: Proxyfile, target: nginxTarget,
+			document: m.Inserted(7, `tls: {certificate: /etc/tls/cert.pem, key: /etc/tls/key.pem, clients: {ca: "/etc/a$b/ca.pem"}}`), want: nil},
 		{name: "an address by name", spec: Proxyfile, target: nginxTarget, document: m.Replaced(3, 3, "  app: {http: 3000, address: catalog.internal}"),
 			want: []string{`g.yaml:3:21: "services.<service name>.address" a DNS name is refused by --target nginx: not written by this version's nginx generator; render it for envoy`}},
 		{name: "an address by IP", spec: Proxyfile, target: nginxTarget, document: m.Replaced(3, 3, "  app: {http: 3000, address: 10.0.2.21}"), want: nil},
@@ -269,6 +281,11 @@ func TestRefusals(t *testing.T) {
 			document: `{"environments": [{"name": "all", "hosts": [".example.com"]}]}`,
 			want:     []string{`g.yaml:1:35: "origins.<environment name>.hosts" ` + hostDotWords}},
 		{name: "a host with dots inside", spec: Proxyfile, target: nginxTarget, document: m.Replaced(4, 4, "origins: {all: {hosts: [api.example.com]}}"), want: nil},
+		{name: "a name with a * prefix", spec: Proxyfile, target: nginxTarget, document: m.Inserted(7, "remove_from_clients: [x-user-*]"),
+			want: []string{`g.yaml:7:1: "remove_from_clients" holding a name with a * prefix is refused by --target nginx: nginx takes each header by name; write each name in full`}},
+		// Neither refusal fires on a name that only holds one of the framing names inside it.
+		{name: "names in full that nginx does not frame the request by", spec: Proxyfile, target: nginxTarget,
+			document: m.Inserted(7, "remove_from_clients: [x-client-id, x-host]"), want: nil},
 		{name: "health", spec: Proxyfile, target: nginxTarget, document: m.Replaced(3, 3, "  app: {http: 3000, health: {path: /health}}"),
 			want: []string{`g.yaml:3:21: "services.<service name>.health" ` + healthWords, `g.yaml:3:30: "services.<service name>.health.path" ` + healthWords}},
 		// auth.jwt as examples/jwt writes it: a line for each key under it, and the not-written line of auth itself.
@@ -296,6 +313,13 @@ func TestRefusals(t *testing.T) {
 		{name: "HAProxy: a whole-request time", spec: Proxyfile, target: haproxyTarget, document: m.Inserted(7, "timeouts: {request: 30s}"),
 			want: []string{`g.yaml:7:12: "timeouts.request" a time is refused by --target haproxy: HAProxy has no limit on a whole request (timeout server is the time without data, timeouts.idle); write timeouts.request: none`}},
 		{name: "HAProxy: no whole-request limit", spec: Proxyfile, target: haproxyTarget, document: m.Inserted(7, "timeouts: {request: none}"), want: nil},
+	}
+	// A name nginx frames or routes the request by, one row each. A name in capitals never reaches the declaration: the
+	// format refuses it first, as remove_from_clients takes lower-case names.
+	for _, name := range []string{"host", "content-length", "transfer-encoding", "connection", "upgrade", "te", "keep-alive", "http2-settings"} {
+		cases = append(cases, refusalCase{name: "a name nginx frames the request by: " + name, spec: Proxyfile, target: nginxTarget,
+			document: m.Inserted(7, "remove_from_clients: ["+name+"]"),
+			want:     []string{`g.yaml:7:1: "remove_from_clients" holding host, content-length, transfer-encoding, connection, upgrade, te, keep-alive or http2-settings is refused by --target nginx: nginx reads these headers itself to frame and route the request; remove the name from remove_from_clients`}})
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -330,7 +354,7 @@ func TestLessStrictWarning(t *testing.T) {
 	for _, c := range []struct{ target, want string }{
 		{"envoy", ""},
 		{"nginx", `this nginx configuration is less strict than the Envoy output in 5 ways; docs/nginx.md lists them under "Where nginx is less strict than the Envoy output"`},
-		{"haproxy", `this HAProxy configuration is less strict than the Envoy output in 9 ways; docs/haproxy.md lists them under "Where HAProxy is less strict than the Envoy output"`},
+		{"haproxy", `this HAProxy configuration is less strict than the Envoy output in 10 ways; docs/haproxy.md lists them under "Where HAProxy is less strict than the Envoy output"`},
 	} {
 		target, _ := TargetNamed(c.target)
 		if got := LessStrictWarning(target); got != c.want {
@@ -366,11 +390,12 @@ func TestLessStrictWays(t *testing.T) {
 			{line, "Content-Length beside Transfer-Encoding: chunked is served"},
 			{line, "over HTTP/2, two host fields and no :authority are served"},
 			{line, "a WebSocket upgrade a service answers without switching passes the service's body"},
+			{line, "a header or trailer value holding a control byte is served"},
 			{"timeouts.request", "without timeouts.request, an answer that keeps arriving runs past 15 s"},
 		}},
 		{"nginx", []way{
-			{line, "a request trailer whose name is outside the token characters is served over HTTP/1.1"},
-			{line, "a Connection token and nine elements of white space are served"},
+			{line, "a request trailer whose name is outside the token characters or whose value holds a control byte is served over HTTP/1.1"},
+			{line, "a header line with no colon reaches the service as a header with an empty value"},
 			{line, "a request with no body reaches the service without content-length: 0"},
 			{line, "a WebSocket upgrade a service answers without switching passes the service's body"},
 			{"timeouts.request", "without timeouts.request, an answer that keeps arriving runs past 15 s"},
@@ -470,7 +495,7 @@ func TestHAProxyWrites(t *testing.T) {
 		{key: "a dot segment with a ; parameter answered 400", level: Partial,
 			note: "a dot segment whose ; parameter is written with dots, such as /a/..;/b, is answered 400, where Envoy 1.40 drops the parameter and resolves the segment"},
 		{key: "the request line and header names read before a route is picked", level: Partial,
-			note: "over HTTP/1.1 an absolute target is answered 400, where Envoy routes it by its host and sends the path alone with that host as Host, or answers 404 when no environment has the host, and OPTIONS * and CONNECT are answered 400, where Envoy answers 404; HTTP/0.9 is answered 400, where Envoy answers 426; a Connection token other than close, keep-alive, upgrade, HTTP2-Settings and te is answered 400, where Envoy removes the header the token names and serves the request; ten Connection elements or more, an empty one counted but for an empty last one, are answered 400, where Envoy counts no empty element and serves a token with ten; an h2c upgrade is answered 400, where Envoy serves it as a plain request; a header line folded onto the next, and a header value that holds three spaces or tabs in a row, are answered 400, where Envoy serves them; a WebSocket upgrade with no Sec-WebSocket-Key is answered 400, where Envoy passes it on, or answers 403 to an origin it does not admit; more than 100 header lines are answered 431 or, from 102, 400, where Envoy answers 431, and 101 lines or more of a header Envoy joins into one line are answered 400, where Envoy serves them; two Host lines of different hosts, and a Host that holds a comma, are answered 400, where Envoy answers 404; Transfer-Encoding: chunked on two lines is answered 400, and Transfer-Encoding: gzip, chunked 422, where Envoy answers 501; a header of 20000 bytes is answered 431 and a path of 20000 bytes 414, where Envoy, under its default limit of 60 KiB, serves both; over HTTP/2 a request with 97 header fields or more is answered 400, where Envoy resets its stream, and so is one with fewer whose cookies, counted one a field, reach 97, and one with 97 fields or more of a header Envoy joins, which Envoy serves, is answered 400 or, with 120, its stream reset; a WebSocket, an extended CONNECT, is answered 400, where Envoy closes the connection; a path whose escaped form outgrows HAProxy's buffer, such as one of 7000 bytes above 0x7F, is answered 400 by HAProxy 3.4.7 and 500 by 3.2.26, where Envoy serves it; a header or trailer name outside RFC 9110's token characters resets the stream, where Envoy closes the connection; a # in :path resets the stream, where Envoy answers 400; and a request with neither :authority nor host is answered 404, where Envoy closes the connection; over HTTP/1.1 a request trailer whose name is outside those characters ends the connection with no answer when the body comes after the headers, where Envoy answers 400"},
+			note: "over HTTP/1.1 an absolute target is answered 400, where Envoy routes it by its host and sends the path alone with that host as Host, or answers 404 when no environment has the host, and OPTIONS * and CONNECT are answered 400, where Envoy answers 404; a request line with no version, HTTP/0.9's form, is answered 400, where Envoy answers 426; a Connection token other than close, keep-alive, upgrade, HTTP2-Settings and te is answered 400, where Envoy removes the header the token names and serves the request; ten Connection elements or more, an empty one counted but for an empty last one, are answered 400, where Envoy counts no empty element and serves a token with ten; an h2c upgrade is answered 400, where Envoy serves it as a plain request; a header line folded onto the next, and a header value that holds three spaces or tabs in a row, are answered 400, where Envoy serves them; a WebSocket upgrade with no Sec-WebSocket-Key is answered 400, where Envoy passes it on, or answers 403 to an origin it does not admit; more than 100 header lines are answered 431 or, from 102, 400, where Envoy answers 431, and 101 lines or more of a header Envoy joins into one line are answered 400, where Envoy serves them; two Host lines of different hosts, and a Host that holds a comma, are answered 400, where Envoy answers 404; Transfer-Encoding: chunked on two lines is answered 400, and Transfer-Encoding: gzip, chunked 422, where Envoy answers 501; a header of 20000 bytes is answered 431 and a path of 20000 bytes 414, where Envoy, under its default limit of 60 KiB, serves both; over HTTP/2 a request with 97 header fields or more is answered 400, where Envoy resets its stream, and so is one with fewer whose cookies, counted one a field, reach 97, and one with 97 fields or more of a header Envoy joins, which Envoy serves, is answered 400 or, with 120, its stream reset; a WebSocket, an extended CONNECT, is answered 400, where Envoy closes the connection; a path whose escaped form outgrows HAProxy's buffer, such as one of 7000 bytes above 0x7F, is answered 400 by HAProxy 3.4.7 and 500 by 3.2.26, where Envoy serves it; a header or trailer name outside RFC 9110's token characters resets the stream, where Envoy closes the connection; a # in :path resets the stream, where Envoy answers 400; and a request with neither :authority nor host is answered 404, where Envoy closes the connection; over HTTP/1.1 a request trailer whose name is outside those characters ends the connection with no answer when the body comes after the headers, where Envoy answers 400"},
 	}
 	wantRefused := map[string][]string{
 		"not written by this version's HAProxy generator; render it for envoy": {
