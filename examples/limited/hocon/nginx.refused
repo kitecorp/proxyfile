@@ -1,4 +1,3 @@
-examples/limited/hocon/Proxyfile: origins.all.origins: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/limited/hocon/Proxyfile: routes[0].rpc.rate_limit: "routes[].rpc.rate_limit" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/limited/hocon/Proxyfile: routes[0].rpc.rate_limit.by: "routes[].rpc.rate_limit.by" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/limited/hocon/Proxyfile: routes[0].rpc.rate_limit.per: "routes[].rpc.rate_limit.per" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

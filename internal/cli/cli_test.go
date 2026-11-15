@@ -58,7 +58,7 @@ func TestRun(t *testing.T) {
 		// print nothing.
 		{name: "render for haproxy counts the ways it is less strict", setup: copyMinimal,
 			args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/haproxy.cfg --target haproxy",
-			stderr: "proxyfile render: this HAProxy configuration is less strict than the Envoy output in 9 ways; " +
+			stderr: "proxyfile render: this HAProxy configuration is less strict than the Envoy output in 10 ways; " +
 				"docs/haproxy.md lists them under \"Where HAProxy is less strict than the Envoy output\"\n"},
 		{name: "render for nginx counts the ways it is less strict", setup: func(t *testing.T, tmp string) { copyExample(t, tmp, "grpc") },
 			args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/nginx.conf --target nginx",
@@ -624,6 +624,18 @@ func TestLongValuesForNginx(t *testing.T) {
 			`<tmp>/p.yaml:5:3: "origins.<environment name>.hosts"` + words},
 		{"a host_header", "p.yaml", yaml("app: {http: 3000, host_header: "+host+"}", local, "{name: app, to: app, prefix: /}"),
 			`<tmp>/p.yaml:3:3: "services.<service name>.host_header"` + words},
+		// A cors value is refused at its own key, in block style too, where the cors mapping starts on another key's
+		// line; the exposed headers are written only for an environment with a list.
+		{"a cors value", "p.yaml", yaml(app, "local: {hosts: [localhost], origins: [\"https://www.example.com\"]}",
+			"{name: app, to: app, prefix: /}") + "cors: {expose_headers: " + strings.Repeat("a", 5000) + "}\n",
+			`<tmp>/p.yaml:8:8: "cors.expose_headers"` + words},
+		{"a cors value in block style", "p.yaml", yaml(app, "local: {hosts: [localhost], origins: [\"https://www.example.com\"]}",
+			"{name: app, to: app, prefix: /}") + "cors:\n  allow_methods: GET\n  expose_headers: " + strings.Repeat("a", 5000) + "\n",
+			`<tmp>/p.yaml:10:3: "cors.expose_headers"` + words},
+		// A tls path is refused at the tls key, the position the generator has for its paths.
+		{"a tls path", "p.yaml", yaml(app, local, "{name: app, to: app, prefix: /}") +
+			"tls: {certificate: /" + strings.Repeat("a", 5000) + ", key: /k.pem}\n",
+			`<tmp>/p.yaml:8:1: "tls.certificate"` + words},
 		{"a service's name", "Proxyfile",
 			"listen = 8000\nservices { " + name + " { http = 3000 } }\norigins { local { hosts = [localhost] } }\n" +
 				"routes = [ { name = app, prefix = \"/\", to = " + name + " } ]\n",

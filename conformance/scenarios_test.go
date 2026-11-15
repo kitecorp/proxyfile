@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"math/rand/v2"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -45,7 +46,16 @@ func rpc(path string) request {
 // Connection is served. An absolute target with an empty port is answered 400 by both. A request trailer reaches the
 // service through neither; nginx reads none, so it lets one whose name is outside the token characters through over
 // HTTP/1.1 and ends the connection on any over HTTP/2, and it answers 400 to a folded header line and to a Host whose
-// port it does not read, where Envoy serves both (lineRow).
+// port it does not read, where Envoy serves both (lineRow). A header line with no colon, which Envoy answers 400,
+// reaches the service through nginx as a header with an empty value, which nginx stores as it stores one written with a
+// colon (lineRow). nginx answers 400 to a header it reads written with _ for -, but not to x_forwarded_for, which it
+// does not read, nor to a name every JavaScript object holds, such as constructor or __proto__, which proxyfile.js must
+// not find in its tables; and to a second line of X-Forwarded-For, of a header of one value such as Content-Type,
+// User-Agent or Referer, or of a header such as If-Match, which Envoy joins into one line with a comma and serves; a
+// second Accept line, which Envoy joins too, reaches the service through nginx as a line of its own (lineRow). Each
+// of 32 requests that carry no x-request-id, sent one after the other, gets one the proxy makes, a version 4 UUID, as
+// Envoy makes it, which the answer carries too. A request line whose version is not one digit, a dot and one digit,
+// such as HTTP/1.10 or HTTP/1.01, is answered 400, where nginx alone would serve it as HTTP/1.1.
 var routing = scenario{name: "routing",
 	exchanges: []exchange{
 		{name: "a pattern route", keys: []string{"routes[].pattern", "routes[].to", "services.<service name>.http",
@@ -96,7 +106,8 @@ var routing = scenario{name: "routing",
 		{name: "the scheme the request came in on", send: get("/products/1"), want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "http"}},
 			on: map[string]literal{"full": {want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}},
 				"portable":     {want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}},
-				"haproxy-file": {want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}}}},
+				"haproxy-file": {want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}},
+				"nginx-file":   {want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}}}},
 		{name: "a client's own x-forwarded-proto is replaced by the connection's", keys: []string{"client_address", "tls.certificate"},
 			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", headers: map[string]string{"x-forwarded-proto": "http"}},
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}},
@@ -112,7 +123,39 @@ var routing = scenario{name: "routing",
 			want: answer{status: 200, service: "shop", absent: slices.Sorted(maps.Keys(facedHeaders()))}},
 		{name: "two X-Forwarded-For lines of the client's and the peer's address reach the service as one line", keys: []string{"client_address"},
 			send: rawHeaders(map[string]string{"x-forwarded-for": "198.51.100.7\r\nx-forwarded-for: 198.51.100.8"}),
-			want: answer{status: 200, service: "shop", oneLine: []string{"x-forwarded-for"}}},
+			want: answer{status: 200, service: "shop", oneLine: []string{"x-forwarded-for"}},
+			by:   map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
+		{name: "a header nginx reads, written with underscores", send: rawHeaders(map[string]string{"x_forwarded_proto": "https"}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x_forwarded_proto": "https"}},
+			by:   map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
+		{name: "a header named constructor reaches the service", send: rawHeaders(map[string]string{"constructor": "x"}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"constructor": "x"}}},
+		{name: "a header named __proto__ reaches the service", send: rawHeaders(map[string]string{"__proto__": "x"}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"__proto__": "x"}}},
+		{name: "a header named constructor reaches the service over HTTP/2", send: request{proto: "h2", method: "GET",
+			host: "localhost", path: "/products/1", headers: map[string]string{"constructor": "x"}, raw: true},
+			want: answer{status: 200, service: "shop", received: map[string]string{"constructor": "x"}}},
+		{name: "x_forwarded_for, which nginx does not read as its X-Forwarded-For, reaches the service",
+			send: rawHeaders(map[string]string{"x_forwarded_for": "192.0.2.1"}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x_forwarded_for": "192.0.2.1"}}},
+		{name: "a request with no x-request-id gets a version 4 UUID, which the answer carries", send: get("/products/1"),
+			repeat: 32, every: true, want: answer{status: 200, service: "shop", forms: map[string]*regexp.Regexp{"x-request-id": uuid4}}},
+		{name: "two Accept lines", send: rawHeaders(map[string]string{"accept": "a=1\r\naccept: b=2"}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"accept": "a=1,b=2"}},
+			by: map[string]own{"nginx": {difference: lineRow,
+				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"accept": "a=1\nb=2"}}}}}},
+		{name: "two Content-Type lines", send: rawHeaders(map[string]string{"content-type": "a=1\r\ncontent-type: b=2"}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"content-type": "a=1,b=2"}},
+			by:   map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
+		{name: "two User-Agent lines", send: rawHeaders(map[string]string{"user-agent": "a=1\r\nuser-agent: b=2"}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"user-agent": "a=1,b=2"}},
+			by:   map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
+		{name: "two Referer lines", send: rawHeaders(map[string]string{"referer": "a=1\r\nreferer: b=2"}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"referer": "a=1,b=2"}},
+			by:   map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
+		{name: "two If-Match lines", send: rawHeaders(map[string]string{"if-match": "\"a\"\r\nif-match: \"b\""}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"if-match": `"a","b"`}},
+			by:   map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
 		{name: "a service that refuses connections is answered 502", send: get("/catalog/items"), refusing: "catalog", want: answer{status: 502}},
 		{name: "a service's X-Accel-Redirect is passed on, not followed", send: request{proto: "http/1.1", method: "GET", host: "localhost",
 			path: "/catalog/items", headers: map[string]string{"x-stub-accel-redirect": "/products/1"}},
@@ -142,9 +185,12 @@ var routing = scenario{name: "routing",
 			send: get("/backtrack/" + strings.Repeat("a", 40) + "b"), want: answer{status: 200, service: "shop"},
 			on: map[string]literal{"nginx-file": {want: answer{status: 200, service: "accounts"}},
 				"haproxy-file": {want: answer{status: 200, service: "accounts"}}}},
+		// nginx's answer comes within 50 ms, about ten times Envoy's slowest answer to a long path or a long Origin
+		// (5.8 ms): under the match limit the generator writes, 1.6 to 3.6 ms; under PCRE2's own, 112 to 227 ms (nginx
+		// 1.30.6 and 1.31.8 on an arm64 Mac), a worker serving no other request meanwhile.
 		{name: "a path PCRE2 gives up on is refused", keys: []string{"routes[].pattern"}, send: get("/give-up/" + strings.Repeat("a", 40) + "b"),
 			want: answer{status: 200, service: "shop"},
-			by:   map[string]own{"nginx": {difference: "routes[].pattern", literal: literal{want: answer{status: 400}}}}},
+			by:   map[string]own{"nginx": {difference: "routes[].pattern", literal: literal{want: answer{status: 400, below: 50 * time.Millisecond}}}}},
 		{name: "a header name of token characters, sent by hand", send: rawHeader("http/1.1", "x-ok"),
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-ok": "1"}}},
 		{name: "a header name holding @ is answered 400", send: rawHeader("http/1.1", "x@at"), want: answer{status: 400}},
@@ -187,13 +233,42 @@ var routing = scenario{name: "routing",
 		{name: "an absolute target with an empty port", send: rawLine("GET http://localhost:/products/1 HTTP/1.1", "localhost"),
 			want: answer{status: 400}},
 		// nginx serves a request Envoy refuses here, and the service receives the body and no trailer either way: nginx
-		// reads no trailer, so it can refuse none (lineRow).
+		// reads no trailer, so it can refuse none (lineRow). HAProxy serves a trailer value holding a control byte too,
+		// over HTTP/1.1 and HTTP/2 (its less strict way, lineRow); over HTTP/2 nginx ends the connection on any trailer.
 		{name: "a trailer whose name holds @", send: chunked("http/1.1", "x@at"), want: answer{status: 400},
 			by: map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 200, service: "shop", body: "abc", noTrailers: true}}}}},
+		{name: "a trailer value holding a control character", send: request{proto: "http/1.1", method: "POST", host: "localhost",
+			path: "/products/1", raw: true, body: "abc", trailers: map[string]string{"x-t": "b\x01c"}}, want: answer{status: 400},
+			by: map[string]own{
+				"nginx":   {difference: lineRow, literal: literal{want: answer{status: 200, service: "shop", body: "abc", noTrailers: true}}},
+				"haproxy": {difference: lineRow, literal: literal{want: answer{status: 200, service: "shop", body: "abc", noTrailers: true}}}}},
+		{name: "a trailer value holding a control character over HTTP/2", send: request{proto: "h2", method: "POST", host: "localhost",
+			path: "/products/1", raw: true, body: "abc", trailers: map[string]string{"x-t": "b\x01c"}}, want: answer{refused: true},
+			by: map[string]own{
+				"haproxy": {difference: lineRow, literal: literal{want: answer{status: 200, service: "shop", body: "abc", noTrailers: true}}}}},
 		{name: "a trailer reaches the service through no proxy", send: chunked("http/1.1", "x-t"),
 			want: answer{status: 200, service: "shop", body: "abc", noTrailers: true}},
 		{name: "a trailer over HTTP 2", send: chunked("h2", "x-t"), want: answer{status: 200, service: "shop", body: "abc", noTrailers: true},
 			by: map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{refused: true}}}}},
+		// A header value holding a control byte other than a tab is answered 400 over HTTP/1.1 and refused over HTTP/2,
+		// where Envoy closes the connection and nginx answers 400; HAProxy passes it on as sent and the stub's own HTTP
+		// server answers 400 (HAProxy's less strict way, lineRow). A tab and UTF-8 reach the service through every proxy;
+		// the passing rows hold no byte 0x80 to 0xFF outside UTF-8, which the stub reads back as U+FFFD.
+		{name: "a header value holding a control character is answered 400", send: rawHeaders(map[string]string{"x-a": "b\x01c"}),
+			want: answer{status: 400},
+			by:   map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 400, unreadable: true}}}}},
+		{name: "a header value holding a control character is refused over HTTP/2", send: request{proto: "h2", method: "GET",
+			host: "localhost", path: "/products/1", headers: map[string]string{"x-a": "b\x7fc"}, raw: true},
+			want: answer{refused: true},
+			by:   map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 400, unreadable: true}}}}},
+		{name: "a header value holding a tab and UTF-8 reaches the service", send: rawHeaders(map[string]string{"x-a": "b\tc\u00e9d"}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-a": "b\tc\u00e9d"}}},
+		{name: "a header value holding a tab and UTF-8 reaches the service over HTTP/2", send: request{proto: "h2", method: "GET",
+			host: "localhost", path: "/products/1", headers: map[string]string{"x-a": "b\tc\u00e9d"}, raw: true},
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-a": "b\tc\u00e9d"}}},
+		{name: "a header line with no colon", send: rawHeaders(map[string]string{"x-a": "1\r\nnocolon"}), want: answer{status: 400},
+			by: map[string]own{"nginx": {difference: lineRow,
+				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-a": "1"}, oneLine: []string{"nocolon"}}}}}},
 		{name: "a header line folded with a space", send: rawHeaders(map[string]string{"x-a": "1\r\n x@at: 2"}),
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-a": "1 x@at: 2"}},
 			by: map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 400}}},
@@ -230,6 +305,22 @@ var routing = scenario{name: "routing",
 		// Over HTTP/2 Envoy counts the 4 pseudo-headers of a request among its 100.
 		{name: "96 header fields over HTTP 2 reach the service", send: rawFields(numbered(96)), want: answer{status: 200, service: "shop"}},
 		{name: "HTTP/1.0 is answered 426", send: rawLine("GET /products/1 HTTP/1.0", "localhost"), want: answer{status: 426}},
+		// Envoy answers 426 to HTTP/1.2 to HTTP/1.9 as to HTTP/1.0, and so do nginx and HAProxy.
+		{name: "HTTP/1.2 is answered 426", send: rawLine("GET /products/1 HTTP/1.2", "localhost"), want: answer{status: 426}},
+		{name: "HTTP/1.9 is answered 426", send: rawLine("GET /products/1 HTTP/1.9", "localhost"), want: answer{status: 426}},
+		// Envoy answers 426 to every HTTP/1 version but 1.1, HTTP/0.9 with headers and HTTP/2.0 sent on an HTTP/1
+		// connection among them, where nginx answers the first 400 and the second 505 (lineRow). A request line with no
+		// version, HTTP/0.9's own form, is answered 426 by Envoy and 400 by HAProxy, and nginx closes the connection
+		// with no answer (lineRow).
+		{name: "HTTP/0.9 with headers is answered 426", send: rawLine("GET /products/1 HTTP/0.9", "localhost"), want: answer{status: 426},
+			by: map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
+		{name: "HTTP/2.0 on an HTTP/1 connection is answered 426", send: rawLine("GET /products/1 HTTP/2.0", "localhost"),
+			want: answer{status: 426}, by: map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 505}}}}},
+		{name: "a request line with no version is answered 426", send: rawLine("GET /products/1", "localhost"), want: answer{status: 426},
+			by: map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{refused: true}}},
+				"haproxy": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
+		{name: "HTTP/1.10 is answered 400", send: rawLine("GET /products/1 HTTP/1.10", "localhost"), want: answer{status: 400}},
+		{name: "HTTP/1.01 is answered 400", send: rawLine("GET /products/1 HTTP/1.01", "localhost"), want: answer{status: 400}},
 		{name: "a method in lower case is answered 400", send: rawLine("get /products/1 HTTP/1.1", "localhost"), want: answer{status: 400}},
 		// Envoy removes the header a Connection token names; nginx and HAProxy refuse the request (lineRow).
 		{name: "a header a Connection token names does not reach the service", send: request{proto: "http/1.1", method: "GET",
@@ -246,10 +337,10 @@ var routing = scenario{name: "routing",
 			host: "localhost", path: "/products/1", headers: map[string]string{"http2-settings": "AAMAAABkAAQAAP__"}},
 			want: answer{status: 200, service: "shop", received: map[string]string{"http2-settings": "AAMAAABkAAQAAP__"}}},
 		// Envoy 1.40.2 answers ten Connection tokens or more 400 and serves nine, counting an element of white space
-		// but not an empty one; nginx serves ten elements of white space (lineRow). HAProxy counts an empty element
-		// but the last, so it refuses a token and ten empty elements, and does not count close or keep-alive, which
-		// it removes before any rule reads the header, so it serves ten of them (lineRow; measured on Envoy 1.40.2,
-		// nginx 1.30 and 1.31, and HAProxy 3.2.26 and 3.4.7).
+		// but not an empty one, and so does nginx. HAProxy counts an empty element but the last, so it refuses a token
+		// and ten empty elements, and does not count close or keep-alive, which it removes before any rule reads the
+		// header, so it serves ten of them (lineRow; measured on Envoy 1.40.2, nginx 1.30 and 1.31, and HAProxy 3.2.26
+		// and 3.4.7).
 		{name: "ten Connection tokens are answered 400", send: request{proto: "http/1.1", method: "GET", host: "localhost",
 			path: "/products/1", headers: map[string]string{"connection": "te, te, te, te, te, te, te, te, te, te", "te": "trailers"}},
 			want: answer{status: 400}},
@@ -263,8 +354,7 @@ var routing = scenario{name: "routing",
 		{name: "a Connection token and nine elements of white space are answered 400", send: request{proto: "http/1.1",
 			method: "GET", host: "localhost", path: "/products/1",
 			headers: map[string]string{"connection": "te, , , , , , , , , ,", "te": "trailers"}},
-			want: answer{status: 400},
-			by:   map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 200, service: "shop"}}}}},
+			want: answer{status: 400}},
 		{name: "ten Connection tokens close are answered 400", send: request{proto: "http/1.1", method: "GET", host: "localhost",
 			path: "/products/1", headers: map[string]string{"connection": "close, close, close, close, close, close, close, close, close, close"}},
 			want: answer{status: 400},
@@ -348,6 +438,9 @@ var routing = scenario{name: "routing",
 			want: answer{status: 502}},
 	}}
 
+// uuid4 is a version 4 UUID in lower case, the form of the request id Envoy makes (measured on Envoy 1.40.2).
+var uuid4 = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
 // numbered is n headers named x-h001 onwards, each with the value 1.
 func numbered(n int) map[string]string {
 	headers := map[string]string{}
@@ -380,6 +473,14 @@ func rawLine(line, host string) request {
 // break, which net/http refuses to send.
 func rawHeaders(headers map[string]string) request {
 	return request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", headers: headers, raw: true}
+}
+
+// fromListed is a GET of /products/1 to api.example.com over HTTP/1.1 sent by hand from https://www.example.com, an
+// origin of the live environment's list, with the given headers beside its Origin.
+func fromListed(headers map[string]string) request {
+	all := map[string]string{"origin": "https://www.example.com"}
+	maps.Copy(all, headers)
+	return request{proto: "http/1.1", method: "GET", host: "api.example.com", path: "/products/1", headers: all, raw: true}
 }
 
 // chunked is a POST to localhost over proto sent by hand with the body abc and one trailer of the given name.
@@ -432,6 +533,19 @@ var mutualTLS = scenario{name: "mutual TLS",
 		// other CA carries the clients CA's name, so a proxy that matched the issuer by name would let it through.
 		{name: "a client certificate another CA signed", keys: tlsKeys, send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", otherCA: true},
 			want: answer{refused: true}},
+		// measured on Envoy 1.40.2: the handshake fails. nginx completes the handshake and answers 400, which reaches no
+		// service either (tls.clients.ca).
+		{name: "an expired client certificate", keys: tlsKeys, send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", expired: true},
+			want: answer{refused: true}},
+		// A client asks for the host it sends as the TLS server name, and one that reuses its connection for another
+		// host the server's certificate names sends that host with the first one's name. nginx, asking for client
+		// certificates, answers a Host other than the TLS server name 421 when that name is a host of an environment
+		// (tls.clients.ca), where Envoy serves it.
+		{name: "a TLS server name and a Host of one environment", keys: slices.Concat(serverKeys, hostKeys),
+			send: request{proto: "http/1.1", method: "GET", host: "api.example.org", path: "/products/1", serverName: "api.example.com"},
+			want: answer{status: 200, service: "shop", host: "api.example.org"},
+			by: map[string]own{"nginx": {difference: "tls.clients.ca", files: []string{"nginx-file"},
+				literal: literal{want: answer{status: 421}}}}},
 		// measured on Envoy 1.40.2, which takes TLS 1.2 and 1.3 only, of TLS 1.2 the ECDHE suites with AES-GCM or
 		// ChaCha20 only, and the groups X25519, P-256 and X25519MLKEM768 only.
 		{name: "a client that offers only TLS 1.1 is refused", keys: serverKeys, send: offered(tlsOffer{version: tls.VersionTLS11}),
@@ -454,25 +568,34 @@ func offered(offer tlsOffer) request {
 }
 
 // cors: every value measured on Envoy 1.40.2. An origin on one of the environment's own hosts is admitted whether or
-// not a list holds it, and only a list gives it access-control-allow-origin: https://api.example.org, the request's
-// own host and port, is in neither list of the live environment, whose patterns cover api.example.com but not
+// not a list holds it, and only a list gives it access-control-allow-origin: https://api.example.org, the request's own
+// host and port, is in neither list of the live environment, whose patterns cover api.example.com but not
 // api.example.org. Envoy also answers, and no row asserts: access-control-allow-methods with the method asked for and
 // access-control-allow-headers with the headers asked for, or empty, because both keys are "*";
-// access-control-expose-headers on the preflights from a listed origin too; vary: Origin on every answer; and the
-// body Invalid CORS request with content-type text/plain on both 403s. The preflight from a listed origin and the request from
-// another origin carry a token the check denies and one the token filter refuses, each answered 401 alone on the same
-// host and path: on a file that writes the check, their 200 and 403 show that the origin is decided before the token
-// and the check. Their answers do not depend on the check, so they run on a file that writes none too, such as
-// HAProxy's, which then runs each key of cors.
+// access-control-expose-headers on the preflights from a listed origin too; vary: Origin on every answer; and the body
+// Invalid CORS request with content-type text/plain on both 403s. The preflight from a listed origin and the request
+// from another origin carry a token the check denies and one the token filter refuses, each answered 401 alone on the
+// same host and path: on a file that writes the check, their 200 and 403 show that the origin is decided before the
+// token and the check. Their answers do not depend on the check, so they run on a file that writes none too, such as
+// HAProxy's, which then runs each key of cors. An Origin with a space after it is read without the space; a request
+// from a listed origin to a service that is down is answered the proxy's own 502 with access-control-allow-origin and
+// access-control-expose-headers, and one to a host no environment names 404 with neither. A request the proxy refuses
+// before it routes, such as one whose method Envoy's parser does not know, carries no CORS answer either, and neither
+// does one nginx refuses while it reads it, a NUL byte in a header, Content-Length beside Transfer-Encoding or a header
+// line over 8 KiB; HAProxy serves the second with the CORS answer (lineRow). nginx joins two
+// Access-Control-Request-Method lines, and two Access-Control-Request-Headers lines, with a comma and a space where
+// Envoy joins them with a comma (cors.allow_methods, cors.allow_headers).
 //
 // The rows on hostKeys need no list: every file refuses a browser origin on none of the environment's hosts, so they
 // run on every file, nginx's included, and send to localhost, a host of every file's local environment. An origin on
 // one of its hosts, 127.0.0.1 or localhost, on either scheme and any port, is admitted; one on another environment's
 // host, in capitals, with a trailing dot, with other characters for a host's dots, or null is refused, and so is a
 // preflight from such an origin and a WebSocket upgrade. A preflight from an admitted origin is answered by the proxy,
-// reaching no service. A present but empty Origin is refused by Envoy; nginx cannot tell it from no Origin and lets it
-// through, which no browser shows, because a browser's Origin is always an origin or null (the Fetch standard, the
-// Origin header). Envoy also answers both 403s with the body Invalid CORS request, which no row asserts.
+// reaching no service. A present but empty Origin is refused, over HTTP/1.1 and HTTP/2. Envoy joins the Origin lines
+// that are not empty, each without the spaces and tabs around it over HTTP/1.1, so an empty line beside the origin of
+// the host, before or after it, and a tab before that origin change nothing, and the service receives the origin as
+// one line (measured on Envoy 1.40.2, nginx 1.30.6 and 1.31.8). Envoy also answers both 403s with the body Invalid
+// CORS request, which no row asserts.
 var cors = scenario{name: "CORS",
 	exchanges: []exchange{
 		{name: "a preflight from a listed origin", keys: []string{"cors.allow_methods", "cors.allow_headers", "cors.max_age",
@@ -519,7 +642,8 @@ var cors = scenario{name: "CORS",
 			method: "GET", host: "api.example.com", path: "/products/1",
 			headers: map[string]string{"origin": "https://evil.example.net\r\norigin: https://www.example.com"}, raw: true},
 			want: answer{status: 200, service: "shop", headers: map[string]string{"access-control-allow-origin": "https://evil.example.net,https://www.example.com"},
-				received: map[string]string{"origin": "https://evil.example.net,https://www.example.com"}}},
+				received: map[string]string{"origin": "https://evil.example.net,https://www.example.com"}},
+			by: map[string]own{"nginx": {difference: "origins.<environment name>.patterns", literal: literal{want: answer{status: 403}}}}},
 		{name: "two Origin lines, a listed one first", keys: []string{"origins.<environment name>.origins", "origins.<environment name>.patterns"},
 			send: request{proto: "http/1.1", method: "GET", host: "api.example.com", path: "/products/1",
 				headers: map[string]string{"origin": "https://www.example.com\r\norigin: https://evil.example.net"}, raw: true},
@@ -540,15 +664,54 @@ var cors = scenario{name: "CORS",
 		{name: "a preflight asking for two methods on two lines", keys: []string{"cors.allow_methods", "origins.<environment name>.origins"},
 			send: request{proto: "http/1.1", method: "OPTIONS", host: "api.example.com", path: "/products/1", raw: true,
 				headers: map[string]string{"origin": "https://www.example.com", "access-control-request-method": "POST\r\naccess-control-request-method: PUT"}},
-			want: answer{status: 200, headers: map[string]string{"access-control-allow-origin": "https://www.example.com", "access-control-allow-methods": "POST,PUT"}}},
+			want: answer{status: 200, headers: map[string]string{"access-control-allow-origin": "https://www.example.com", "access-control-allow-methods": "POST,PUT"}},
+			by: map[string]own{"nginx": {difference: "cors.allow_methods", literal: literal{want: answer{status: 200,
+				headers: map[string]string{"access-control-allow-origin": "https://www.example.com", "access-control-allow-methods": "POST, PUT"}}}}}},
 		{name: "a preflight asking for headers on two lines", keys: []string{"cors.allow_headers", "origins.<environment name>.origins"},
 			send: request{proto: "http/1.1", method: "OPTIONS", host: "api.example.com", path: "/products/1",
 				headers: map[string]string{"origin": "https://www.example.com", "access-control-request-method": "POST",
 					"access-control-request-headers": "x-a\r\naccess-control-request-headers: x-b"}, raw: true},
-			want: answer{status: 200, headers: map[string]string{"access-control-allow-origin": "https://www.example.com", "access-control-allow-headers": "x-a,x-b"}}},
+			want: answer{status: 200, headers: map[string]string{"access-control-allow-origin": "https://www.example.com", "access-control-allow-headers": "x-a,x-b"}},
+			by: map[string]own{"nginx": {difference: "cors.allow_headers", literal: literal{want: answer{status: 200,
+				headers: map[string]string{"access-control-allow-origin": "https://www.example.com", "access-control-allow-headers": "x-a, x-b"}}}}}},
+		{name: "an Origin with a trailing space", keys: []string{"origins.<environment name>.origins"},
+			send: request{proto: "http/1.1", method: "GET", host: "api.example.com", path: "/products/1",
+				headers: map[string]string{"origin": "https://www.example.com "}, raw: true},
+			want: answer{status: 200, service: "shop", headers: map[string]string{"access-control-allow-origin": "https://www.example.com"},
+				received: map[string]string{"origin": "https://www.example.com"}}},
+		{name: "a service that is down, from a listed origin", keys: []string{"cors.expose_headers", "origins.<environment name>.origins"},
+			send: request{proto: "http/1.1", method: "GET", host: "api.example.com", path: "/catalog/items",
+				headers: map[string]string{"origin": "https://www.example.com"}}, refusing: "catalog",
+			want: answer{status: 502, headers: map[string]string{"access-control-allow-origin": "https://www.example.com",
+				"access-control-expose-headers": "Content-Disposition,X-Request-Id"}}},
+		{name: "a request from a listed origin to a host no environment names", keys: []string{"origins.<environment name>.origins"},
+			send: request{proto: "http/1.1", method: "GET", host: "other.example.net", path: "/products/1",
+				headers: map[string]string{"origin": "https://www.example.com"}},
+			want: answer{status: 404, headers: map[string]string{"access-control-allow-origin": ""}}},
 		{name: "a refused path from a listed origin carries no CORS answer", keys: []string{"origins.<environment name>.origins"},
 			send: request{proto: "http/1.1", method: "GET", host: "api.example.com", path: "/a/..%3B/b", headers: map[string]string{"origin": "https://www.example.com"}},
 			want: answer{status: 400, headers: map[string]string{"access-control-allow-origin": ""}}},
+		{name: "a method Envoy's parser does not know, from a listed origin, carries no CORS answer", keys: []string{"origins.<environment name>.origins"},
+			send: request{proto: "http/1.1", method: "FOO", host: "api.example.com", path: "/products/1", headers: map[string]string{"origin": "https://www.example.com"}},
+			want: answer{status: 400, headers: map[string]string{"access-control-allow-origin": ""}}},
+		{name: "a NUL byte in a header from a listed origin carries no CORS answer", keys: []string{"origins.<environment name>.origins"},
+			send: fromListed(map[string]string{"x-nul": "a\x00b"}),
+			want: answer{status: 400, headers: map[string]string{"access-control-allow-origin": ""}}},
+		// HAProxy serves this request chunked, with the CORS answer, its less strict way on Content-Length beside
+		// Transfer-Encoding (lineRow).
+		{name: "Content-Length beside Transfer-Encoding from a listed origin carries no CORS answer",
+			keys: []string{"origins.<environment name>.origins"},
+			send: request{proto: "http/1.1", method: "POST", host: "api.example.com", path: "/products/1", raw: true, unframed: true,
+				headers: map[string]string{"origin": "https://www.example.com", "content-length": "3", "transfer-encoding": "chunked"},
+				body:    "0\r\n\r\n"},
+			want: answer{status: 400, headers: map[string]string{"access-control-allow-origin": ""}},
+			by: map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 200, service: "shop",
+				headers: map[string]string{"access-control-allow-origin": "https://www.example.com"}}}}}},
+		{name: "a header line over 8 KiB from a listed origin", keys: []string{"origins.<environment name>.origins"},
+			send: fromListed(map[string]string{"x-long": strings.Repeat("a", 9000)}),
+			want: answer{status: 200, service: "shop", headers: map[string]string{"access-control-allow-origin": "https://www.example.com"}},
+			by: map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 400,
+				headers: map[string]string{"access-control-allow-origin": ""}}}}}},
 		{name: "a preflight to a refused path from a listed origin carries no CORS answer", keys: []string{"origins.<environment name>.origins"},
 			send: request{proto: "http/1.1", method: "OPTIONS", host: "api.example.com", path: "/a/..%3B/b",
 				headers: map[string]string{"origin": "https://www.example.com", "access-control-request-method": "GET"}},
@@ -581,8 +744,18 @@ var cors = scenario{name: "CORS",
 		{name: "an origin whose host has other characters for its dots", keys: hostKeys, send: fromOrigin("http://127x0x0x1"),
 			want: answer{status: 403}},
 		{name: "the origin null", keys: hostKeys, send: fromOrigin("null"), want: answer{status: 403}},
-		{name: "a present but empty Origin", keys: hostKeys, send: fromOrigin(""), want: answer{status: 403},
-			by: map[string]own{"nginx": {difference: "origins.<environment name>.hosts", literal: literal{want: answer{status: 200, service: "shop"}}}}},
+		{name: "a present but empty Origin", keys: hostKeys, send: fromOrigin(""), want: answer{status: 403}},
+		{name: "a present but empty Origin over HTTP/2", keys: hostKeys, send: request{proto: "h2", method: "GET", host: "localhost",
+			path: "/products/1", headers: map[string]string{"origin": ""}, raw: true}, want: answer{status: 403}},
+		{name: "an empty Origin line, then the origin of the environment's host", keys: hostKeys, send: request{proto: "http/1.1",
+			method: "GET", host: "localhost", path: "/products/1", headers: map[string]string{"origin": "\r\norigin: http://localhost"}, raw: true},
+			want: answer{status: 200, service: "shop", received: map[string]string{"origin": "http://localhost"}}},
+		{name: "the origin of the environment's host, then an empty Origin line", keys: hostKeys, send: request{proto: "http/1.1",
+			method: "GET", host: "localhost", path: "/products/1", headers: map[string]string{"origin": "http://localhost\r\norigin: "}, raw: true},
+			want: answer{status: 200, service: "shop", received: map[string]string{"origin": "http://localhost"}}},
+		{name: "the origin of the environment's host after a tab", keys: hostKeys, send: request{proto: "http/1.1", method: "GET",
+			host: "localhost", path: "/products/1", headers: map[string]string{"origin": "\thttp://localhost"}, raw: true},
+			want: answer{status: 200, service: "shop", received: map[string]string{"origin": "http://localhost"}}},
 		{name: "a WebSocket upgrade from an origin on none of the environment's hosts", keys: hostKeys, send: request{proto: "http/1.1",
 			method: "GET", host: "localhost", path: "/products/1", headers: map[string]string{"origin": "http://foreign.example",
 				"upgrade": "websocket", "connection": "upgrade"}},
@@ -624,8 +797,11 @@ var ownOriginKeys = []string{"origins.<environment name>.hosts", "origins.<envir
 // request with no token it knows, so the first row fails if the check is asked. A client's own x-forwarded-uri and
 // x-forwarded-method reach the service as sent, which the format allows, but never the check. The headers a client may
 // not send are three rows, because a file may write remove_from_clients without the check, and the check without
-// auth.jwt: x-client-id, which remove_from_clients alone removes; the check's x-user-id and question; and x-subject and
-// x-roles, the headers auth.jwt.claims sets from a verified token, which only a file that writes the claims runs.
+// auth.jwt: x-client-id, which remove_from_clients alone removes, sent twice and the second time in capitals; the
+// check's x-user-id and question; and x-subject and x-roles, the headers auth.jwt.claims sets from a verified token,
+// which only a file that writes the claims runs. A client's own x-request-id that remove_from_clients names is read as
+// never sent, so the service receives an id the proxy makes: with client_address = connection a proxy replaces it
+// anyway, and nginx-plain, which keeps forwarded and removes it, shows the removal itself.
 var auth = scenario{name: "auth",
 	exchanges: []exchange{
 		{name: "no authorization header, so the check is not asked", keys: []string{"auth.ask", "auth.only_with_header"}, send: get("/products/1"), want: answer{status: 200, service: "shop"}},
@@ -656,9 +832,14 @@ var auth = scenario{name: "auth",
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-keep": "yes"},
 				absent: []string{"x-user-id", "x-gateway-action"}}},
 		{name: "a header remove_from_clients names a client may not send", keys: []string{"remove_from_clients"},
-			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1",
-				headers: map[string]string{"x-client-id": "forged", "x-keep": "yes"}},
-			want: answer{status: 200, service: "shop", received: map[string]string{"x-keep": "yes"}, absent: []string{"x-client-id"}}},
+			send: rawHeaders(map[string]string{"x-client-id": "forged\r\nX-CLIENT-ID: again", "x-keep": "yes"}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-keep": "yes"}, absent: []string{"x-client-id"}},
+			// nginx-plain removes x-request-id alone.
+			on: map[string]literal{"nginx-plain": {want: answer{status: 200, service: "shop",
+				received: map[string]string{"x-keep": "yes", "x-client-id": "forged\nagain"}}}}},
+		{name: "a client's own x-request-id that remove_from_clients names is replaced", keys: []string{"remove_from_clients"},
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", headers: map[string]string{"x-request-id": "client-id-1"}},
+			want: answer{status: 200, service: "shop", replaced: map[string]string{"x-request-id": "client-id-1"}}},
 		{name: "headers a verified token sets a client may not send", keys: []string{"auth.jwt.claims"},
 			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1",
 				headers: map[string]string{"x-subject": "forged", "x-roles": "forged", "x-keep": "yes"}},
@@ -993,8 +1174,7 @@ var rateLimit = scenario{name: "rate limit",
 
 // The keys of cost's rows: the long path's answer depends on the routes it passes and on the origin it carries, the
 // long Origin's on the patterns that read it, and the flood's on the pattern routes its paths pass and the prefix route
-// that answers them. nginx's files write no origin list, and nginx reads a request line of at most 8 KB, so neither
-// of the first two runs there.
+// that answers them.
 var (
 	longPathKeys   = []string{"routes[].pattern", "routes[].prefix", "origins.<environment name>.patterns"}
 	longOriginKeys = []string{"origins.<environment name>.patterns"}
@@ -1023,21 +1203,43 @@ func floodPath(i int) string {
 // and 3.4.7 by about 510 MB before the patterns of a thread shared one budget of states, by about 215 MB with a budget
 // of about 8 MB a thread, and by about 60 MB with proxyfile.lua's, of about 1 MB; Envoy 1.40.2 by about 75 MB with 12
 // workers and with 4, because RE2 keeps a cache for each pattern, not each worker. The bound, 96 MB and 4 MB a
-// thread, 144 MB with 12 threads, fails the first two and leaves the last two over 60 MB.
+// thread, 144 MB with 12 threads, fails the first two and leaves the last two over 60 MB. nginx 1.30.6 and 1.31.8 read
+// a request line of at most 8 KiB, so they answer the 14,000-byte path 414, and the longest path they read, 8,177
+// bytes in a GET, has a row of its own. Their 64 patterns, written with .* for each *, held a worker for 17 to 30 s
+// with an Origin of 6,321 bytes, about the longest each ran to its end without PCRE2 giving up, and refused an Origin
+// the 64th pattern takes once PCRE2 gave up on the first; Envoy answered each in 6 ms or less.
 var cost = scenario{name: "cost",
 	exchanges: []exchange{
 		{name: "a path of 14,000 bytes that 24 pattern routes read", keys: longPathKeys,
 			send: request{proto: "http/1.1", method: "GET", host: "api.example.com", path: "/api/" + strings.Repeat("a", 14000),
 				headers: map[string]string{"origin": "https://app.example.com"}},
 			want: answer{status: 200, service: "shop", headers: map[string]string{"access-control-allow-origin": "https://app.example.com"},
-				below: 500 * time.Millisecond}},
+				below: 500 * time.Millisecond},
+			by: map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 414, below: 500 * time.Millisecond}}}}},
 		{name: "the request after the long path is served", keys: longPathKeys, send: get("/products/1"), want: answer{status: 200, service: "shop"}},
+		{name: "a path of 8,177 bytes, the longest nginx reads in a GET, that 24 pattern routes read", keys: longPathKeys,
+			send: request{proto: "http/1.1", method: "GET", host: "api.example.com", path: "/api/" + strings.Repeat("a", 8172),
+				headers: map[string]string{"origin": "https://app.example.com"}},
+			want: answer{status: 200, service: "shop", headers: map[string]string{"access-control-allow-origin": "https://app.example.com"},
+				below: 500 * time.Millisecond}},
 		{name: "an Origin of 8,000 bytes that 64 patterns of two * read", keys: longOriginKeys,
 			send: request{proto: "http/1.1", method: "GET", host: "patterns.example.net", path: "/products/1",
 				headers: map[string]string{"origin": "https://" + strings.Repeat("a.", 4000) + "example1.orgx"}},
 			want: answer{status: 403, below: 500 * time.Millisecond},
 			// measured on Envoy 1.40.2: no environment of full or portable has the host
 			on: map[string]literal{"full": {want: answer{status: 404}}, "portable": {want: answer{status: 404}}}},
+		// HAProxy 3.2.26 and 3.4.7 echo an Origin of 7,620 bytes and answer one of 8,020 bytes 500.
+		{name: "an Origin of 6,420 bytes that the last of 64 patterns of two * takes", keys: longOriginKeys,
+			send: request{proto: "http/1.1", method: "GET", host: "patterns.example.net", path: "/products/1",
+				headers: map[string]string{"origin": "https://" + strings.Repeat("a.", 3200) + "example9.org"}},
+			want: answer{status: 200, service: "shop", headers: map[string]string{
+				"access-control-allow-origin": "https://" + strings.Repeat("a.", 3200) + "example9.org"}, below: 500 * time.Millisecond},
+			on: map[string]literal{"full": {want: answer{status: 404}}, "portable": {want: answer{status: 404}}}},
+		{name: "an Origin of 6,321 bytes that 64 patterns of two * read", keys: longOriginKeys,
+			send: request{proto: "http/1.1", method: "GET", host: "patterns.example.net", path: "/products/1",
+				headers: map[string]string{"origin": "https://" + strings.Repeat("a.", 3150) + "example1.orgx"}},
+			want: answer{status: 403, below: 500 * time.Millisecond},
+			on:   map[string]literal{"full": {want: answer{status: 404}}, "portable": {want: answer{status: 404}}}},
 		{name: "the request after the long Origin is served", keys: longOriginKeys, send: get("/products/1"), want: answer{status: 200, service: "shop"}},
 		{name: "a flood of new paths that 40 pattern routes read keeps the proxy's memory bounded", keys: floodKeys,
 			// The flood gives each request its path (floodPath).

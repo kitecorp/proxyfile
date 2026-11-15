@@ -46,9 +46,9 @@ type world struct {
 	files    tlsFiles
 	mark     string // the proxy's unchecked mark (target.mark), which send forges and compare reads
 	plain    bool   // the listener speaks plain HTTP, as one of a file that writes no tls does (newClients)
-	// http1, http2, http1NoCertificate and http1OtherCA send the requests (client_test.go): they are made once, so
-	// the requests of a burst share their connections as a client's would.
-	http1, http2, http1NoCertificate, http1OtherCA *http.Client
+	// http1, http2, http1NoCertificate, http1OtherCA and http1Expired send the requests (client_test.go): they are
+	// made once, so the requests of a burst share their connections as a client's would.
+	http1, http2, http1NoCertificate, http1OtherCA, http1Expired *http.Client
 	// rawTLS is the TLS a raw request (sendRaw) opens its own connection with: the clients', with the client
 	// certificate the clients CA signed.
 	rawTLS *tls.Config
@@ -120,7 +120,7 @@ func startWorld(t *testing.T, tg target, config string, plain bool) *world {
 	waitReady(t, tg.ready)
 	listener := strings.TrimSpace(mustDocker(t, "port", proxy, "10000/tcp"))
 	w := &world{listener: listener, ports: ports, files: files, mark: tg.mark, plain: plain}
-	w.http1, w.http2, w.http1NoCertificate, w.http1OtherCA = newClients(t, files, plain)
+	w.http1, w.http2, w.http1NoCertificate, w.http1OtherCA, w.http1Expired = newClients(t, files, plain, listener)
 	w.rawTLS = clientTLS(t, files, &files.client)
 	return w
 }

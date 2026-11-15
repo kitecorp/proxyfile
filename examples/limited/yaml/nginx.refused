@@ -1,4 +1,3 @@
-examples/limited/yaml/proxyfile.yaml:11:29: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/limited/yaml/proxyfile.yaml:13:28: "routes[].rpc.rate_limit" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/limited/yaml/proxyfile.yaml:13:41: "routes[].rpc.rate_limit.requests" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/limited/yaml/proxyfile.yaml:13:56: "routes[].rpc.rate_limit.per" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

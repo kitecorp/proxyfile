@@ -10,14 +10,15 @@
 You describe your gateway in one short file: the services behind it, the routes to them, who may call what. proxyfile
 writes the complete configuration of the proxy you run from it.
 
-Generators: Envoy writes every key; nginx writes routing ([docs/nginx.md](docs/nginx.md)), and HAProxy routing, TLS
-and CORS ([docs/haproxy.md](docs/haproxy.md)), each refusing by name the keys it does not write.
+Generators: Envoy writes every key; nginx writes routing, CORS with the origin lists, the client's address, header
+removal and TLS ([docs/nginx.md](docs/nginx.md)), and HAProxy routing, TLS and CORS ([docs/haproxy.md](docs/haproxy.md)),
+each refusing by name the keys it does not write.
 
 ```mermaid
 flowchart TB
     source["Your proxyfile<br/>YAML or HOCON"] --> render["proxyfile render"]
     render --> envoy["The Envoy configuration<br/>every key"]
-    render --> nginx["The nginx configuration<br/>routing"]
+    render --> nginx["The nginx configuration<br/>routing, CORS, the client's address,<br/>header removal and TLS"]
     render --> haproxy["The HAProxy configuration<br/>routing, TLS and CORS"]
 ```
 
@@ -28,9 +29,8 @@ flowchart TB
 
 This is the [minimal example](examples/minimal/yaml/), every line of both files: the 9 lines you write and the 123
 lines proxyfile writes for Envoy. For HAProxy it writes [`haproxy.cfg`](examples/minimal/yaml/haproxy.cfg) beside
-them, with the script it loads, [`proxyfile.lua`](examples/minimal/yaml/proxyfile.lua), and nginx's generator refuses
-the file's list of `origins`, as
-[`nginx.refused`](examples/minimal/yaml/nginx.refused) says.
+them, with the script it loads, [`proxyfile.lua`](examples/minimal/yaml/proxyfile.lua), and for nginx
+[`nginx.conf`](examples/minimal/yaml/nginx.conf) with [`proxyfile.js`](examples/minimal/yaml/proxyfile.js).
 
 ## Why
 
@@ -76,8 +76,9 @@ refuse a hand edit or a missed render:
 ```sh
 proxyfile render -o envoy.yaml                    # the default target, envoy: a complete Envoy configuration
 proxyfile check -o envoy.yaml                     # in the build: renders again, fails when envoy.yaml differs
-proxyfile render --target nginx -o nginx.conf     # routing only, and proxyfile.js beside it; other keys are refused,
-                                                  # and a line on standard error counts where it is less strict than Envoy
+proxyfile render --target nginx -o nginx.conf     # routing, CORS, the client's address, header removal and TLS, and
+                                                  # proxyfile.js beside it; other keys are refused, and a line on
+                                                  # standard error counts where it is less strict than Envoy
 proxyfile render --target haproxy -o haproxy.cfg  # HAProxy 3.2 or 3.4: routing, TLS, CORS; other keys refused by name,
                                                   # and the same line counts where it is less strict than Envoy
 ```

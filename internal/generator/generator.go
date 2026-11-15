@@ -1,12 +1,13 @@
 // Package generator holds what every proxy's generator reads the same way: the input, the files a generator returns,
-// the header line, and the rules that read the model alike for every proxy. It is not part of model, because Input
-// names origins.File and rpc.Route, and origins and rpc import model.
+// the refusals of the values it cannot write, the header line, and the rules that read the model alike for every
+// proxy. It is not part of model, because Input names origins.File and rpc.Route, and origins and rpc import model.
 package generator
 
 import (
 	"slices"
 	"strings"
 
+	"github.com/kitecorp/proxyfile/v2/internal/format"
 	"github.com/kitecorp/proxyfile/v2/internal/model"
 	"github.com/kitecorp/proxyfile/v2/internal/origins"
 	"github.com/kitecorp/proxyfile/v2/internal/rpc"
@@ -39,6 +40,42 @@ func (r Refused) Error() string {
 		lines[i] = problem.String()
 	}
 	return strings.Join(lines, "\n")
+}
+
+// Refusals keeps the refusals of the values a generator cannot write, each once by its key and position: a value the
+// file writes at several places, such as a prefix in its route map and in its rewrite, or a host in one expression for
+// each environment, is one refusal. Each generator decides what it refuses and in which words; the zero value is
+// ready to use.
+type Refusals struct {
+	problems model.Problems
+	seen     map[refusedValue]bool
+}
+
+// refusedValue names a value Refusals has refused: the key that holds it and its position.
+type refusedValue struct {
+	key string
+	pos model.Pos
+}
+
+// Refuse keeps the refusal of the value of key at pos, once, in the words a target's declaration refuses a form with:
+// form names the value's form that target refuses, and instead what to write in its place.
+func (r *Refusals) Refuse(pos model.Pos, key, form, target, instead string) {
+	if r.seen[refusedValue{key, pos}] {
+		return
+	}
+	if r.seen == nil {
+		r.seen = map[refusedValue]bool{}
+	}
+	r.seen[refusedValue{key, pos}] = true
+	r.problems.Add(pos, "%s", format.FormRefusedMessage(key, form, target, instead))
+}
+
+// Err returns a Refused that holds every refusal kept, in the file's order, or nil when there is none.
+func (r *Refusals) Err() error {
+	if problems := r.problems.Sorted(); problems != nil {
+		return Refused{Problems: problems}
+	}
+	return nil
 }
 
 // Header is line 1 of every generated file. It names no input and no version, so the bytes depend on the model
@@ -173,7 +210,9 @@ var EnvoyMethods = []string{"ACL", "BIND", "CHECKOUT", "CONNECT", "COPY", "DELET
 const ConnectionTokens = `(?:close|keep-alive|upgrade|http2-settings|te)`
 
 // MostConnectionTokens is the most Connection tokens Envoy 1.40.2 serves a request with: it answered ten 400 and
-// served nine (measured with te ten times, on one line and on ten).
+// served nine (measured with te ten times, on one line and on ten). It counts every element of the list that is not
+// empty, one of white space alone too: it answered te and nine elements of a space or a tab 400, and served te and
+// twenty empty elements.
 const MostConnectionTokens = 9
 
 // EscapedInPath are the bytes of a path Envoy escapes, in upper case hex, before it picks a route, beside every byte

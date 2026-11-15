@@ -239,7 +239,7 @@ func TestSecurityLines(t *testing.T) {
 			{"  http-request del-header 'x-client-id'"},
 			{
 				"  # what Envoy refuses before it reads a request further, and the headers it removes",
-				"  http-request return status 426 if { req.ver 1.0 }",
+				"  http-request return status 426 if !{ req.ver 1.1 } !{ fc_http_major 2 }",
 				"  http-request return status 400 if { req.ver 1.1 } !{ method " + strings.Join(generator.EnvoyMethods, " ") + " }",
 				"  http-request return status 400 if { req.ver 1.1 } !{ url_beg / }",
 				"  http-request return status 400 if { req.ver 2.0 } { req.fhdr(upgrade) -m found }",

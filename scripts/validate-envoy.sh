@@ -10,6 +10,12 @@
 # set holding the throwaway key's public half, and a copy of the throwaway certificate as the CA bundle. Both folders
 # are made for this run by throwaway-tls.sh and removed after it, and no key is ever committed.
 set -euo pipefail
+# Each file named is checked, so a run that names none would check nothing and exit 0, which reads as every file
+# loading.
+if (($# == 0)); then
+  echo "usage: validate-envoy.sh <envoy.yaml>..." >&2
+  exit 2
+fi
 # The Envoy release proxyfile writes for, pinned by digest; the conformance battery reads the same file. An empty file
 # would otherwise reach docker run and read as Envoy refusing every file.
 pin="$(dirname "$0")/envoy-image"

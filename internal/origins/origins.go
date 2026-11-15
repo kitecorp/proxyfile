@@ -19,12 +19,25 @@ type File struct {
 	Environments []Environment // written order
 }
 
-type CORS struct{ AllowMethods, AllowHeaders, ExposeHeaders, MaxAge string } // "" when not written
+// CORS is the cors key: each value "" when not written. KeyPos is where each written key is, by its path
+// (cors.max_age), which a generator names a value's refusal by, so that it points at the value's own key: in block
+// style the cors mapping starts on its first key's line, another key's for every value but the first. KeyPos is nil
+// when cors is not written.
+type CORS struct {
+	AllowMethods, AllowHeaders, ExposeHeaders, MaxAge string
+	KeyPos                                            map[string]model.Pos
+}
 
 type Environment struct {
 	Name                     string
 	Hosts, Origins, Patterns []string  // nil when not written or empty
 	Pos                      model.Pos // the environment's mapping in an origins file; its key in the proxyfile
+}
+
+// Listed says whether the environment admits origins by a list, origins or patterns: only such an environment answers
+// a browser with CORS headers, so each generator writes those lines for it alone.
+func (e Environment) Listed() bool {
+	return len(e.Origins) > 0 || len(e.Patterns) > 0
 }
 
 // list is the rule of one list of an environment: each value has the form valid admits, and the values are sorted
@@ -98,12 +111,20 @@ type writtenEnvironment struct {
 // each place words for itself.
 func read(cors, holder *tree.Node, none string, list []writtenEnvironment) (*File, []model.Problem) {
 	r := reader{names: map[string]bool{}, firstWithHost: map[string]int{}}
+	var keyPos map[string]model.Pos
+	if cors != nil {
+		keyPos = map[string]model.Pos{}
+		for _, entry := range cors.Entries {
+			keyPos["cors."+entry.Key] = entry.KeyPos
+		}
+	}
 	file := &File{
 		CORS: CORS{
 			AllowMethods:  cors.GetText("allow_methods"),
 			AllowHeaders:  cors.GetText("allow_headers"),
 			ExposeHeaders: cors.GetText("expose_headers"),
 			MaxAge:        cors.GetText("max_age"),
+			KeyPos:        keyPos,
 		},
 		Environments: r.environments(holder, none, list),
 	}
@@ -196,13 +217,36 @@ func (r *reader) hostsOnce(environment int, name string, hosts *tree.Node) {
 // PatternRegex keeps the meaning a Spring allowed-origin-pattern has: every character literal but *, which
 // matches any run, dots included.
 func PatternRegex(pattern string) string {
-	// QuoteMeta quotes every character RE2 reads as an operator, * among them, so the pattern is split at each *
-	// first and the parts are joined again with .*.
+	return "^" + strings.Join(quotedParts(pattern), ".*") + "$"
+}
+
+// PatternPCRE is the PCRE2 expression of an origin pattern, which takes what PatternRegex takes. PatternRegex reads
+// each * as .*, which PCRE2 tries at every length when the text does not match: 64 patterns of two * each stopped
+// HAProxy 3.2.26 and 3.4.7 with one Origin of 8 KB, and held a worker of nginx 1.30.6 and 1.31.8 for 17 to 30 s with
+// one of 6,321 bytes (measured). A text matches the pattern when it starts with the part before the first *, ends with the
+// part after the last, and holds each part between them in order; the first place of each such part leaves the most
+// room to the others, so each is matched there by an atomic group, which PCRE2 never tries again elsewhere, and the
+// time grows with the Origin's length alone.
+func PatternPCRE(pattern string) string {
+	parts := quotedParts(pattern)
+	written := "^" + parts[0]
+	if last := len(parts) - 1; last > 0 {
+		for _, part := range parts[1:last] {
+			written += "(?>.*?" + part + ")"
+		}
+		written += ".*" + parts[last]
+	}
+	return written + "$"
+}
+
+// quotedParts is the pattern split at each *, each part quoted: QuoteMeta quotes every character RE2 reads as an
+// operator, * among them, so the pattern is split first.
+func quotedParts(pattern string) []string {
 	parts := strings.Split(pattern, "*")
 	for i, part := range parts {
 		parts[i] = regexp.QuoteMeta(part)
 	}
-	return "^" + strings.Join(parts, ".*") + "$"
+	return parts
 }
 
 // SameOriginRegex admits the service's own origin on one of its hosts, on either scheme and any port.

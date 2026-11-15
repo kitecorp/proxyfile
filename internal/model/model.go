@@ -38,6 +38,7 @@ type Envoy struct {
 type TLS struct {
 	Certificate, Key string
 	ClientsCA        string // "" without tls.clients: no client certificate is asked for
+	Pos              Pos    // the tls key, which a generator names a path's refusal by
 }
 
 // ClientAddress says which address counts as the client's.

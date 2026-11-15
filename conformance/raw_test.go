@@ -29,7 +29,7 @@ import (
 func (w *world) sendRaw(r request) result {
 	start := time.Now()
 	fail := func(err error) result { return result{err: err, elapsed: time.Since(start)} }
-	conn, err := w.dialRaw(r.proto)
+	conn, err := w.dialRaw(r.proto, serverNameFor(r))
 	if err != nil {
 		return fail(err)
 	}
@@ -88,10 +88,10 @@ func (w *world) sendRaw(r request) result {
 	return got
 }
 
-// dialRaw opens a connection to the proxy's listener as the clients do: plain, or TLS with the client certificate the
-// clients CA signed and ALPN asking for h2 or http/1.1, as proto says. A raw request is a mistake in the scenario data
-// over any other protocol, as a request the clients cannot send is (client), so it panics.
-func (w *world) dialRaw(proto string) (net.Conn, error) {
+// dialRaw opens a connection to the proxy's listener as the clients do: plain, or TLS asking for serverName with the
+// client certificate the clients CA signed and ALPN asking for h2 or http/1.1, as proto says. A raw request is a
+// mistake in the scenario data over any other protocol, as a request the clients cannot send is (client), so it panics.
+func (w *world) dialRaw(proto, serverName string) (net.Conn, error) {
 	if proto != "http/1.1" && proto != "h2" {
 		panic(fmt.Sprintf("the battery sends a raw request over http/1.1 or h2, not %q", proto))
 	}
@@ -102,6 +102,7 @@ func (w *world) dialRaw(proto string) (net.Conn, error) {
 	config := w.rawTLS.Clone()
 	// The protocol names the battery uses are their ALPN names.
 	config.NextProtos = []string{proto}
+	config.ServerName = serverName
 	conn, err := tls.DialWithDialer(dialer, "tcp", w.listener, config)
 	if err != nil {
 		return nil, err

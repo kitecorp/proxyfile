@@ -8,4 +8,3 @@ examples/dns/yaml/proxyfile.yaml:8:73: "services.<service name>.hash" is refused
 examples/dns/yaml/proxyfile.yaml:8:80: "services.<service name>.hash.client" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/dns/yaml/proxyfile.yaml:9:1: "dns" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/dns/yaml/proxyfile.yaml:10:3: "dns.resolver" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/dns/yaml/proxyfile.yaml:12:29: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

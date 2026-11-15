@@ -1,6 +1,9 @@
 # The conformance battery's second file for nginx: nginx.yaml with no pattern route. nginx matches a path holding a
 # byte Envoy escapes before it matches on the path it has decoded in such a file, and refuses that path in a file with
-# a pattern route, so the battery runs both. Every entry runs it, Envoy's too, so its literals are Envoy's answers.
+# a pattern route, so the battery runs both. It writes no tls and keeps client_address at forwarded, the default with
+# no tls, so the battery runs nginx's lines for a client in front of the proxy. It removes x-request-id from clients,
+# which nginx reads to keep a client's own request id under forwarded, so a row shows the removed name read as never
+# sent. Every entry runs it, Envoy's too, so its literals are Envoy's answers.
 listen: 10000
 admin: 9901
 services:
@@ -10,6 +13,7 @@ services:
     addresses: ["10.0.1.11", "10.0.1.12"]
   accounts: {grpc: 7070, http: 7070, host_header: "127.0.0.1:7070"}
   catalog: {http: 8090, address: "10.0.2.21"}
+remove_from_clients: [x-request-id]
 origins:
   live: {hosts: [api.example.com, api.example.org]}
   test: {hosts: [api.test.example.com]}

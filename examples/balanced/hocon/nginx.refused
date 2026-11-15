@@ -1,4 +1,3 @@
-examples/balanced/hocon/Proxyfile: origins.all.origins: "origins.<environment name>.origins" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/balanced/hocon/Proxyfile: services.orders.balance: "services.<service name>.balance" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/balanced/hocon/Proxyfile: services.orders.health: "services.<service name>.health" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
 examples/balanced/hocon/Proxyfile: services.orders.health.grpc: "services.<service name>.health.grpc" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool

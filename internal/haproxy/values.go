@@ -3,7 +3,6 @@ package haproxy
 import (
 	"strings"
 
-	"github.com/kitecorp/proxyfile/v2/internal/format"
 	"github.com/kitecorp/proxyfile/v2/internal/generator"
 	"github.com/kitecorp/proxyfile/v2/internal/model"
 )
@@ -26,34 +25,13 @@ const longestRegex = 16384
 // values writes each value the file puts into a regular expression, and each pattern's program, through one call,
 // regex or program, which keeps a refusal of each value whose written form is longer than HAProxy loads or this
 // version writes, by the key that holds it.
-type values struct {
-	problems model.Problems
-	seen     map[refusedValue]bool
-}
-
-// refusedValue is a value already refused: a host is written into one expression per environment, and refused once.
-type refusedValue struct {
-	key string
-	pos model.Pos
-}
-
-// refuse keeps the refusal of the value of key at pos, once.
-func (v *values) refuse(key string, pos model.Pos, form, instead string) {
-	if v.seen[refusedValue{key, pos}] {
-		return
-	}
-	if v.seen == nil {
-		v.seen = map[refusedValue]bool{}
-	}
-	v.seen[refusedValue{key, pos}] = true
-	v.problems.Add(pos, "%s", format.FormRefusedMessage(key, form, "haproxy", instead))
-}
+type values struct{ generator.Refusals }
 
 // regex returns written, a regular expression that holds a value of key at pos, quoted, and keeps the value's refusal
 // when written is longer than longestRegex.
 func (v *values) regex(key string, pos model.Pos, written string) string {
 	if len(written) > longestRegex {
-		v.refuse(key, pos, "whose HAProxy regular expression is longer than HAProxy loads",
+		v.Refuse(pos, key, "whose HAProxy regular expression is longer than HAProxy loads", "haproxy",
 			"HAProxy loads no regular expression longer than 16384 bytes as the file writes it; write a shorter value, or render it for envoy")
 	}
 	return quote(written)
@@ -63,18 +41,10 @@ func (v *values) regex(key string, pos model.Pos, written string) string {
 // than longestProgram.
 func (v *values) program(pos model.Pos, text string) string {
 	if len(text) > longestProgram {
-		v.refuse(routePatternKey, pos, "whose program is longer than this version writes",
+		v.Refuse(pos, routePatternKey, "whose program is longer than this version writes", "haproxy",
 			"this version's HAProxy file carries a pattern's program of at most 65536 bytes; write a shorter pattern, or render it for envoy")
 	}
 	return quote(text)
-}
-
-// refused returns the refusal of every value regex refused, or nil.
-func (v *values) refused() error {
-	if problems := v.problems.Sorted(); problems != nil {
-		return generator.Refused{Problems: problems}
-	}
-	return nil
 }
 
 // mostWords is the most words HAProxy reads on one line of its file: it refused a line of 66 words with "too many
