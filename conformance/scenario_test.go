@@ -108,6 +108,9 @@ type request struct {
 	// unframed, on a raw http/1.1 request, writes body after the headers as it is, with no Transfer-Encoding of the
 	// sender's own, so the row's headers frame it: two Content-Length lines, or one beside Transfer-Encoding.
 	unframed bool
+	// halfClose, on a raw http/1.1 request, closes the sender's side of the connection once the request is written, and
+	// reads the answer on the side left open, as a client does that sends its request and then a FIN.
+	halfClose bool
 }
 
 // tlsOffer is a client's TLS offer: versions from and to version, or crypto/tls's when 0, and only these TLS 1.2

@@ -3,9 +3,13 @@ package haproxy
 import (
 	_ "embed"
 	"fmt"
+	"maps"
+	"regexp"
 	"regexp/syntax"
+	"slices"
 	"strings"
 
+	"github.com/kitecorp/proxyfile/v2/internal/format"
 	"github.com/kitecorp/proxyfile/v2/internal/generator"
 )
 
@@ -18,14 +22,61 @@ const scriptName = "proxyfile.lua"
 var scriptBody string
 
 // script is the script beside the configuration: generator.Header as a Lua comment, the headers whose lines pf_join
-// joins (generator.JoinedByEnvoy), the bytes pf_escape escapes (generator.EscapedInPath), and the functions.
+// joins (generator.JoinedByEnvoy), the bytes pf_escape escapes (generator.EscapedInPath), the lists pf_auth reads
+// (generator.FramingHeaders, generator.HopHeaders, and format.HAProxyFramedBy with generator.DroppedByEnvoy), Envoy's
+// gRPC statuses (generator.GRPCStatus), the mark of an unanswered check (generator.UncheckedMark), the two headers
+// every check is sent as Envoy sends them (generator.InternalHeader and generator.ExpectedTimeoutHeader), and the
+// functions.
 func script() []byte {
 	var joined strings.Builder
 	for _, name := range generator.JoinedByEnvoy {
 		fmt.Fprintf(&joined, "  %s,\n", luaString(name))
 	}
 	return []byte("-- " + strings.TrimPrefix(generator.Header, "# ") + "local joined = {\n" + joined.String() + "}\n" +
-		"local escaped = " + luaString(luaClass(generator.EscapedInPath)) + "\n\n" + scriptBody)
+		"local escaped = " + luaString(luaClass(generator.EscapedInPath)) + "\n" +
+		"local framing = " + luaSet(generator.FramingHeaders) + "\n" +
+		"local hop = " + luaSet(generator.HopHeaders) + "\n" +
+		"local never_accepted = " + luaSet(slices.Concat(format.HAProxyFramedBy, generator.DroppedByEnvoy)) + "\n" +
+		"local grpc_status = " + luaStatuses(generator.GRPCStatus) + "\n" +
+		"local unchecked = " + luaString(generator.UncheckedMark) + "\n" +
+		"local internal_header, expected_header = " + luaString(generator.InternalHeader) + ", " +
+		luaString(generator.ExpectedTimeoutHeader) + "\n\n" + scriptBody)
+}
+
+// luaSet writes names as a Lua table that holds true at each of them, in their order.
+func luaSet(names []string) string {
+	keys := make([]string, len(names))
+	for i, name := range names {
+		keys[i] = luaKey(name) + " = true"
+	}
+	return "{ " + strings.Join(keys, ", ") + " }"
+}
+
+// luaStatuses writes Envoy's gRPC status for each HTTP status as a Lua table, in the order of the HTTP statuses, so
+// the script is the same bytes every time.
+func luaStatuses(statuses map[int]int) string {
+	codes := slices.Sorted(maps.Keys(statuses))
+	keys := make([]string, len(codes))
+	for i, code := range codes {
+		keys[i] = fmt.Sprintf("[%d] = %d", code, statuses[code])
+	}
+	return "{ " + strings.Join(keys, ", ") + " }"
+}
+
+// luaIdentifier is a name Lua reads as a bare key of a table, unless it is one of luaKeywords (the Lua 5.4 manual,
+// section 3.1).
+var luaIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+var luaKeywords = map[string]bool{"and": true, "break": true, "do": true, "else": true, "elseif": true, "end": true,
+	"false": true, "for": true, "function": true, "goto": true, "if": true, "in": true, "local": true, "nil": true,
+	"not": true, "or": true, "repeat": true, "return": true, "then": true, "true": true, "until": true, "while": true}
+
+// luaKey writes name as a key of a Lua table: bare when Lua reads it so, a string in brackets otherwise.
+func luaKey(name string) string {
+	if luaIdentifier.MatchString(name) && !luaKeywords[name] {
+		return name
+	}
+	return "[" + luaString(name) + "]"
 }
 
 // longestProgram is the most bytes of a pattern's program the file writes. HAProxy 3.2.26 and 3.4.7 loaded an

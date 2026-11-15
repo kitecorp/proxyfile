@@ -1,4 +1,3 @@
-examples/jwt/hocon/Proxyfile: auth: "auth" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/jwt/hocon/Proxyfile: auth.jwt: "auth.jwt" is refused by --target haproxy: HAProxy's jwt_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names
 examples/jwt/hocon/Proxyfile: auth.jwt.audiences: "auth.jwt.audiences" is refused by --target haproxy: HAProxy's jwt_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names
 examples/jwt/hocon/Proxyfile: auth.jwt.claims: "auth.jwt.claims" is refused by --target haproxy: HAProxy's jwt_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names
@@ -6,4 +5,3 @@ examples/jwt/hocon/Proxyfile: auth.jwt.claims.x-user-id: "auth.jwt.claims.<heade
 examples/jwt/hocon/Proxyfile: auth.jwt.claims.x-user-roles: "auth.jwt.claims.<header name>" is refused by --target haproxy: HAProxy's jwt_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names
 examples/jwt/hocon/Proxyfile: auth.jwt.issuer: "auth.jwt.issuer" is refused by --target haproxy: HAProxy's jwt_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names
 examples/jwt/hocon/Proxyfile: auth.jwt.keys: "auth.jwt.keys" is refused by --target haproxy: HAProxy's jwt_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names
-examples/jwt/hocon/Proxyfile: routes[0].auth: "routes[].auth" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy

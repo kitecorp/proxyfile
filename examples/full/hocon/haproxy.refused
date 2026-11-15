@@ -1,7 +1,3 @@
-examples/full/hocon/Proxyfile: auth: "auth" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/hocon/Proxyfile: auth.accept: "auth.accept" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/hocon/Proxyfile: auth.ask: "auth.ask" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/hocon/Proxyfile: auth.enabled: "auth.enabled" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/full/hocon/Proxyfile: auth.jwt: "auth.jwt" is refused by --target haproxy: HAProxy's jwt_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names
 examples/full/hocon/Proxyfile: auth.jwt.audiences: "auth.jwt.audiences" is refused by --target haproxy: HAProxy's jwt_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names
 examples/full/hocon/Proxyfile: auth.jwt.ca: "auth.jwt.ca" is refused by --target haproxy: HAProxy's jwt_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names
@@ -12,11 +8,6 @@ examples/full/hocon/Proxyfile: auth.jwt.header: "auth.jwt.header" is refused by 
 examples/full/hocon/Proxyfile: auth.jwt.issuer: "auth.jwt.issuer" is refused by --target haproxy: HAProxy's jwt_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names
 examples/full/hocon/Proxyfile: auth.jwt.keys: "auth.jwt.keys" is refused by --target haproxy: HAProxy's jwt_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names
 examples/full/hocon/Proxyfile: auth.jwt.optional: "auth.jwt.optional" is refused by --target haproxy: HAProxy's jwt_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names
-examples/full/hocon/Proxyfile: auth.only_with_header: "auth.only_with_header" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/hocon/Proxyfile: auth.send: "auth.send" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/hocon/Proxyfile: auth.send_request: "auth.send_request" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/hocon/Proxyfile: auth.timeout: "auth.timeout" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/hocon/Proxyfile: auth.when_unavailable: "auth.when_unavailable" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/full/hocon/Proxyfile: dns: "dns" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/full/hocon/Proxyfile: dns.resolver: "dns.resolver" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/full/hocon/Proxyfile: limits: "limits" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
@@ -27,22 +18,17 @@ examples/full/hocon/Proxyfile: limits.request_headers.size: "limits.request_head
 examples/full/hocon/Proxyfile: log: "log" is refused by --target haproxy: not written by this version's HAProxy generator, and without it HAProxy logs no request, where the Envoy output logs every request; render it for envoy
 examples/full/hocon/Proxyfile: log.sample: "log.sample" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/full/hocon/Proxyfile: log.status_from: "log.status_from" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/hocon/Proxyfile: routes[0].auth: "routes[].auth" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/full/hocon/Proxyfile: routes[1].rpc.rate_limit: "routes[].rpc.rate_limit" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/full/hocon/Proxyfile: routes[1].rpc.rate_limit.by: "routes[].rpc.rate_limit.by" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/full/hocon/Proxyfile: routes[1].rpc.rate_limit.per: "routes[].rpc.rate_limit.per" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/full/hocon/Proxyfile: routes[1].rpc.rate_limit.requests: "routes[].rpc.rate_limit.requests" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/full/hocon/Proxyfile: routes[1].rpc.retries: "routes[].rpc.retries" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/hocon/Proxyfile: routes[2].auth: "routes[].auth" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/full/hocon/Proxyfile: routes[3].rate_limit: "routes[].rate_limit" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/full/hocon/Proxyfile: routes[3].rate_limit.burst: "routes[].rate_limit.burst" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/full/hocon/Proxyfile: routes[3].rate_limit.by: "routes[].rate_limit.by" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/full/hocon/Proxyfile: routes[3].rate_limit.per: "routes[].rate_limit.per" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/full/hocon/Proxyfile: routes[3].rate_limit.requests: "routes[].rate_limit.requests" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/full/hocon/Proxyfile: routes[4].retries: "routes[].retries" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/hocon/Proxyfile: rpc.methods[0].action: "rpc.methods[].action" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/hocon/Proxyfile: rpc.methods[2].action: "rpc.methods[].action" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/hocon/Proxyfile: rpc.methods[2].reports: "rpc.methods[].reports" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/full/hocon/Proxyfile: services.catalog.address: "services.<service name>.address" a DNS name is refused by --target haproxy: this version's HAProxy generator writes no DNS name; give the service's IP address, or render it for envoy
 examples/full/hocon/Proxyfile: services.catalog.balance: "services.<service name>.balance" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/full/hocon/Proxyfile: services.catalog.hash: "services.<service name>.hash" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy

@@ -2,12 +2,13 @@
 # The conformance battery's file for HAProxy: the world of examples/portable with only the keys this version's HAProxy
 # generator writes, and the pattern routes and the prefix route with a rewrite of nginx's battery file, whose rows test
 # the patterns and the path as the client wrote it; the test environment has a host with a dot at its start and one
-# with a dot at its end, which HAProxy compares as written, as Envoy does. catalog is reached at its IP address, and no
-# route is checked: the generator writes no DNS name and no auth check yet. The 24 asset routes and the 64 patterns of
-# many hold what a long path and a long Origin cost: one request of each stopped HAProxy before its patterns ran in
-# steps and its origin patterns were written so they cannot backtrack. The 40 routes k01 to k40 hold what a flood of
-# new paths costs in memory: HAProxy kept up to 2,000 states of each pattern on each thread, over 600 MB in a flood,
-# before the patterns of a thread shared one budget. Envoy runs it too, so each row's literal on it is Envoy's.
+# with a dot at its end, which HAProxy compares as written, as Envoy does. catalog is reached at its IP address, as the
+# generator writes no DNS name yet; the check, the auth-off routes and the RPC question are `examples/portable`'s. The
+# 24 asset routes and the 64 patterns of many hold what a long path and a long Origin cost: one request of each stopped
+# HAProxy before its patterns ran in steps and its origin patterns were written so they cannot backtrack. The 40 routes
+# k01 to k40 hold what a flood of new paths costs in memory: HAProxy kept up to 2,000 states of each pattern on each
+# thread, over 600 MB in a flood, before the patterns of a thread shared one budget. Envoy runs it too, so each row's
+# literal on it is Envoy's.
 listen: 10000
 admin: 9901
 tls:
@@ -19,6 +20,15 @@ services:
   shop: {http: 8080, grpc: 8081, addresses: ["10.0.1.11", "10.0.1.12"]}
   accounts: {grpc: 7070, http: 7070, host_header: "127.0.0.1:7070"}
   catalog: {http: 8090, address: 10.0.2.21}
+auth:
+  ask: accounts /auth/check
+  timeout: 1500ms
+  enabled: true
+  when_unavailable: allow
+  only_with_header: authorization
+  send: [authorization, x-country]
+  accept: [x-user-id, x-tier-level, x-user-check]
+  send_request: true
 remove_from_clients: [x-client-id]
 cors: {allow_methods: "*", allow_headers: "*", expose_headers: "Content-Disposition,X-Request-Id", max_age: "600"}
 origins:
@@ -103,9 +113,10 @@ origins:
       - "https://*.*.example8.org"
       - "https://*.*.example9.org"
 routes:
-  - {name: accounts-events, pattern: "^/events/[a-z0-9-]+$", to: accounts}
+  - {name: accounts-events, pattern: "^/events/[a-z0-9-]+$", to: accounts, auth: off}
   - rpc: {to: {example.shop.*: {service: shop, name: shop}, "*": accounts}}
-  - {name: accounts-webhooks, path: /api/webhooks, method: POST, to: accounts, rewrite: /hooks/payments}
+  - {name: accounts-webhooks, path: /api/webhooks, method: POST, to: accounts, rewrite: /hooks/payments, auth: off}
+  - {name: public, prefix: /public/, to: shop, auth: off}
   - {name: accounts-admin, pattern: "^/admin/.*$", to: accounts}
   - {name: braces, pattern: "^/braces/x{,3}$", to: accounts}
   - {name: backtrack, pattern: "^/backtrack/((a|a)*c|a+b)$", to: accounts}
@@ -183,7 +194,7 @@ routes:
   - {name: shop, prefix: /, to: shop}
 rpc:
   methods:
-    - {service: example.shop.v1.CartService, method: GetCart}
+    - {service: example.shop.v1.CartService, method: GetCart, action: browse}
     - {service: example.accounts.v1.ProfileService, method: GetProfile}
-    - {service: example.shop.v1.CartService, method: AddItem}
+    - {service: example.shop.v1.CartService, method: AddItem, action: buy, reports: [browse]}
 envoy: {connect_bridge: false}

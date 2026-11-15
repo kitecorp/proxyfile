@@ -60,6 +60,11 @@ type ExampleForm struct {
 	// its methods or has no rpc entry.
 	Methods string
 	Table   bool // Dir holds rpc-table.json, the table the form's RPC methods give
+	// EnvoyBlock says the form writes in the envoy block a key its example's YAML form writes at the top level, as
+	// tracing/envoy-tracing writes tracing in envoy.tracing, its old place. Envoy reads the two alike, but a render for
+	// another target leaves the envoy block alone by design, so the form is another spelling of the YAML form for the
+	// Envoy target only; for the others its own committed files hold it.
+	EnvoyBlock bool
 }
 
 // ExampleForms is every folder under examples/ that holds a proxyfile.
@@ -75,7 +80,7 @@ var ExampleForms = []ExampleForm{
 	{Dir: "portable/hocon", File: "Proxyfile", Table: true},
 	{Dir: "tracing/yaml", File: "proxyfile.yaml"},
 	{Dir: "tracing/hocon", File: "Proxyfile"},
-	{Dir: "tracing/envoy-tracing", File: "proxyfile.yaml"},
+	{Dir: "tracing/envoy-tracing", File: "proxyfile.yaml", EnvoyBlock: true},
 	{Dir: "otel/yaml", File: "proxyfile.yaml"},
 	{Dir: "otel/hocon", File: "Proxyfile"},
 	{Dir: "jwt/yaml", File: "proxyfile.yaml"},

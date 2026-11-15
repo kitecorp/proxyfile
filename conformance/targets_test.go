@@ -60,6 +60,7 @@ func targets(t testing.TB) []target {
 			{label: "nginx-file", proxyfile: "testdata/nginx.yaml"},
 			{label: "nginx-plain", proxyfile: "testdata/nginx-plain.yaml"},
 			{label: "haproxy-file", proxyfile: "testdata/haproxy.yaml"},
+			{label: "two-checks", proxyfile: "testdata/two-checks.yaml"},
 		},
 		image: image,
 		args:  []string{"-c", "/config/" + envoy.Config},

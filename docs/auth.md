@@ -4,11 +4,12 @@
 
 - `ask` makes the proxy ask a service of yours "may this request pass?", and copy the identity headers your service
   answers onto the request. Your service decides, and the proxy acts on the answer. Envoy and nginx have this built
-  in, as Envoy's `ext_authz` and nginx's `auth_request`, and HAProxy has it through an add-on
-  ([Portability](portability.md)).
+  in, as Envoy's `ext_authz` and nginx's `auth_request`. HAProxy has it as a Lua action, in `proxyfile.lua` beside the
+  configuration, that asks the check through a TCP `listen` section of the file
+  ([HAProxy](haproxy.md#the-auth-check)).
 - `jwt` makes the proxy verify a signed token on the request itself, with no service of yours to ask
-  ([Tokens](#tokens)). nginx open source has no token verification, and HAProxy's takes no key set, so their
-  generators refuse it ([Portability](portability.md)).
+  ([Tokens](#tokens)). nginx open source has no token verification, and HAProxy's `jwt_verify` takes one key file, with
+  no key set, URL, issuer or audience check, so their generators refuse it ([Portability](portability.md)).
 
 The rest of this page up to [Tokens](#tokens) is about `ask`, which the page calls the check.
 
@@ -24,14 +25,15 @@ auth:
 ```
 
 The check is a plain HTTP request to your service, so your service needs nothing made for one proxy. With the envoy
-target it is Envoy's `ext_authz` in HTTP mode. How the check works:
+target it is Envoy's `ext_authz` in HTTP mode, and with the haproxy target the script `proxyfile.lua` sends it
+([HAProxy](haproxy.md#what-the-check-is-sent)). How the check works:
 
 - The check gets a request to the path of `ask`, never the client's path or query, because paths can carry links and
   tokens; only `send_request` tells it the client's path, in a header ([below](#what-the-check-is-told)). The headers
   it gets are the ones `send` names and the route's question below. HTTP mode adds the client's `Host`, the request's
-  method, `Authorization` and `Content-Length: 0`, whatever `send` says, and with the envoy target Envoy's own client
-  adds `x-envoy-internal: true` and `x-envoy-expected-rq-timeout-ms`, the deadline in milliseconds (measured on Envoy
-  1.40.2).
+  method, `Authorization` and `Content-Length: 0`, whatever `send` says, and Envoy's own client adds
+  `x-envoy-internal: true` and `x-envoy-expected-rq-timeout-ms`, the deadline in milliseconds (measured on Envoy
+  1.40.2), and the script of the haproxy target sends the same two.
 - Each RPC route adds its question to the check: `x-gateway-action` holds the method's `action` and `x-gateway-reports`
   its `reports` joined by commas. A plain route adds neither. The question is for the check alone, and no service sees
   it.
@@ -41,12 +43,18 @@ target it is Envoy's `ext_authz` in HTTP mode. How the check works:
   request to the service, replacing any value there. A `5xx` counts as a failed call, which `when_unavailable` decides.
   Any other status is sent to the client as a denial, with the check's body and headers, a 2xx other than `200` as
   `403` ([below](#a-check-that-answers-another-2xx)). With the envoy target the denial carries no
-  `x-envoy-upstream-service-time`, which Envoy's own client for the check adds ([Defaults](defaults.md)).
+  `x-envoy-upstream-service-time`, which Envoy's own client for the check adds ([Defaults](defaults.md)). A denial to a
+  request from a listed origin carries that origin's CORS answer, `Access-Control-Allow-Origin` and, when
+  `cors.expose_headers` is written, `Access-Control-Expose-Headers` (measured on Envoy 1.40.2, HAProxy 3.2.26 and
+  3.4.7). HAProxy answers some denials otherwise, such as one larger than it reads whole, which it answers `403`
+  ([HAProxy](haproxy.md#where-haproxy-answers-the-check-otherwise-than-the-envoy-output)).
 - With `when_unavailable: allow`, a request that could not be checked goes through with the header
-  `x-envoy-auth-failure-mode-allowed` set, and the gateway writes a `gateway_auth_unavailable` log line for it. A
-  client's own copy of that header is removed before anything reads it.
+  `x-envoy-auth-failure-mode-allowed` set, and with the envoy target the gateway writes a `gateway_auth_unavailable`
+  log line for it. A client's own copy of that header is removed before anything reads it.
 - A check sent on a connection the auth service is closing fails. Set `timeouts.upstream_idle` under the auth service's
-  own idle timeout, so the gateway closes an idle connection first.
+  own idle timeout, so the gateway closes an idle connection first. The HAProxy file opens a connection for each check
+  and the check closes it after its answer, so it has no idle connection to close, and it refuses
+  `timeouts.upstream_idle`.
 
 ## What the check is told
 
@@ -100,7 +108,9 @@ that same `..;`. So the first route of every generated file answers `400` to a p
 off, so the token and the check are read before it answers: a request refused for its token or by the check gets that
 answer, such as the check's `401`, instead of the `400`, also under a `prefix` with `auth: off`, and a request they let
 through gets the `400`; neither reaches a service (measured on Envoy 1.40.2). A `;` escaped twice, `%253B`, passes as
-sent: a service that decodes the path twice is not covered.
+sent: a service that decodes the path twice is not covered. The HAProxy file has no route of its own for this: it asks
+the check about such a request whatever its route, answers the check's denial, and answers `400` once the check lets it
+through ([HAProxy](haproxy.md#which-requests-are-asked)).
 
 Envoy resolves `..;` written with dots itself from 1.40.0, and from 1.36.10, 1.37.6, 1.38.4 and 1.39.1 on the older
 release lines, as their release notes say, while the runtime setting
