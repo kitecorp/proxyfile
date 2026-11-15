@@ -19,14 +19,7 @@ examples/full/hocon/Proxyfile: auth.timeout: "auth.timeout" is refused by --targ
 examples/full/hocon/Proxyfile: auth.when_unavailable: "auth.when_unavailable" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/hocon/Proxyfile: dns: "dns" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/hocon/Proxyfile: dns.resolver: "dns.resolver" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: limits: "limits" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: limits.connections: "limits.connections" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: limits.request_headers: "limits.request_headers" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: limits.request_headers.count: "limits.request_headers.count" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: limits.request_headers.size: "limits.request_headers.size" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: log: "log" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: log.sample: "log.sample" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: log.status_from: "log.status_from" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/hocon/Proxyfile: limits.connections: "limits.connections" is refused by --target nginx: nginx counts its own listening sockets and every connection to a service against one limit, and closes a client's idle connection to take a new one, so no nginx setting holds client connections to a number; remove limits.connections, or render it for envoy
 examples/full/hocon/Proxyfile: remove_from_clients: "remove_from_clients" holding a name with a * prefix is refused by --target nginx: nginx takes each header by name; write each name in full
 examples/full/hocon/Proxyfile: routes[0].auth: "routes[].auth" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/hocon/Proxyfile: routes[1].rpc.rate_limit: "routes[].rpc.rate_limit" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
@@ -56,8 +49,6 @@ examples/full/hocon/Proxyfile: services.shop.health.interval: "services.<service
 examples/full/hocon/Proxyfile: services.shop.health.path: "services.<service name>.health.path" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
 examples/full/hocon/Proxyfile: services.shop.health.timeout: "services.<service name>.health.timeout" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
 examples/full/hocon/Proxyfile: services.shop.health.unhealthy: "services.<service name>.health.unhealthy" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
-examples/full/hocon/Proxyfile: timeouts.idle: "timeouts.idle" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: timeouts.upstream_idle: "timeouts.upstream_idle" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/hocon/Proxyfile: tracing: "tracing" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/hocon/Proxyfile: tracing.path_in_url: "tracing.path_in_url" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/hocon/Proxyfile: tracing.provider: "tracing.provider" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

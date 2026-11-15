@@ -110,9 +110,11 @@ var haproxyTarget = Target{Name: "haproxy", Title: "HAProxy", Keys: map[string]S
 	"services.<service name>":      {Level: Supported},
 	"services.<service name>.http": {Level: Supported},
 	// A gRPC service's connection is HTTP/2, which HAProxy 3.2.26 and 3.4.7 did not bound by timeout connect: a
-	// service that never took the connection ended at timeout server, 15.02 s (txn.sess_term_state sH, measured).
+	// service that never took the connection ended at timeout server, 15.02 s (txn.sess_term_state sH, measured). A
+	// request that is not a gRPC call, to a gRPC service that reset its stream or answered in HTTP/1.1, got the file's
+	// empty 502, where Envoy writes its text (measured on 3.2.26 and 3.4.7 beside Envoy 1.40.2, over HTTP/2).
 	"services.<service name>.grpc": {Level: Partial,
-		Note: "a service that never takes the connection is answered after 15 s, where Envoy answers after its 5 s connect timeout, a gRPC call with 200 and grpc-status 14 as by Envoy and any other request with 504 and upstream request timeout, where Envoy's is an empty 502: HAProxy does not bound an HTTP/2 connection to a service by its connect timeout, and the 15 s a service that sends nothing gets end the wait (measured without timeouts.request); a gRPC call HAProxy alone refuses before any service, such as one with a client's X-Request-Id of 1,000 bytes under forwarded, gets HAProxy's plain answer, here 400, where Envoy serves the call"},
+		Note: "a service that never takes the connection is answered after 15 s, where Envoy answers after its 5 s connect timeout, a gRPC call with 200 and grpc-status 14 as by Envoy and any other request with 504 and upstream request timeout, where Envoy's is an empty 502: HAProxy does not bound an HTTP/2 connection to a service by its connect timeout, and the 15 s a service that sends nothing gets end the wait (measured without timeouts.request); a gRPC call HAProxy alone refuses before any service, such as one with a client's X-Request-Id of 1,000 bytes under forwarded, gets HAProxy's plain answer, here 400, where Envoy serves the call; a request that is not a gRPC call, to a gRPC service that resets its stream or answers in HTTP/1.1, is answered 502 with no body, where the Envoy output answers the stream reset 503 and the HTTP/1.1 answer 502, each with the text upstream connect error or disconnect/reset before headers. reset reason: remote reset, or protocol error, as text/plain"},
 	"services.<service name>.host_header": {Level: Supported},
 	// A name HAProxy looks up again while it runs takes a resolvers section and a server-template, which this version
 	// does not write yet, so it takes an IP address alone. Applies tells the two apart as the reader does: an address

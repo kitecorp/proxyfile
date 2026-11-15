@@ -7,8 +7,10 @@
 # to k40 are haproxy.yaml's, which hold what a long path, a long Origin and a flood of new paths cost: written with .*
 # for each *, the 64 patterns held one worker of nginx for 17 to 30 s with an Origin of 6,321 bytes. Its tls with
 # clients, client_address, remove_from_clients, cors and the three environments' lists are examples/full's, but
-# remove_from_clients names only x-client-id, as the generator refuses full's names with a * prefix. Every entry runs
-# it, Envoy's too, so its literals are Envoy's answers.
+# remove_from_clients names only x-client-id, as the generator refuses full's names with a * prefix. It writes Envoy's
+# own header limits, 60 KiB and 100 fields, an idle time of 2 s, so a row sees a silent service ended without waiting
+# long, an upstream idle time of 3 s, and examples/full's log, so the battery runs every form of those keys the
+# generator writes. Every entry runs it, Envoy's too, so its literals are Envoy's answers.
 listen: 10000
 admin: 9901
 tls:
@@ -16,6 +18,11 @@ tls:
   key: /etc/gateway/tls/key.pem
   clients: {ca: /etc/gateway/tls/clients-ca.pem}
 client_address: connection
+limits:
+  request_headers: {size: 60KiB, count: 100}
+timeouts:
+  idle: 2s
+  upstream_idle: 3s
 services:
   shop:
     http: 8080
@@ -192,3 +199,4 @@ rpc:
     - {service: example.shop.v1.CartService, method: GetCart}
     - {service: example.accounts.v1.ProfileService, method: GetProfile}
     - {service: example.shop.v1.CartService, method: AddItem}
+log: {status_from: 400, sample: 1%}

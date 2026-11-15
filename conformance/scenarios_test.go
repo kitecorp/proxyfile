@@ -11,9 +11,10 @@ import (
 	"time"
 )
 
-// scenarios run in this order, each exchange after the one before, never in parallel: a later scenario's quiet and
-// burst count on nothing else reaching the proxy meanwhile. The rate limit runs last, so the requests the scenarios
-// before it send to its route come first, and its quiet lets that route's bucket fill again before its burst.
+// scenarios run in this order, each exchange after the one before but for those that overlap (exchange.overlap), which
+// wait beside the rest of their own scenario alone: a later scenario's quiet and burst count on nothing else reaching
+// the proxy meanwhile. The rate limit runs last, so the requests the scenarios before it send to its route come first,
+// and its quiet lets that route's bucket fill again before its burst.
 var scenarios = []scenario{routing, mutualTLS, cors, auth, timeout, retry, gRPC, paths, asWritten, offRoute, rateLimit, cost}
 
 // get is a GET over HTTP/1.1 to localhost, a host of the example's local environment.
@@ -157,6 +158,15 @@ var routing = scenario{name: "routing",
 			want: answer{status: 200, service: "shop", received: map[string]string{"if-match": `"a","b"`}},
 			by:   map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
 		{name: "a service that refuses connections is answered 502", send: get("/catalog/items"), refusing: "catalog", want: answer{status: 502}},
+		// The hold backend takes no connection, and only nginx-plain names it (its hold service): the Envoy output answers
+		// 502 with no body when the cluster's 5 s connect timeout ends the try (measured on Envoy 1.40.2, 5.0 s), 50 ms
+		// under for the two clocks and 1 s over for a loaded Mac, as the auth timeout row. want is what every file that
+		// names no hold service answers, the path reaching the shop route, so a file added to the battery needs no entry
+		// here unless it names hold.
+		{name: "a service that takes no connection within 5 s is answered 502", overlap: true, send: get("/hold/x"),
+			want: answer{status: 200, service: "shop", path: "/hold/x"},
+			on: map[string]literal{"nginx-plain": {want: answer{status: 502, atLeast: 4950 * time.Millisecond,
+				below: 5950 * time.Millisecond}}}},
 		{name: "a service's X-Accel-Redirect is passed on, not followed", send: request{proto: "http/1.1", method: "GET", host: "localhost",
 			path: "/catalog/items", headers: map[string]string{"x-stub-accel-redirect": "/products/1"}},
 			want: answer{status: 200, service: "catalog", path: "/catalog/items"}},
@@ -201,11 +211,11 @@ var routing = scenario{name: "routing",
 		{name: "a header name of token characters over HTTP 2, sent by hand", send: rawHeader("h2", "x-ok"),
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-ok": "1"}}},
 		// Envoy closes the connection; nginx answers 400 (lineRow).
-		{name: "a header name holding @ over HTTP 2 is refused", send: rawHeader("h2", "x@at"), want: answer{refused: true},
+		{name: "a header name holding @ over HTTP 2 is refused", overlap: true, send: rawHeader("h2", "x@at"), want: answer{refused: true},
 			by: map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
-		{name: "a header name holding a parenthesis over HTTP 2 is refused", send: rawHeader("h2", "x(p)"), want: answer{refused: true},
+		{name: "a header name holding a parenthesis over HTTP 2 is refused", overlap: true, send: rawHeader("h2", "x(p)"), want: answer{refused: true},
 			by: map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
-		{name: "a header name holding the byte 0xFF over HTTP 2 is refused", send: rawHeader("h2", "x\xffy"), want: answer{refused: true},
+		{name: "a header name holding the byte 0xFF over HTTP 2 is refused", overlap: true, send: rawHeader("h2", "x\xffy"), want: answer{refused: true},
 			by: map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
 		{name: "header names of token characters reach the service", send: request{proto: "http/1.1", method: "GET", host: "localhost",
 			path: "/products/1", headers: tokenNames}, want: answer{status: 200, service: "shop", received: tokenNames}},
@@ -242,7 +252,7 @@ var routing = scenario{name: "routing",
 			by: map[string]own{
 				"nginx":   {difference: lineRow, literal: literal{want: answer{status: 200, service: "shop", body: "abc", noTrailers: true}}},
 				"haproxy": {difference: lineRow, literal: literal{want: answer{status: 200, service: "shop", body: "abc", noTrailers: true}}}}},
-		{name: "a trailer value holding a control character over HTTP/2", send: request{proto: "h2", method: "POST", host: "localhost",
+		{name: "a trailer value holding a control character over HTTP/2", overlap: true, send: request{proto: "h2", method: "POST", host: "localhost",
 			path: "/products/1", raw: true, body: "abc", trailers: map[string]string{"x-t": "b\x01c"}}, want: answer{refused: true},
 			by: map[string]own{
 				"haproxy": {difference: lineRow, literal: literal{want: answer{status: 200, service: "shop", body: "abc", noTrailers: true}}}}},
@@ -256,7 +266,7 @@ var routing = scenario{name: "routing",
 		// as U+FFFD.
 		{name: "a header value holding a control character is answered 400", send: rawHeaders(map[string]string{"x-a": "b\x01c"}),
 			want: answer{status: 400}},
-		{name: "a header value holding a control character is refused over HTTP/2", send: request{proto: "h2", method: "GET",
+		{name: "a header value holding a control character is refused over HTTP/2", overlap: true, send: request{proto: "h2", method: "GET",
 			host: "localhost", path: "/products/1", headers: map[string]string{"x-a": "b\x7fc"}, raw: true},
 			want: answer{refused: true}},
 		{name: "a header value holding a tab and UTF-8 reaches the service", send: rawHeaders(map[string]string{"x-a": "b\tc\u00e9d"}),
@@ -300,8 +310,37 @@ var routing = scenario{name: "routing",
 		{name: "100 header lines reach the service", send: rawHeaders(numbered(99)), want: answer{status: 200, service: "shop"}},
 		{name: "101 header lines are refused", send: rawHeaders(numbered(100)), want: answer{refused: true},
 			on: map[string]literal{"full": {want: answer{status: 200, service: "shop"}}, "portable": {want: answer{status: 200, service: "shop"}}}},
-		// Over HTTP/2 Envoy counts the 4 pseudo-headers of a request among its 100.
-		{name: "96 header fields over HTTP 2 reach the service", send: rawFields(numbered(96)), want: answer{status: 200, service: "shop"}},
+		// Over HTTP/2 Envoy counts the 4 pseudo-headers of a request among its 100. nginx counts :authority whether or not
+		// the client sent it, as it cannot tell :authority from a host field (limits.request_headers.count), so it
+		// refuses this request, one field short of Envoy's count.
+		{name: "96 header fields over HTTP 2 reach the service", send: rawFields(numbered(96)), want: answer{status: 200, service: "shop"},
+			by: map[string]own{"nginx": {difference: "limits.request_headers.count", literal: literal{want: answer{refused: true}}}}},
+		// With limits.request_headers Envoy counts the whole head of an HTTP/1.1 request, its request line, each header
+		// line with its CRLF and the empty line: it serves a head of exactly the size, 61,440 bytes for the battery
+		// file's 60 KiB, and answers 431 one byte past, whether a header line or the request line holds it. nginx reads
+		// a head of 61,376 bytes at most, 64 bytes under, so the rows 64 bytes under hold for both, and past the size it
+		// answers 400, or 414 when the request line is the long one (limits.request_headers.size). Over HTTP/2 Envoy
+		// resets the stream of a request with more fields than the count, its 4 pseudo-headers among them. examples/full
+		// and examples/portable write 96 KiB and 150 fields, so they serve each of these.
+		{name: "97 header fields over HTTP 2 are refused", keys: []string{"limits.request_headers.count"}, send: rawFields(numbered(97)),
+			want: answer{refused: true},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}, "portable": {want: answer{status: 200, service: "shop"}}}},
+		// :authority and a host field of the same value are two fields as Envoy counts them, so 96 fields beside them
+		// are 101.
+		{name: "96 header fields over HTTP 2 beside :authority and a host field are refused", keys: []string{"limits.request_headers.count"},
+			send: rawFields(withHeader(numbered(96), "host", "localhost")), want: answer{refused: true},
+			on: map[string]literal{"full": {want: answer{status: 200, service: "shop"}}, "portable": {want: answer{status: 200, service: "shop"}}}},
+		{name: "a header block 64 bytes under the size", keys: []string{"limits.request_headers.size"},
+			send: rawHeaders(map[string]string{"x-big": strings.Repeat("a", 61322)}), want: answer{status: 200, service: "shop"}},
+		{name: "a header block one byte over the size", keys: []string{"limits.request_headers.size"},
+			send: rawHeaders(map[string]string{"x-big": strings.Repeat("a", 61387)}), want: answer{refused: true},
+			on: map[string]literal{"full": {want: answer{status: 200, service: "shop"}}, "portable": {want: answer{status: 200, service: "shop"}}}},
+		{name: "a request line 64 bytes under the size", keys: []string{"limits.request_headers.size"},
+			send: rawLine("GET /products/"+strings.Repeat("a", 61332)+" HTTP/1.1", "localhost"), want: answer{status: 200, service: "shop"}},
+		{name: "a request line one byte over the size", keys: []string{"limits.request_headers.size"},
+			send: rawLine("GET /products/"+strings.Repeat("a", 61397)+" HTTP/1.1", "localhost"), want: answer{status: 431},
+			on: map[string]literal{"full": {want: answer{status: 200, service: "shop"}}, "portable": {want: answer{status: 200, service: "shop"}}},
+			by: map[string]own{"nginx": {difference: "limits.request_headers.size", literal: literal{want: answer{status: 414}}}}},
 		{name: "HTTP/1.0 is answered 426", send: rawLine("GET /products/1 HTTP/1.0", "localhost"), want: answer{status: 426}},
 		// Envoy answers 426 to HTTP/1.2 to HTTP/1.9 as to HTTP/1.0, and so do nginx and HAProxy.
 		{name: "HTTP/1.2 is answered 426", send: rawLine("GET /products/1 HTTP/1.2", "localhost"), want: answer{status: 426}},
@@ -359,7 +398,7 @@ var routing = scenario{name: "routing",
 			by:   map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 200, service: "shop"}}}}},
 		// A WebSocket over HTTP/2 (RFC 8441's extended CONNECT), sent by hand: Envoy 1.40.2 closes the connection, and
 		// HAProxy 3.2.26 sent it to the service as an HTTP/1.1 upgrade before the file answered it 400.
-		{name: "a WebSocket over HTTP 2 is refused", send: request{proto: "h2", method: "CONNECT", host: "localhost", path: "/products/1",
+		{name: "a WebSocket over HTTP 2 is refused", overlap: true, send: request{proto: "h2", method: "CONNECT", host: "localhost", path: "/products/1",
 			headers: map[string]string{":protocol": "websocket", "sec-websocket-version": "13"}, raw: true},
 			want: answer{refused: true}},
 		// HAProxy's parsers read each of the requests below before any rule of its file, which can then refuse none of
@@ -399,12 +438,10 @@ var routing = scenario{name: "routing",
 				"nginx": {difference: lineRow, literal: literal{want: answer{status: 200, service: "shop"}}}}},
 		{name: "a header of 20,000 bytes reaches the service", send: request{proto: "http/1.1", method: "GET", host: "localhost",
 			path: "/products/1", headers: map[string]string{"x-big": strings.Repeat("a", 20000)}}, want: answer{status: 200, service: "shop"},
-			by: map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 431}}},
-				"nginx": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
+			by: map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 431}}}}},
 		{name: "a path of 20,000 bytes reaches the service", send: get("/products/" + strings.Repeat("a", 20000)),
 			want: answer{status: 200, service: "shop"},
-			by: map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 414}}},
-				"nginx": {difference: lineRow, literal: literal{want: answer{status: 414}}}}},
+			by:   map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 414}}}}},
 		// HAProxy writes each byte above 0x7F as its escape, three bytes, which outgrows its buffer here: HAProxy 3.4.7
 		// answers 400, and HAProxy 3.2.26 500.
 		{name: "an HTTP 2 path of 7,000 bytes above 0x7F reaches the service", send: request{proto: "h2", method: "GET",
@@ -417,6 +454,15 @@ var routing = scenario{name: "routing",
 		// (measured, and HAProxy 3.2.26 without option abortonclose gave the client the service's 200).
 		{name: "a client that half-closes after its request gets no answer from a service", send: request{proto: "http/1.1",
 			method: "GET", host: "localhost", path: "/products/1", raw: true, halfClose: true}, want: answer{refused: true}},
+		// An X-Forwarded-Proto line that is present and empty, sent by a client in front, is answered 404 by Envoy 1.40.2
+		// under client_address = forwarded, and by nginx and HAProxy alike; with connection every proxy writes the
+		// connection's scheme in its place and serves the request.
+		{name: "an empty X-Forwarded-Proto from a client in front is answered 404",
+			send: rawHeaders(map[string]string{"x-forwarded-proto": ""}), want: answer{status: 404},
+			on: map[string]literal{"full": {want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}},
+				"portable":     {want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}},
+				"nginx-file":   {want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}},
+				"haproxy-file": {want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}}}},
 		// An X-Forwarded-Proto of spaces alone over HTTP/2 is served by Envoy 1.40.2 under client_address = forwarded,
 		// where HAProxy, whose decoder drops the spaces, answers 404 as to an empty one (client_address); with connection
 		// every proxy writes the connection's scheme in its place.
@@ -458,6 +504,12 @@ func numbered(n int) map[string]string {
 	for i := 1; i <= n; i++ {
 		headers[fmt.Sprintf("x-h%03d", i)] = "1"
 	}
+	return headers
+}
+
+// withHeader is headers with one more header, name with value.
+func withHeader(headers map[string]string, name, value string) map[string]string {
+	headers[name] = value
 	return headers
 }
 
@@ -592,8 +644,9 @@ func offered(offer tlsOffer) request {
 // from a listed origin to a service that is down is answered the proxy's own 502 with access-control-allow-origin and
 // access-control-expose-headers, and one to a host no environment names 404 with neither. A request the proxy refuses
 // before it routes, such as one whose method Envoy's parser does not know, carries no CORS answer either, and neither
-// does one nginx refuses while it reads it, a NUL byte in a header, Content-Length beside Transfer-Encoding or a header
-// line over 8 KiB; HAProxy serves the second with the CORS answer (lineRow). nginx joins two
+// does one nginx refuses while it reads it, a NUL byte in a header or Content-Length beside Transfer-Encoding; HAProxy
+// serves the second with the CORS answer (lineRow). A header line over 8 KiB is served with it on every file, nginx's
+// included, whose header buffers read a line as long as the header limit. nginx joins two
 // Access-Control-Request-Method lines, and two Access-Control-Request-Headers lines, with a comma and a space where
 // Envoy joins them with a comma (cors.allow_methods, cors.allow_headers).
 //
@@ -720,9 +773,7 @@ var cors = scenario{name: "CORS",
 				headers: map[string]string{"access-control-allow-origin": "https://www.example.com"}}}}}},
 		{name: "a header line over 8 KiB from a listed origin", keys: []string{"origins.<environment name>.origins"},
 			send: fromListed(map[string]string{"x-long": strings.Repeat("a", 9000)}),
-			want: answer{status: 200, service: "shop", headers: map[string]string{"access-control-allow-origin": "https://www.example.com"}},
-			by: map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 400,
-				headers: map[string]string{"access-control-allow-origin": ""}}}}}},
+			want: answer{status: 200, service: "shop", headers: map[string]string{"access-control-allow-origin": "https://www.example.com"}}},
 		{name: "a preflight to a refused path from a listed origin carries no CORS answer", keys: []string{"origins.<environment name>.origins"},
 			send: request{proto: "http/1.1", method: "OPTIONS", host: "api.example.com", path: "/a/..%3B/b",
 				headers: map[string]string{"origin": "https://www.example.com", "access-control-request-method": "GET"}},
@@ -1077,18 +1128,43 @@ var refusedUnderAllow = map[string]own{"haproxy": {difference: "auth.when_unavai
 // answered in 1.50 to 1.51 s on Envoy 1.40.2 and HAProxy 3.2.26 and 3.4.7 in each run of the battery, and the check's
 // answers alone, with each proxy pinned to 4 of those CPUs, in 1.502 to 1.518 s; on GitHub's 4-CPU amd64 runner the
 // pull request's Required run is the measurement.
+//
+// With timeouts.idle, the battery file's 2 s, a service silent for longer is answered 504 when the idle time ends, an
+// answer whose body pauses for less is served whole, and a request whose body pauses for longer is answered 408 by
+// Envoy, where nginx ends it with no answer (timeouts.idle); the 504 is Envoy's own text, as text/plain, where nginx's
+// own page would be text/html. The stub holds its answer for the time x-stub-delay names, and with x-stub-trickle:
+// 2x1250ms sends its body after two pauses of 1.25 s, a space after each: each pause is 0.75 s under the idle time and
+// the answer ends 0.5 s past it, so a limit on the whole answer would end it. Each bound keeps 50 ms from the time it
+// tests, for the two clocks, and the 504 comes within 1 s past the idle time, for a loaded runner: measured at 2.002 to
+// 2.005 s on Envoy 1.40.2 and nginx. examples/full and examples/portable write idle: 90s, so they serve each.
 var timeout = scenario{name: "timeout",
 	exchanges: []exchange{
-		{name: "the check answers after auth.timeout", keys: []string{"auth.timeout", "auth.when_unavailable"}, send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1",
+		{name: "the check answers after auth.timeout", overlap: true, keys: []string{"auth.timeout", "auth.when_unavailable"}, send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1",
 			headers: map[string]string{"authorization": "Bearer hang", "x-api-key": "key"}},
 			want: answer{status: 200, service: "shop", marked: "true", atLeast: 1450 * time.Millisecond, below: 2950 * time.Millisecond},
 			on:   map[string]literal{"two-checks": {want: answer{status: 403, atLeast: 1450 * time.Millisecond, below: 2950 * time.Millisecond}}}},
-		{name: "a denial whose body stops coming, past auth.timeout, is an unanswered check", keys: []string{"auth.timeout", "auth.when_unavailable"},
+		{name: "a denial whose body stops coming, past auth.timeout, is an unanswered check", overlap: true, keys: []string{"auth.timeout", "auth.when_unavailable"},
 			send: token("trickle"), want: answer{status: 200, service: "shop", marked: "true", atLeast: 1450 * time.Millisecond, below: 2950 * time.Millisecond},
 			on: map[string]literal{"two-checks": {want: answer{status: 403, atLeast: 1450 * time.Millisecond, below: 2950 * time.Millisecond}}}},
-		{name: "a 200 whose body stops coming, past auth.timeout, is an unanswered check", keys: []string{"auth.timeout", "auth.when_unavailable"},
+		{name: "a 200 whose body stops coming, past auth.timeout, is an unanswered check", overlap: true, keys: []string{"auth.timeout", "auth.when_unavailable"},
 			send: token("trickle-200"), want: answer{status: 200, service: "shop", marked: "true", atLeast: 1450 * time.Millisecond, below: 2950 * time.Millisecond},
 			on: map[string]literal{"two-checks": {want: answer{status: 403, atLeast: 1450 * time.Millisecond, below: 2950 * time.Millisecond}}}},
+		{name: "a service silent past the idle time", overlap: true, keys: []string{"timeouts.idle"},
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", headers: map[string]string{"x-stub-delay": "3s"}},
+			want: answer{status: 504, headers: map[string]string{"content-type": "text/plain"}, atLeast: 1950 * time.Millisecond,
+				below: 2950 * time.Millisecond},
+			on: map[string]literal{"full": {want: answer{status: 200, service: "shop", atLeast: 2950 * time.Millisecond}},
+				"portable": {want: answer{status: 200, service: "shop", atLeast: 2950 * time.Millisecond}}}},
+		{name: "an answer that pauses less than the idle time", overlap: true, keys: []string{"timeouts.idle"},
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", headers: map[string]string{"x-stub-trickle": "2x1250ms"}},
+			want: answer{status: 200, service: "shop", atLeast: 2450 * time.Millisecond}},
+		{name: "a request body that pauses past the idle time", overlap: true, keys: []string{"timeouts.idle"},
+			send: request{proto: "http/1.1", method: "POST", host: "localhost", path: "/products/1", raw: true, unframed: true,
+				headers: map[string]string{"content-length": "4"}, body: "abcd", pause: 3 * time.Second},
+			want: answer{status: 408, atLeast: 1950 * time.Millisecond},
+			on: map[string]literal{"full": {want: answer{status: 200, service: "shop", body: "abcd"}},
+				"portable": {want: answer{status: 200, service: "shop", body: "abcd"}}},
+			by: map[string]own{"nginx": {difference: "timeouts.idle", literal: literal{want: answer{refused: true}}}}},
 	}}
 
 // retry: every value measured on Envoy 1.40.2. A request that reached the service is never tried again, and one whose
@@ -1122,6 +1198,35 @@ var gRPC = scenario{name: "gRPC",
 			"routes[].rpc.to.<package pattern>.service", "rpc.methods", "rpc.methods[].service", "rpc.methods[].method", "services.<service name>.grpc"},
 			send: rpc("/example.shop.v1.CartService/GetCart"),
 			want: answer{status: 200, grpcStatus: "0", service: "shop", port: "8081", proto: "HTTP/2.0", path: "/example.shop.v1.CartService/GetCart"}},
+		// With both shop backends refusing connections the call is answered as Envoy answers a gRPC call it cannot
+		// send, 200 with grpc-status 14 and no body in one header frame, and no grpc-message.
+		{name: "a gRPC call to a service whose every backend refuses the connection is answered 200 with grpc-status 14",
+			keys: []string{"routes[].rpc", "services.<service name>.grpc"}, send: rpc("/example.shop.v1.CartService/GetCart"),
+			refusing: "shop-1,shop-2", want: answer{status: 200, grpcStatus: "14", headers: map[string]string{"content-type": "application/grpc",
+				"grpc-message": ""}}},
+		// A service that resets the call's stream before its answer, as the stub resets the first try of an
+		// x-stub-fail-first key: Envoy answers 200 with grpc-status 14 and a grpc-message that names the reset, and nginx
+		// the same with no grpc-message (services.<service name>.grpc).
+		{name: "a gRPC call whose service resets its stream is answered 200 with grpc-status 14",
+			keys: []string{"routes[].rpc", "services.<service name>.grpc"}, send: request{proto: "grpc", method: "POST",
+				host: "localhost", path: "/example.shop.v1.CartService/GetCart", headers: map[string]string{"x-stub-fail-first": "grpc-stream-reset"}},
+			want: answer{status: 200, grpcStatus: "14", headers: map[string]string{"content-type": "application/grpc",
+				"grpc-message": "upstream connect error or disconnect/reset before headers. reset reason: remote reset"}},
+			by: map[string]own{"nginx": {difference: "services.<service name>.grpc", literal: literal{want: answer{status: 200,
+				grpcStatus: "14", headers: map[string]string{"content-type": "application/grpc", "grpc-message": ""}}}}}},
+		// A request that is not a gRPC call, sent to a gRPC method's route, whose service resets its stream before its
+		// answer, as the stub resets the first try of an x-stub-fail-first key: Envoy answers 503 with its text,
+		// upstream connect error or disconnect/reset before headers. reset reason: remote reset, 85 bytes of text/plain,
+		// and nginx and HAProxy 502 with no body (services.<service name>.grpc).
+		{name: "a request that is not a gRPC call, on a gRPC route whose service resets its stream, is answered 503",
+			keys: []string{"routes[].rpc", "services.<service name>.grpc"}, send: request{proto: "h2", method: "POST",
+				host: "localhost", path: "/example.shop.v1.CartService/GetCart", headers: map[string]string{"content-type": "text/plain",
+					"x-stub-fail-first": "plain-stream-reset"}},
+			want: answer{status: 503, headers: map[string]string{"content-type": "text/plain", "content-length": "85"}},
+			by: map[string]own{"nginx": {difference: "services.<service name>.grpc", literal: literal{want: answer{status: 502,
+				headers: map[string]string{"content-length": "0"}}}},
+				"haproxy": {difference: "services.<service name>.grpc", literal: literal{want: answer{status: 502,
+					headers: map[string]string{"content-length": "0"}}}}}},
 		{name: "a method every other package sends to accounts", keys: []string{"routes[].rpc.to.<package pattern>", "rpc.methods",
 			"services.<service name>.grpc"}, send: rpc("/example.accounts.v1.ProfileService/GetProfile"),
 			want: answer{status: 200, grpcStatus: "0", service: "accounts", port: "7070", proto: "HTTP/2.0", host: "127.0.0.1:7070"}},
@@ -1439,26 +1544,45 @@ func floodPath(i int) string {
 // before, which the HAProxy battery file's 40 pattern routes read. On an arm64 Mac with 12 CPUs it grew HAProxy 3.2.26
 // and 3.4.7 by about 510 MB before the patterns of a thread shared one budget of states, by about 215 MB with a budget
 // of about 8 MB a thread, and by about 60 MB with proxyfile.lua's, of about 1 MB; Envoy 1.40.2 by about 75 MB with 12
-// workers and with 4, because RE2 keeps a cache for each pattern, not each worker. The bound, 96 MB and 4 MB a
-// thread, 144 MB with 12 threads, fails the first two and leaves the last two over 60 MB. nginx 1.30.6 and 1.31.8 read
-// a request line of at most 8 KiB, so they answer the 14,000-byte path 414, and the longest path they read, 8,177
-// bytes in a GET, has a row of its own. Their 64 patterns, written with .* for each *, held a worker for 17 to 30 s
-// with an Origin of 6,321 bytes, about the longest each ran to its end without PCRE2 giving up, and refused an Origin
-// the 64th pattern takes once PCRE2 gave up on the first; Envoy answered each in 6 ms or less.
+// workers and with 4, because RE2 keeps a cache for each pattern, not each worker. The bound, 96 MB and 4 MB a thread,
+// 144 MB with 12 threads, fails the first two and leaves the last two over 60 MB. nginx 1.30.6 and 1.31.8, at the
+// battery file's header limit of 60 KiB, read a head of at most 61,376 bytes, so a path of 61,000 bytes is about the
+// longest they read: the 24 pattern routes read it in 26.20 to 27.03 ms at the median on an arm64 Mac, where Envoy took
+// 3.07 ms (docs/nginx.md). Their 64 patterns, written with .* for each *, held a worker for 17 to 30 s with an Origin
+// of 6,321 bytes, about the longest each ran to its end without PCRE2 giving up, and refused an Origin the 64th pattern
+// takes once PCRE2 gave up on the first; Envoy answered each in 6 ms or less. They match no Origin longer than 8,192
+// bytes against the patterns, as a request may also hold the longest path they read (the generator's
+// longestMatchedOrigin), so they refuse the Origins of 16,384 and 16,385 bytes that Envoy serves (origins.<environment
+// name>.patterns), and the row with a path of 53,005 bytes and an Origin of 8,192 bytes holds the two costs in one
+// request. HAProxy 3.2.26 and 3.4.7 answer the 61,000-byte path 414 and both of those Origins 431, as they answer any
+// head that outgrows their buffer (lineRow). After the flood, 2,000 connections that each send a head of 65 bytes, one
+// past nginx's first header buffer of 64, and stay silent: over TLS in the battery, on an arm64 Mac with 12 CPUs, each
+// grew Envoy 1.40.2 by 31.5 to 34.9 KiB and nginx 1.30.6 and 1.31.8 by 32.9 to 38.6 KiB, and over plain HTTP Envoy by
+// 23.6 to 24.4 KiB and nginx by 23.8 to 25.9 KiB at 60 KiB and at 8 MiB of headers. The memory is read 3 s after the
+// last connection opened. One header buffer of 8 MiB in place of nginx's buffers grew it by 66.9 to 403.4 KiB each in
+// the battery, and by about 2 MiB each over plain HTTP; with 500 connections it grew it by 21.2 and 23.7 KiB each,
+// under the bound, so the row keeps 2,000. The bound, 64 KiB a connection, 125 MiB for the 2,000, fails that and leaves
+// the others under. The row catches that one buffer only on a kernel whose transparent huge pages are always, as Docker
+// Desktop's are (7.0.14-linuxkit: [always] madvise never), where the buffer takes a whole huge page of 2 MiB; with
+// madvise or never a buffer costs the pages a head touches (headerLines), so one large buffer can pass the row there.
+// On every kernel the row bounds the memory a connection holds, and TestSecurityLines' header limits row holds the
+// buffers' form.
 var cost = scenario{name: "cost",
 	exchanges: []exchange{
 		{name: "a path of 14,000 bytes that 24 pattern routes read", keys: longPathKeys,
 			send: request{proto: "http/1.1", method: "GET", host: "api.example.com", path: "/api/" + strings.Repeat("a", 14000),
 				headers: map[string]string{"origin": "https://app.example.com"}},
 			want: answer{status: 200, service: "shop", headers: map[string]string{"access-control-allow-origin": "https://app.example.com"},
-				below: 500 * time.Millisecond},
-			by: map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 414, below: 500 * time.Millisecond}}}}},
-		{name: "the request after the long path is served", keys: longPathKeys, send: get("/products/1"), want: answer{status: 200, service: "shop"}},
-		{name: "a path of 8,177 bytes, the longest nginx reads in a GET, that 24 pattern routes read", keys: longPathKeys,
-			send: request{proto: "http/1.1", method: "GET", host: "api.example.com", path: "/api/" + strings.Repeat("a", 8172),
+				below: 500 * time.Millisecond}},
+		// The whole head, with the Host, User-Agent, Origin, Accept-Encoding and Connection lines the client writes, is
+		// 61,152 bytes, under the 61,376 nginx reads.
+		{name: "a path of 61,000 bytes, about the longest nginx reads at 60 KiB, that 24 pattern routes read", keys: longPathKeys,
+			send: request{proto: "http/1.1", method: "GET", host: "api.example.com", path: "/api/" + strings.Repeat("a", 61000),
 				headers: map[string]string{"origin": "https://app.example.com"}},
 			want: answer{status: 200, service: "shop", headers: map[string]string{"access-control-allow-origin": "https://app.example.com"},
-				below: 500 * time.Millisecond}},
+				below: 500 * time.Millisecond},
+			by: map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 414}}}}},
+		{name: "the request after the long path is served", keys: longPathKeys, send: get("/products/1"), want: answer{status: 200, service: "shop"}},
 		{name: "an Origin of 8,000 bytes that 64 patterns of two * read", keys: longOriginKeys,
 			send: request{proto: "http/1.1", method: "GET", host: "patterns.example.net", path: "/products/1",
 				headers: map[string]string{"origin": "https://" + strings.Repeat("a.", 4000) + "example1.orgx"}},
@@ -1481,10 +1605,40 @@ var cost = scenario{name: "cost",
 				headers: map[string]string{"origin": "https://" + strings.Repeat("a.", 3150) + "example1.orgx"}},
 			want: answer{status: 403, below: 500 * time.Millisecond},
 			on:   map[string]literal{"full": {want: answer{status: 404}}, "portable": {want: answer{status: 404}}}},
+		{name: "an Origin of 16,384 bytes that the last of 64 patterns of two * takes", keys: longOriginKeys,
+			send: request{proto: "http/1.1", method: "GET", host: "patterns.example.net", path: "/products/1",
+				headers: map[string]string{"origin": "https://" + strings.Repeat("a.", 8182) + "example9.org"}},
+			want: answer{status: 200, service: "shop", headers: map[string]string{
+				"access-control-allow-origin": "https://" + strings.Repeat("a.", 8182) + "example9.org"}, below: 500 * time.Millisecond},
+			on: map[string]literal{"full": {want: answer{status: 404}}, "portable": {want: answer{status: 404}}},
+			by: map[string]own{"nginx": {difference: "origins.<environment name>.patterns", literal: literal{want: answer{status: 403,
+				below: 500 * time.Millisecond}}}, "haproxy": {difference: lineRow, literal: literal{want: answer{status: 431}}}}},
+		{name: "an Origin of 16,385 bytes that the last of 64 patterns of two * takes", keys: longOriginKeys,
+			send: request{proto: "http/1.1", method: "GET", host: "patterns.example.net", path: "/products/1",
+				headers: map[string]string{"origin": "https://a" + strings.Repeat("a.", 8182) + "example9.org"}},
+			want: answer{status: 200, service: "shop", headers: map[string]string{
+				"access-control-allow-origin": "https://a" + strings.Repeat("a.", 8182) + "example9.org"}, below: 500 * time.Millisecond},
+			on: map[string]literal{"full": {want: answer{status: 404}}, "portable": {want: answer{status: 404}}},
+			by: map[string]own{"nginx": {difference: "origins.<environment name>.patterns", literal: literal{want: answer{status: 403,
+				below: 500 * time.Millisecond}}}, "haproxy": {difference: lineRow, literal: literal{want: answer{status: 431}}}}},
+		// The whole head, with the Host, User-Agent, Origin, Accept-Encoding and Connection lines the client writes, is
+		// 61,326 bytes, under the 61,376 nginx reads at 60 KiB, and its Origin is the longest nginx matches.
+		{name: "a path of 53,005 bytes and an Origin of 8,192 bytes that the last of 64 patterns of two * takes, about the longest head nginx reads at 60 KiB",
+			keys: append(slices.Clone(longPathKeys), "limits.request_headers.size"),
+			send: request{proto: "http/1.1", method: "GET", host: "patterns.example.net", path: "/api/" + strings.Repeat("a", 53000),
+				headers: map[string]string{"origin": "https://" + strings.Repeat("a.", 4086) + "example9.org"}},
+			want: answer{status: 200, service: "shop", headers: map[string]string{
+				"access-control-allow-origin": "https://" + strings.Repeat("a.", 4086) + "example9.org"}, below: 500 * time.Millisecond},
+			on: map[string]literal{"full": {want: answer{status: 404}}, "portable": {want: answer{status: 404}}}},
 		{name: "the request after the long Origin is served", keys: longOriginKeys, send: get("/products/1"), want: answer{status: 200, service: "shop"}},
 		{name: "a flood of new paths that 40 pattern routes read keeps the proxy's memory bounded", keys: floodKeys,
 			// The flood gives each request its path (floodPath).
 			send:  request{proto: "http/1.1", method: "GET", host: "localhost"},
 			flood: &flood{connections: 24, requests: 3000, path: floodPath, fixed: 96 << 20, perThread: 4 << 20},
 			want:  answer{status: 200, service: "shop"}},
+		{name: "connections each holding a head just over 64 bytes keep the proxy's memory bounded", keys: []string{"limits.request_headers.size"},
+			// The connections are opened as this raw request's would be, and each sends the hold's head.
+			send: request{proto: "http/1.1", host: "localhost", raw: true},
+			holds: &holds{connections: 2000, head: "GET /products/1 HTTP/1.1\r\nHost: localhost\r\nx-pad: " + strings.Repeat("a", 15),
+				settle: 3 * time.Second, perConnection: 64 << 10}},
 	}}

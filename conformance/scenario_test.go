@@ -43,12 +43,20 @@ type exchange struct {
 	repeat   int
 	admitted int  // with repeat, the first admitted answers must be 200
 	every    bool // with repeat, every answer must be what want asks, instead of at least one
-	// refusing names a backend container by its role, such as shop-2, that refuses connections on every port while
-	// the row's requests go out, as a backend that is down does (world.refuse).
+	// refusing names the backend containers, by their roles and separated by commas, such as shop-2 or shop-1,shop-2,
+	// that refuse connections on every port while the row's requests go out, as a backend that is down does
+	// (world.refuse).
 	refusing string
 	// flood, when set, sends the row's request many times at once with other paths, and wants the proxy's memory to
 	// stay within a bound (sendFlood).
 	flood *flood
+	// holds, when set, keeps many connections open at once, each sending the start of a request's head and then
+	// nothing, and wants the proxy's memory to stay within a bound (sendHolds).
+	holds *holds
+	// overlap sends the row's request at the start of its scenario, on connections of its own, and compares its answer
+	// once the rows in sequence are done (runFile): a row that waits for a proxy's timer, such as auth.timeout's, waits
+	// beside the others. It is for a row that sends one request, refuses no backend and floods nothing.
+	overlap bool
 }
 
 // flood is what a row floods the proxy with: requests requests from connections HTTP/1.1 connections at once, request
@@ -60,6 +68,18 @@ type flood struct {
 	connections, requests int
 	path                  func(i int) string
 	fixed, perThread      int64
+}
+
+// holds is what a row keeps open on the proxy: connections connections, each opened as the row's raw request would be
+// (dialRaw), sending head, a request's head with no end, then silent. The proxy's memory, read before the first opens
+// and settle after the last did (world.memory), must grow by less than perConnection bytes for each, and each must
+// still be open with no answer right after, so the memory read is that of connections the proxy kept. The row compares
+// no answer, so its want is empty.
+type holds struct {
+	connections   int
+	head          string
+	settle        time.Duration
+	perConnection int64
 }
 
 // own is a target's own literal for a row, and difference the row of the support table (format.MatrixRows) whose
@@ -111,6 +131,9 @@ type request struct {
 	// halfClose, on a raw http/1.1 request, closes the sender's side of the connection once the request is written, and
 	// reads the answer on the side left open, as a client does that sends its request and then a FIN.
 	halfClose bool
+	// pause, on an unframed request, sends the second half of body this long after the rest, the answer read
+	// meanwhile, so a proxy that answers, or closes the connection, before the body ends is read as doing so then.
+	pause time.Duration
 }
 
 // tlsOffer is a client's TLS offer: versions from and to version, or crypto/tls's when 0, and only these TLS 1.2

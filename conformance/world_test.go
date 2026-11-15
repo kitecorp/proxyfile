@@ -33,7 +33,11 @@ const (
 // proxy while accounts still shares its network namespace succeeds, and accounts runs on until it is removed too.
 var containers = []string{accounts, proxy, "proxyfile-conformance-shop-1", "proxyfile-conformance-shop-2",
 	"proxyfile-conformance-catalog", "proxyfile-conformance-check-1", "proxyfile-conformance-check-2",
-	"proxyfile-conformance-resolver"}
+	"proxyfile-conformance-resolver", hold}
+
+// hold is the backend that takes no connection (stub hold), at holdAddress:8095, the address nginx-plain's hold
+// service names: a client's connect to it waits until the client's own time runs out.
+const hold, holdAddress = "proxyfile-conformance-hold", "10.0.2.30"
 
 // runFolder holds all a run writes to disk: the rendered file in config, the stub's build in stub, and the TLS files
 // with the server's key in tls and jwt. The battery names it as it names its Docker objects, so a run killed before
@@ -53,6 +57,26 @@ type world struct {
 	// rawTLS is the TLS a raw request (sendRaw) opens its own connection with: the clients', with the client
 	// certificate the clients CA signed.
 	rawTLS *tls.Config
+}
+
+// apart returns w with clients whose connections no other row shares, and a function that closes them: a row that
+// overlaps the rows in sequence (exchange.overlap) then leaves no connection in their pool, where a row such as "a
+// request before one whose reused connection the service closes" counts on the one its request before left.
+func (w *world) apart() (*world, func()) {
+	c := *w
+	var transports []*http.Transport
+	own := func(client *http.Client) *http.Client {
+		transport := client.Transport.(*http.Transport).Clone()
+		transports = append(transports, transport)
+		return &http.Client{Transport: transport, Timeout: client.Timeout}
+	}
+	c.http1, c.http2, c.http1NoCertificate = own(w.http1), own(w.http2), own(w.http1NoCertificate)
+	c.http1OtherCA, c.http1Expired = own(w.http1OtherCA), own(w.http1Expired)
+	return &c, func() {
+		for _, transport := range transports {
+			transport.CloseIdleConnections()
+		}
+	}
 }
 
 // claimWorld removes what an earlier run left, makes an empty runFolder, and removes the world and the folder when the
@@ -82,14 +106,15 @@ func claimWorld(t *testing.T) {
 // waits until the proxy is ready; claimWorld, called first, removes all of it when the test ends. The addresses are
 // those examples/full and examples/portable both write: the shop backends at 10.0.1.11 and 10.0.1.12, the resolver at
 // 10.0.0.2 answering catalog.internal.example with 10.0.2.21, and accounts on 127.0.0.1:7070, which only a container in
-// the proxy's own network namespace can answer; and the two backends of the check service of
+// the proxy's own network namespace can answer; the two backends of the check service of
 // conformance/testdata/two-checks.yaml, check-1 at 10.0.3.31 and check-2 at 10.0.3.32, each the stub's accounts on
-// 7070, so a row can make one of them refuse connections. 10.0.0.0/22 is the smallest block holding every one of them.
-// The collector at 10.0.3.40, which only examples/full names, is left unreachable: no request waits for it. The ports
-// 10000 and 9901 and the folders /config, /etc/gateway/tls and /etc/gateway/jwt are the examples' listen, admin and tls
-// keys and examples/full's auth.jwt.ca, the same for every target. plain says the rendered file's listener speaks plain
-// HTTP, so the clients do too.
-func startWorld(t *testing.T, tg target, config string, plain bool) *world {
+// 7070, so a row can make one of them refuse connections; and, for a file that names it (held), the hold backend at
+// holdAddress, which nginx-plain's hold service names, as no other file's rows send to it and its start waits for its
+// queue to fill. 10.0.0.0/22 is the smallest block holding every one of them. The collector at 10.0.3.40, which only
+// examples/full names, is left unreachable: no request waits for it. The ports 10000 and 9901 and the folders /config,
+// /etc/gateway/tls and /etc/gateway/jwt are the examples' listen, admin and tls keys and examples/full's auth.jwt.ca,
+// the same for every target. plain says the rendered file's listener speaks plain HTTP, so the clients do too.
+func startWorld(t *testing.T, tg target, config string, plain, held bool) *world {
 	buildStub(t, filepath.Join(runFolder, "stub"))
 	files := certificates(t, runFolder)
 	if _, err := docker("network", "create", "--subnet", "10.0.0.0/22", network); err != nil {
@@ -116,6 +141,13 @@ func startWorld(t *testing.T, tg target, config string, plain bool) *world {
 	serve("check-1", "10.0.3.31", "accounts", "7070")
 	serve("check-2", "10.0.3.32", "accounts", "7070")
 	backend("resolver", "10.0.0.2", "dns", "-listen", ":53", "catalog.internal.example=10.0.2.21")
+	if held {
+		// The queue of a listener holds one past its backlog, which net.core.somaxconn caps, so at 1 it fills with two
+		// of the stub's own connections. The sysctl is the network namespace's own, which docker run sets.
+		mustDocker(t, "run", "-d", "--name", hold, "--network", network, "--ip", holdAddress, "--sysctl", "net.core.somaxconn=1",
+			image, "hold", "-port", "8095")
+		waitHeld(t)
+	}
 	// The listener is published on a port Docker picks, so a run never meets a port another program holds.
 	mustDocker(t, append([]string{"run", "-d", "--name", proxy, "--network", network, "--ip", "10.0.0.10",
 		"-p", "127.0.0.1::10000", "-v", config + ":/config:ro", "-v", files.tls + ":/etc/gateway/tls:ro",
@@ -169,6 +201,22 @@ func waitPorts(t testing.TB, container, ports string, open bool) {
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
+	}
+}
+
+// waitHeld waits until the hold backend says its queue is full, every 100 ms for 10 s at most: until then a connection
+// to it is taken, and a row that wants none would read the proxy's answer to a connection that never answers.
+func waitHeld(t testing.TB) {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		logs, err := docker("logs", hold)
+		if err == nil && strings.Contains(logs, "stub holds") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s did not fill its queue within 10s; its log:\n%s", hold, logs)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
