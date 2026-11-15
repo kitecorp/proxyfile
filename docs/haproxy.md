@@ -8,16 +8,17 @@ its script, with `haproxy -c` on HAProxy 3.2.26 and 3.4.7, the two images
 [`scripts/haproxy-images`](../scripts/haproxy-images) pins, a warning counted as an error. `proxyfile check` compares
 both files.
 
-This version writes routing, TLS and CORS: the listener, the admin port's `/ready`, `tls` with the clients CA,
-`client_address`, the services with their HTTP and gRPC ports, their IP addresses (with no zone) and `host_header`,
-`remove_from_clients` by name and by prefix, `cors`, each environment's hosts, origins and patterns, the routes by
-prefix, path, pattern and method with their rewrites, and the rpc entry with its methods. It refuses every other core
-key a file writes, naming the key where it is written, so a file that needs one is never rendered as if the key were
-not there: `limits`, a time in `timeouts.request`, `timeouts.idle`, `timeouts.upstream_idle`, a DNS name in a
-service's address, `dns`, `auth` and a route's `auth`, a service's `balance`, `hash` and `health`, `retries` and
-`rate_limit` on a route or the rpc entry, an RPC method's `action` and `reports`, `log` and `tracing`. HAProxy's column
-in [Portability](portability.md#support-by-proxy-from-the-generators) says how it writes each key and, for a key it
-refuses, what to write instead.
+This version writes routing, TLS, CORS and the auth check: the listener, the admin port's `/ready`, `tls` with the
+clients CA, `client_address`, the services with their HTTP and gRPC ports, their IP addresses (with no zone) and
+`host_header`, `remove_from_clients` by name and by prefix, `cors`, each environment's hosts, origins and patterns, the
+routes by prefix, path, pattern and method with their rewrites, the rpc entry with its methods, and `auth` with `ask`,
+`timeout`, `enabled`, `when_unavailable`, `only_with_header`, `send`, `accept` and `send_request`, `routes[].auth`, and
+`rpc.methods[].action` and `rpc.methods[].reports`. It refuses every other core key a file writes, naming the key where
+it is written, so a file that needs one is never rendered as if the key were not there: `limits`, a time in
+`timeouts.request`, `timeouts.idle`, `timeouts.upstream_idle`, a DNS name in a service's address, `dns`, `auth.jwt`, a
+service's `balance`, `hash` and `health`, `retries` and `rate_limit` on a route or the rpc entry, `log` and `tracing`.
+HAProxy's column in [Portability](portability.md#support-by-proxy-from-the-generators) says how it writes each key and,
+for a key it refuses, what to write instead. [The auth check](#the-auth-check) says how it asks a check service.
 
 ## Running the file
 
@@ -136,6 +137,311 @@ Measured on an arm64 Mac, with HAProxy's 12 threads:
   ending a run first. With the limit lowered to 5 ms in a copy of the file, the run that reached it was answered `400`,
   HAProxy printed `Lua function 'pf_route': execution timeout.`, and it served the next request.
 
+## The auth check
+
+With `auth.ask` the file asks your check service about a request before it goes on to the route's service, and passes
+an asked request on only when the check lets it through. [Auth](auth.md) says what the check does and what it is told;
+this section says how HAProxy asks it and where its answers differ from the Envoy output's. The file asks with
+`pf_auth`, an action in `proxyfile.lua`, which connects to the relay, a TCP `listen` section at the end of
+`haproxy.cfg` that passes the connection on to the check service. For the `auth` block of
+[Your own service](auth.md#your-own-service), with `listen: 8000` and `accounts` at `10.0.0.7`,
+`proxyfile render --target haproxy` writes this call:
+
+```
+http-request lua.pf_auth 'abns@proxyfile-8000-check' '/check' 2000 deny 'cookie' 'x-user-id,x-user-roles' 0 if { var(txn.pf_ask) -m bool }
+```
+
+Its words are the relay's address, the path of `ask`, `timeout` in milliseconds, `when_unavailable`, the `send` names,
+the `accept` names and `send_request` as `1` or `0`; a name that ends in `*` is a prefix, and `-` stands for no name.
+The script reads nothing else of the proxyfile, so its bytes are the same for every file. A request is never sent to
+the check twice, and an answer is used for its own request alone: each call opens a socket of its own.
+
+### Which requests are asked
+
+The check is asked about a request when all of these hold, which the file writes once, as the variable `txn.pf_ask`:
+
+- the header `only_with_header` names has a line that is not empty, or comes on two lines or more, or comes at all over
+  HTTP/2; with no `only_with_header`, every request passes this test. Envoy reads the header's lines as one value,
+  joined by commas, and asks a value that holds a byte: two empty lines of a header the script passes on line by line,
+  such as `x-api-key`, hold a comma and are asked, and two empty lines of one it joins, such as `authorization`, are one
+  empty line and are not. HAProxy reads an HTTP/2 value of spaces alone as empty, where Envoy asks it, so it asks every
+  HTTP/2 request that carries the header, an empty one too, which Envoy does not ask, but a `cookie` field of two spaces
+  or more, which is answered `400` first ([the request line and the headers](#the-request-line-and-the-headers))
+  (measured with one to three lines of empty, spaces and a value in each order, for `authorization`, `x-api-key` and
+  `cookie`, over HTTP/1.1 and HTTP/2, on Envoy 1.40.2, HAProxy 3.2.26 and 3.4.7);
+- the route it takes is not `auth: off`;
+- it is not a CORS preflight that the Envoy output's CORS filter answers: an `OPTIONS` request with an `Origin`, an
+  `Access-Control-Request-Method` that is not empty and no dot segment in its path.
+
+A request whose path still holds a dot segment with a `;` parameter is asked whatever its route, as the Envoy output asks
+it: the route that refuses such a path is checked too ([A route with `auth: off`](auth.md#a-route-with-auth-off)). The
+check comes after the file's refusals of an unknown host, of a request no route takes, of an upgrade other than WebSocket
+and of an origin the environment does not admit, and before its `400` for a dot segment, as the Envoy output asks after
+CORS and before the route that answers a dot segment. A request one of those refusals answered is not asked.
+
+### What the check is sent
+
+The script sends the check one HTTP/1.1 request, to the path of `ask`, on a connection of its own that the check
+closes after its answer. It holds:
+
+- the client's method, its `Host` as the client wrote it, and `authorization`;
+- `x-gateway-action` and `x-gateway-reports`, for a call of an rpc method that has an `action` or `reports` (below);
+- each header a `send` name covers, written once with all its values joined by commas, as Envoy sends them:
+  `X-Country: RO` and `X-Country: FR` on two lines reach the check as `RO,FR`, and two `Cookie` lines as `a=1,b=2`. A
+  `send` name never copies a client's `content-length`, `transfer-encoding`, `connection`, `keep-alive`, `te`,
+  `trailer`, `upgrade`, `expect` or `proxy-connection`, whatever it names, and `host` is sent once;
+- `content-length: 0`, `connection: close` and `x-gateway-timeout-ms`, which holds `auth.timeout` in milliseconds;
+- `x-envoy-internal: true` and `x-envoy-expected-rq-timeout-ms`, which holds `auth.timeout` in milliseconds too: the
+  two headers Envoy's own client for the check adds (measured on Envoy 1.40.2 with a `timeout` of `1500ms`: `true` and
+  `1500`), so a check service reads the same names behind either proxy. A client's own copies of both are removed
+  before the check is asked, and never reach the service;
+- with `send_request: true`, `x-forwarded-uri`, the path and query after the file's normalisation and before a rewrite,
+  as the Envoy output sends it, and `x-forwarded-method`, `x-forwarded-proto` and `x-forwarded-host`. The client's own
+  copies of those four are dropped, and a client's own `x-gateway-timeout-ms` is never sent.
+
+A value that holds CR, LF or NUL is answered `400`: HAProxy's parser refuses such a request first, and the script checks
+again.
+
+**The RPC question.** For each method with an `action` or `reports`, the file sets `x-gateway-action` and
+`x-gateway-reports` (the names joined by commas) on a request for that method's path, before the check, and removes
+both right after it, so a service sees neither. A method with neither gets no line, and a client's own copies of both
+are removed first.
+
+### What the service receives
+
+When the check answers `200` and the script reads the answer whole, the request goes on with each header an `accept`
+name covers, set in the order of the check's answer; a name the check sent twice keeps its last value, as in Envoy. The
+script reads each header back after it sets it: HAProxy drops a header that does not fit in its request buffer without
+an error, so a request whose accepted header did not fit is answered `403`, and the service never receives it without
+the identity.
+
+The check's answer never sets `content-length`, `transfer-encoding`, `host`, `te`, `connection`, `upgrade` or
+`keep-alive` on the request; naming one of the first six in full is refused, and Envoy never sets `keep-alive` either.
+HAProxy frames or routes a request by the first six, so a check service can never change how the request it passes on
+is framed.
+
+The file removes a client's own copies of the `accept` names, of the two question headers and of
+`x-envoy-auth-failure-mode-allowed` before any rule reads them, so a client cannot forge them. With
+`when_unavailable: allow` and no answer from the check, the request goes on with `x-envoy-auth-failure-mode-allowed:
+true` and none of the accepted headers.
+
+### What the client receives when the check refuses
+
+Any status but `200` from the check is a refusal. The client receives the check's status, a `2xx` other than `200` as
+`403`, with every header of the answer but `content-length`, `transfer-encoding`, `connection`, `keep-alive`, `upgrade`
+and `proxy-connection`, and the check's body, with `content-type: text/plain` when the check sent a body and no type.
+The Envoy output passes `te`, `trailer` and a header the check's `Connection` names, and so does the file. A refusal to a
+request from a listed origin carries that origin's CORS answer, `Access-Control-Allow-Origin` and, when
+`cors.expose_headers` is written, `Access-Control-Expose-Headers`, as the Envoy output's does (measured on HAProxy
+3.2.26 and 3.4.7 beside Envoy 1.40.2).
+
+A request whose `content-type` is `application/grpc` alone, or `application/grpc` followed by `+`, compared as written,
+is a gRPC call, and its refusal is answered in gRPC's form, where a plain HTTP `401` reaches a gRPC client as a
+transport error: `200` with
+`content-type: application/grpc`, `grpc-status` from the check's status (400 gives 13, 401 gives 16, 403 gives 7, 404
+gives 12, 429, 502, 503 and 504 give 14, any other gives 2), the check's other headers, and the check's body in
+`grpc-message`, percent-encoded: every byte outside printable ASCII and `%` is written `%XX`, so a body of
+`no entry: 100% sure é`, a line feed and `next line` reaches the client as `no entry: 100%25 sure %C3%A9%0Anext line`.
+
+HAProxy writes `content-length: 0` on a `304` and on an HTTP/2 gRPC refusal, where Envoy writes none, and the file
+removes it there; over HTTP/1.1 both write `content-length: 0`.
+
+### How the answer is read
+
+The script passes a request only on a `200` it reads whole as RFC 9112 writes it: a status line of `HTTP/1.0` or
+`HTTP/1.1`, one space, three digits and then nothing or a space and a reason; header lines of a token name, a colon and
+a value with no control byte but a tab; at most one `Content-Length`, digits only and never beside `Transfer-Encoding`;
+and a `Transfer-Encoding` of `chunked` alone, each chunk size plain hexadecimal. It skips `1xx` answers before the final
+one and joins a folded header line with one space, as Envoy does. It reads each head of the answer, from the status
+line to the empty line with their line ends, a `1xx` head included, and the trailer section, to 81,920 bytes, the
+most Envoy 1.40.2 reads (measured to the byte). An answer it cannot read that way is not a pass: it is
+answered `403` under `deny`, as Envoy answers every such form measured. Under `allow` it depends on the answer: the
+six cases below go on with the mark, and the note on `auth.when_unavailable`
+[below](#where-haproxy-answers-the-check-otherwise-than-the-envoy-output) lists the others, which HAProxy answers `403`
+where Envoy serves the request with the unchecked mark.
+
+A check counts as unanswered, as it does for Envoy 1.40.2, in these six cases:
+
+- HAProxy cannot connect to it;
+- no byte of its answer comes before it closes or before `auth.timeout` passes;
+- its status line is a well-formed `5xx`;
+- a head of its answer has a 101st header line, folded lines not counted, and no name on two of its lines: Envoy reads
+  at most 100. With a name on two lines HAProxy answers `403`, because Envoy counts a name it keeps inline once however
+  many lines carry it (measured with `date`, `via`, `content-type`, `server`, `location` and `cache-control`) and then
+  reads such an answer, where it counts `set-cookie`, `www-authenticate` and a name of its own a line each;
+- the body of its answer breaks off: the check closes before the bytes that its `Content-Length` or a chunk's size
+  promised, or `auth.timeout` passes while the body is read;
+- its answer is read whole, but only after `auth.timeout` has passed.
+
+`when_unavailable` decides. With `allow`, the request goes on with the mark. With `deny`, HAProxy answers an unanswered
+check as Envoy does: `403`, with the body `Invalid CORS request` when the request carries an `Origin`, and for a gRPC
+call `200` with `grpc-status` 7 and, with an `Origin`, `grpc-message` `Invalid CORS request`.
+
+Every other answer the script cannot read whole is not an unanswered check: a header line that breaks off, an answer
+that RFC 9112 does not write and an answer past the script's size bounds are answered `403` under `allow` too. The
+notes on `auth.ask` and `auth.when_unavailable` say what Envoy does with each.
+
+### The relay
+
+The script's own connect is not bounded by its socket's timeout: to an address that never answered, it took 303 s on
+HAProxy 3.4.7 and 6.0 s on 3.2.26 against a timeout of 1.5 s. So it connects to the relay, a `listen` section in `mode
+tcp` with a `defaults` section of its own. For the example above:
+
+```
+# the relay to the check service
+defaults
+  mode tcp
+
+listen check
+  bind abns@proxyfile-8000-check
+  timeout connect 2000ms
+  timeout client 2000ms
+  timeout server 2000ms
+  retries 0
+  option nolinger
+  server accounts1 10.0.0.7:7070
+```
+
+- The three timeouts are `auth.timeout`, so a connect that does not come is cut off by it.
+- `retries 0`: the relay tries no other server when one refuses, as the Envoy output's check cluster tries no other
+  backend. With two addresses and one refusing, the checks that reach it fail on every proxy (measured on Envoy 1.40.2,
+  HAProxy 3.2.26 and 3.4.7 with `when_unavailable: deny`).
+- `option nolinger`: without it the relay kept reading a check that went on sending after HAProxy had its answer, for as
+  long as the check sent.
+- One `server` line for each address of the check service, taken in turn (round robin).
+- The second `defaults` section keeps the HTTP options of the first off the relay: without it HAProxy warns that two of
+  them are ignored.
+
+HAProxy opens one connection to the check for each check, and the check closes it after its answer, where Envoy keeps
+a pool of connections to the check. Held for 120 s at 1,000 and at 2,000 checked requests a second over 50 client
+connections (one run of each proxy alone, Envoy 1.40.2, HAProxy 3.2.26 and 3.4.7, on an Apple M5 Max with Docker 29.9.3
+and 12 CPUs), every request was answered `200`, and the check and the service each counted as many requests as were
+sent, 120,000 and 240,000. The median at 2,000 a second was 0.43 ms on Envoy, 0.61 ms on 3.2.26 and 0.58 ms on 3.4.7,
+and the 99th percentile 0.80, 1.25 and 1.08 ms.
+
+### The deadline and the pass rule
+
+A socket's own timeout counts only the time without data, so a check that sent one byte every 100 ms was read for 10.1 s
+against a timeout of 1.5 s (measured on HAProxy 3.2.26 and 3.4.7, with the task below switched off). So a task of each
+thread, started when the script loads, closes every socket whose deadline has passed, and `auth.timeout` bounds the
+whole check, as Envoy's does. An answer that ends after the deadline is never used. The task waits on a queue while no
+check waits (`core.queue` and its `pop_wait`, which the Lua API of HAProxy 3.2 and 3.4 both have) and looks every 10 ms
+while one does. A pass of the task that fails ends alone, with a warning in HAProxy's log, and the task looks again 10
+ms later: with its first three passes made to fail, each thread's task still closed a check that answered after 3 s at
+the timeout of 1.5 s (measured on HAProxy 3.2.26 and 3.4.7).
+
+A runtime error in a Lua action lets HAProxy 3.2.26 and 3.4.7 go on with the next rule, and on 3.4.7 a client that
+closes its side right after its request aborts the action; either would reach the service unchecked. So the script sets
+`txn.pf_passed` only when the request may go on, and the rules right after the action answer every asked request that
+does not have it with the refusal an unanswered check gets under `deny`
+([How the answer is read](#how-the-answer-is-read)).
+
+### With the check switched off
+
+With `auth.enabled: false` the file writes no check call, no relay and no question line, and still removes a client's
+own copies of the `accept` names, the question headers and `x-envoy-auth-failure-mode-allowed`. A denying token and a
+forged `x-user-id`, `x-gateway-action` and mark reached the service as `200` with none of the three, and the check was
+not asked, as through the Envoy output (measured on HAProxy 3.2.26 and 3.4.7 beside Envoy 1.40.2).
+
+### Reloading with checks in flight
+
+A reload, `SIGUSR2` to HAProxy's master, while checks are in flight loses none and answers none for another request.
+On HAProxy 3.2.26 and 3.4.7 (one run each, on an Apple M5 Max with Docker 29.9.3 and 12 CPUs) 2,400 checked requests
+were sent over 60 s on 20 connections, each to its own path, to a check that answered `allow` after 500 ms. The load
+was 40 requests a second, which is all that 20 connections carry against a check that answers after 500 ms, so about 20
+checks were in flight at each reload. The master was reloaded at 10, 20 and 30 s. Every request was answered `200`, the check counted 2,400
+checks and the service 2,400 requests, and the `x-forwarded-uri` the check had been told was the request's own path in
+all 2,400. Each of the three reloads on each version printed `Loading success.`, and each former worker that the log
+reaches exited with code 0 after relaying 400 checks (the log of 3.4.7 that was kept ends before the third former
+worker's exit line).
+
+### Where HAProxy answers the check otherwise than the Envoy output
+
+Each difference below is declared on HAProxy's row of its key in
+[Portability](portability.md#support-by-proxy-from-the-generators), and none is on
+[the list of ways HAProxy is less strict](#where-haproxy-is-less-strict-than-the-envoy-output). In every case measured
+on HAProxy 3.2.26 and 3.4.7 beside Envoy 1.40.2, the service received a request the check was asked about only after the
+check let it through; each case counted the requests the service and the check received.
+
+- **`auth.ask`**: an answer of the check HAProxy cannot read whole is answered 403, where Envoy passes it on: a denial whose header lines and body pass 15,100 bytes, each line counted as its name, its value and 8 bytes, a header line of 16,383 bytes or more, a 200 whose body passes 1 MiB, a head of more than 100 header lines, folded lines not counted, with a name on two of them, where Envoy counts a name it keeps inline, such as date, once, and a status of 101, which a gRPC call gets as grpc-status 7, where Envoy gives 2; an answer in HTTP/1.2, a chunk extension, a tab after the version, a lone CR in a header value, a status line of 16,383 bytes or more, or a line whose CR falls at a multiple of 16,384 bytes into the answer (measured at 16,384 and 81,920), which HAProxy's socket hands to the script with the CR kept, is answered 403, where Envoy reads it; each head of the answer and its trailer section are read to 81,920 bytes, Envoy's bound, each line counted with a CR and an LF, so lines that end in LF alone reach it sooner; a status outside 100 to 599 or a status line in HTTP/2.0 is answered 403, where Envoy passes the check's status on; the check is sent connection: close on a connection of its own, where Envoy sends no Connection header and keeps its connections to the check open.
+- **`auth.only_with_header`**: over HTTP/2 a request that carries the header with every value empty is asked, where Envoy does not ask it: HAProxy reads an HTTP/2 value of spaces alone as empty, and Envoy asks one, so HAProxy asks both.
+- **`auth.when_unavailable`**: with allow, an answer that breaks off inside its header lines, by a close or by passing auth.timeout, a 200 or a denial whose body never ends, an answer whose head or trailer section passes 81,920 bytes, a head of more than 100 header lines with a name on two of them, such as set-cookie, and an answer HAProxy cannot read as RFC 9112 writes one (a Content-Length that is not one line of digits, a control byte in a header value, a status line that does not end) are answered 403, where Envoy serves the request with the unchecked mark, x-envoy-auth-failure-mode-allowed: true.
+- **`auth.accept`**: an accepted header too large for HAProxy's request buffer is answered 403, where Envoy sets it on the request (the sizes are in HAProxy's row of `auth.accept` in [Portability](portability.md#support-by-proxy-from-the-generators)); a * prefix never sets transfer-encoding, host or te from the check's answer, where Envoy sets each. Two forms are refused at render, naming the key: `auth.accept` naming content-length, transfer-encoding, host, te, connection or upgrade in full is refused by `--target haproxy`: HAProxy frames or routes a request by these headers, so the check's answer never sets them; remove the name from auth.accept. And `auth.accept` holding a * prefix that covers content-length, connection or upgrade is refused by `--target haproxy`: the Envoy output sends the body chunked once Content-Length is removed, and leaves a WebSocket upgrade unanswered once Connection or Upgrade is removed, which HAProxy cannot write; write the other names in full, or a longer prefix, or render it for envoy.
+- **`remove_from_clients`**: names and * prefixes that cover none of content-length, connection and upgrade. A value holding content-length, connection or upgrade, in full or under a * prefix, is refused by `--target haproxy`: the Envoy output sends the body chunked once Content-Length is removed, and leaves a WebSocket upgrade unanswered once Connection or Upgrade is removed, which HAProxy cannot write; write the other names in full, or a longer prefix, or render it for envoy.
+- **`origins.<environment name>.origins` and `origins.<environment name>.patterns`**: an admitted Origin longer than 872 bytes less the length of cors.expose_headers is answered 403 with the body Invalid CORS request before the check and the service, where the Envoy output echoes it: HAProxy has 1,024 bytes for the lines it adds to an answer.
+- **`client_address`**: under forwarded, a client's own X-Request-Id longer than 980 bytes, or than 908 bytes less an echoed Origin and cors.expose_headers, is answered 400 before the check and the service, where the Envoy output serves it: HAProxy echoes the id in the 1,024 bytes it keeps for the lines it adds to an answer; over HTTP/2 an X-Forwarded-Proto of spaces alone is answered 404, where the Envoy output serves it.
+- **A dot segment with a `;` parameter answered `400`**: a dot segment whose ; parameter is written with dots, such as /a/..;/b, is answered 400, and a gRPC call 200 with grpc-status 13, where Envoy 1.40 drops the parameter and resolves the segment; with the auth check, such a request is asked about whatever route its resolved path takes, and gets the check's denial or, once the check lets it through, 400, where Envoy asks only when that route is checked and, with send_request, sends the check the resolved path.
+
+A client that sends its request and closes its own side never gets the service's answer, on Envoy or on HAProxy. This is
+not declared on a key: every file holds `option abortonclose`, with which HAProxy answers such a client `400` or `403`,
+or nothing, where Envoy only closes. A request the check is asked about reaches no service, and a request it is not asked
+about may still reach the service, as through Envoy (measured with and without the check on HAProxy 3.2.26 and 3.4.7
+beside Envoy 1.40.2). It is not on the list of ways HAProxy is less strict either.
+
+### What the check costs
+
+A checked request costs more on HAProxy than on Envoy, which has the check as a filter in the proxy. These figures were
+measured on an Apple M5 Max (arm64) with Docker 29.9.3 (12 CPUs, 34 GB), on Envoy 1.40.2
+(`envoyproxy/envoy:distroless-v1.40.2`), HAProxy 3.2.26 and HAProxy 3.4.7 (`haproxy:3.2.26` and `haproxy:3.4.7`). One
+file, with one check service, `when_unavailable: deny` and `only_with_header`, was rendered for Envoy and for HAProxy.
+The check and the service were one throwaway Go stub each, the load came from a container on CPUs 8 to 11, and the
+proxies were not pinned. "Alone" is 2,000 requests over one connection and "under load" is 20,000 over 50. CPU is the
+proxy container's own, for each request, from Docker's API.
+
+Each range of the first table is four runs, and each other range two where it does not say. A run started only while no
+other container used more than 5% of a CPU and no process on the host more than 40%, and was run again when it ended
+busy; a round taken while the machine was busy was slower for every proxy, Envoy included, and is left out. A few runs
+give a range and no more, and the figures move with what the machine is doing, so measure your own file and your own
+check before you rely on them. A machine with fewer CPUs was not measured.
+
+| | Envoy 1.40.2 | HAProxy 3.2.26 | HAProxy 3.4.7 |
+|---|---|---|---|
+| alone, checked, median | 0.24 to 0.37 ms | 0.37 to 0.60 ms | 0.37 to 0.55 ms |
+| alone, checked, 99th percentile | 0.61 to 0.73 ms | 0.69 to 1.15 ms | 0.68 to 0.94 ms |
+| alone, CPU a checked request (unchecked in brackets) | 108 to 170 µs (65 to 106) | 366 to 578 µs (93 to 171) | 365 to 526 µs (101 to 149) |
+| under load, checked, requests a second | 24,260 to 29,884 | 10,908 to 18,920 | 12,035 to 18,603 |
+| under load, checked, median | 1.44 to 1.82 ms | 2.38 to 4.12 ms | 2.40 to 3.81 ms |
+| under load, checked, 99th percentile | 4.39 to 5.51 ms | 6.45 to 11.47 ms | 6.95 to 9.73 ms |
+| under load, CPU a checked request | 107 to 132 µs | 235 to 395 µs | 236 to 383 µs |
+| the check service's CPU a check, under load | 49 to 62 µs | 77 to 127 µs | 79 to 122 µs |
+| memory over 20,000 checked requests, at most | +4.2 to +4.7 MiB | +3.1 to +8.4 MiB | +3.3 to +7.9 MiB |
+
+**Where HAProxy is slower.** Under load HAProxy served fewer checked requests a second than Envoy in every run: its
+best run, 18,920, is below Envoy's worst, 24,260. A checked request had a higher median latency and cost more CPU: a
+median of 2.38 to 4.12 ms under load against Envoy's 1.44 to 1.82 ms, and 235 to 395 µs of CPU against 107 to 132 µs.
+Alone, the median is 0.37 to 0.60 ms against 0.24 to 0.37 ms. The check service itself spent more CPU on each check
+behind HAProxy, 77 to 127 µs against 49 to 62 µs. HAProxy opens a connection for each check, and Envoy keeps a pool.
+
+**Connections and ports** (20,000 checked requests over 50 client connections; the open and `TIME_WAIT` counts are one
+run, the source ports three). Envoy opened 50 connections to the check, the check saw 50 source ports for the 20,000 checks, and the 50
+connections were still open right after and 65 s later, with none in `TIME_WAIT`. HAProxy used 11,249 to 11,330
+distinct source ports on 3.2.26 and 11,214 to 11,316 on 3.4.7, none was left on HAProxy's side (`option nolinger` resets
+it), and 11,124 (3.2.26) and 10,990 (3.4.7) were in `TIME_WAIT` on the check's side right after, none 65 s later.
+
+**A check that misbehaves** (two runs each, each proxy restarted before each kind; while the flood ran, 300 unchecked
+requests on one connection measured whether other requests were held). Every flood request was answered `403` and every
+unchecked request meanwhile `200`, and no proxy exited or restarted. Each cell gives the median time of the flood's
+answers, or for the last two rows their rate; the 99th percentile of the unchecked requests meanwhile; and the memory
+the proxy gained:
+
+| The check | Envoy 1.40.2 | HAProxy 3.2.26 | HAProxy 3.4.7 |
+|---|---|---|---|
+| answers after 3 s, 4,000 requests over 1,000 connections | 1.50 s; 0.65 to 0.68 ms; +70 to +71 MiB | 1.50 s; 0.59 to 0.69 ms; +51 to +53 MiB | 1.50 s; 0.58 to 0.83 ms; +51 to +53 MiB |
+| never answers, 2,000 over 1,000 | 1.50 to 1.51 s; 0.55 to 0.76 ms; +70 to +72 MiB | 1.50 to 1.51 s; 0.61 to 0.70 ms; +45 to +46 MiB | 1.50 to 1.51 s; 0.64 to 0.65 ms; +46 to +50 MiB |
+| closes at once, 20,000 over 50 | 26,801 to 30,044 a second; 0.65 to 0.71 ms; +5.2 to +5.7 MiB | 20,604 to 21,822 a second; 0.98 to 2.07 ms; +9.6 to +9.8 MiB | 22,849 to 23,052 a second; 0.66 to 0.68 ms; +10.3 to +10.8 MiB |
+| answers `200` and sends without end, 1,000 over 50 | 366 to 383 a second; 24.24 to 31.28 ms; +1,081 to +1,129 MiB | 3,302 to 3,451 a second; 0.86 to 1.04 ms; +20.1 to +25.4 MiB | 3,448 to 3,958 a second; 0.59 to 0.76 ms; +17.9 to +21.5 MiB |
+
+The other rounds gave the same statuses and the same 1.50 to 1.51 s medians, and their rates and memory moved with the
+machine: over three runs, one of which ended with a busy container, Envoy's rate under the endless `200` ranged from
+277 to 565 a second and its memory from +1,100 to +1,217 MiB.
+
+**Where HAProxy holds less.** After the last flood, the endless `200`, both HAProxy versions were at 0% of a CPU from
+the first half second to the end of the 10 s they were watched, and held 92 MiB (3.2.26) and 101 MiB (3.4.7), flat.
+Envoy was at 0 to 2% and kept 775 to 790 MiB (701 to 771 MiB in earlier rounds). Idle, with no request for 10 s, Envoy
+used 0.5 to 0.6% of one CPU and HAProxy 0.0% on both versions, with the check and without it. HAProxy holds more
+memory idle (two runs): Envoy 22.4 to 23.2 MiB; 3.2.26 80.4 to 81.6 MiB with the check and 81.0 to 83.1 MiB without it;
+3.4.7 88.5 to 89.6 MiB with it and 91.2 MiB without it.
+
 ## The path a route is matched on
 
 The file normalises the path before any rule reads it, as the Envoy output does: the script escapes what Envoy
@@ -150,7 +456,9 @@ HAProxy 3.2.26 and 3.4.7 beside Envoy 1.40.2; one difference stays, named on HAP
 
 - **A dot segment whose `;` parameter is written with dots, such as `/a/..;/b`, is answered `400`**, where Envoy 1.40
   drops the parameter and resolves the segment: HAProxy's `path-strip-dot` and `path-strip-dotdot` do not take `..;`
-  or `.;` as a dot segment, so the rule above refuses the path.
+  or `.;` as a dot segment, so the rule above refuses the path. With the auth check, such a request is asked about
+  whatever route its resolved path takes, and gets the check's denial or, once the check lets it through, `400`, where
+  Envoy asks only when that route is checked and, with `send_request`, sends the check the resolved path.
 
 ## The request line and the headers
 
@@ -162,6 +470,22 @@ removes: `Keep-Alive`, `Proxy-Connection`, `X-Forwarded-Client-Cert`, the 16 `x-
 HAProxy would pass on to an HTTP/1.1 client and Envoy does not. It sends `TE: trailers` in any letter case on when
 `Connection` names `te`, as Envoy does. HAProxy counts the request line among its 101 header lines, so 100 header lines
 are served and 101 refused, as by Envoy.
+
+A header value that holds a byte from 0x01 to 0x08, 0x0B, 0x0C, 0x0E to 0x1F or 0x7F is refused before any other rule, as
+Envoy refuses it: with `400` over HTTP/1.1, and by resetting the stream over HTTP/2, where Envoy closes the connection.
+HAProxy's own parser refuses 0x00, a line feed and a carriage return in a header or a trailer value, with `400` over
+HTTP/1.1 and a reset stream over HTTP/2. No fetch reads a request trailer, so a trailer value that holds a control byte
+is served, an entry of [the list below](#where-haproxy-is-less-strict-than-the-envoy-output).
+
+The file removes the headers `remove_from_clients` names, and the names `auth.accept` lists, from every request before any
+other rule but that refusal. A prefix leaves `Host` and `Transfer-Encoding`, and `Transfer-Encoding` written in full is
+left, as Envoy leaves them; what HAProxy cannot remove as Envoy does is refused at render
+([the differences of the auth check](#where-haproxy-answers-the-check-otherwise-than-the-envoy-output)).
+
+HAProxy answers `Expect: 100-continue` itself, at once, as Envoy does, and passes the header to no service: for a request
+with a body it sends `100 Continue` before it routes the request or asks the check, and lets the request go on at the
+body's first byte (`http-request wait-for-body ... at-least 1`), so an upload takes the time and memory it takes without
+the header (measured on Envoy 1.40.2 beside HAProxy 3.2.26 and 3.4.7, with an upload of 128 MiB).
 
 Measured on HAProxy 3.2.26 and 3.4.7 beside Envoy 1.40.2, the differences below refuse a request Envoy serves or
 answer one it refuses with another status. Each is named on HAProxy's row of the request line in
@@ -188,7 +512,9 @@ service what Envoy would not, are in [the next section](#where-haproxy-is-less-s
   refuses an `Upgrade` field a client sends over HTTP/2, so the file answers `400` to an HTTP/2 request that holds one.
 - **A header line folded onto the next is answered `400`**, where Envoy serves it and drops the line break. HAProxy
   writes the line break as two spaces, so the file refuses a header value that holds three spaces or tabs in a row,
-  folded or not.
+  folded or not. Over HTTP/2 HAProxy keeps the spaces and tabs around a `cookie` field's value, where it drops those
+  around any other field's, so a `cookie` field that starts with two of them, as one of spaces alone does, or ends with
+  three is answered `400` too, where Envoy serves it.
 - **A WebSocket upgrade with no `Sec-WebSocket-Key` is answered `400`** by HAProxy's parser, where Envoy passes it on,
   or answers `403` to an origin it does not admit.
 - **More than 100 header lines are answered `431`, or `400` from 102 lines**, where Envoy answers `431`, and over
@@ -201,9 +527,11 @@ service what Envoy would not, are in [the next section](#where-haproxy-is-less-s
   where Envoy finds no environment for the joined or whole value and answers `404`.
 - **`Transfer-Encoding: chunked` on two lines is answered `400`, and `Transfer-Encoding: gzip, chunked` `422`**, where
   Envoy answers `501`.
-- **A header of 20,000 bytes is answered `431`, and a path of 20,000 bytes `414`**, where Envoy, under its default limit
-  of 60 KiB, serves both. Over HTTP/2, a path whose escaped form outgrows HAProxy's buffer, such as one of 7,000 bytes
-  above 0x7F, is answered `400` by HAProxy 3.4.7 and `500` by 3.2.26, where Envoy serves it.
+- **A request line and header lines of more than 15,277 bytes together are answered `431`, and a request line of 16,319
+  bytes or more `414`**, counted as sent with their line ends, with Host alone beside the request line and 4 bytes fewer
+  for each further header line (HAProxy 3.4.7: 8 bytes more for each bound), where Envoy serves both up to its default
+  limit of 60 KiB. Over HTTP/2, a path whose escaped form outgrows HAProxy's buffer, such as one of 7,000 bytes above
+  0x7F, is answered `400` by HAProxy 3.4.7 and `500` by 3.2.26, where Envoy serves it.
 - **A request line with no version, HTTP/0.9's own form, is answered `400`**, where Envoy answers `426`.
 - **Over HTTP/2, a header or trailer name outside RFC 9110's token characters or a `#` in `:path` resets the stream**,
   where Envoy closes the connection or answers `400`, and a request with neither `:authority` nor `host` is answered
@@ -215,8 +543,10 @@ service what Envoy would not, are in [the next section](#where-haproxy-is-less-s
 
 These differences are not stricter than the Envoy output: in each, HAProxy serves a request the Envoy output refuses or
 ends, or sends a service what the Envoy output would not. HAProxy's parsers decide each before any rule of the file
-reads the request, and its timeout counts the time without data, so the file cannot close them, but for the one on a
-control byte in a value: that one is measured for every control byte, and this version writes no rule for it.
+reads the request, its timeout counts the time without data, and no fetch reads a request trailer, which
+`option http-drop-request-trailers` removes before the service, so the file cannot close them. A header value that holds
+a control byte is not among them: the file refuses it with a rule, as Envoy does, and the entry on a trailer's value is
+the one that stays.
 `proxyfile render --target haproxy` counts them on standard error after it writes the files, and HAProxy's column in
 [Portability](portability.md#support-by-proxy-from-the-generators) names each on its row. Measured on HAProxy 3.2.26 and
 3.4.7 beside Envoy 1.40.2:
@@ -230,7 +560,7 @@ control byte in a value: that one is measured for every control byte, and this v
 - **Content-Length beside Transfer-Encoding: chunked is served**: `Content-Length: 3` beside `Transfer-Encoding: chunked`, with a chunked body, reaches the service chunked and with no `Content-Length`, where Envoy answers `400`.
 - **over HTTP/2, two host fields and no :authority are served**: Over HTTP/2 with no `:authority`, `host: api.example.com` and then `host: evil.example.net` reach the service as the first, and the same host twice as one, where Envoy closes the connection.
 - **a WebSocket upgrade a service answers without switching passes the service's body**: A WebSocket upgrade a service answers `200` without switching reaches the client with the service's body, where Envoy passes the status and headers with no body.
-- **a header or trailer value holding a control byte is served**: A header value holding one of the bytes 0x01 to 0x08, 0x0B, 0x0C, 0x0E to 0x1F or 0x7F reaches the service as sent, over HTTP/1.1 and HTTP/2, and a chunked request whose trailer value holds one is served, the service receiving its body and no trailer, where Envoy answers `400` over HTTP/1.1 and closes the connection over HTTP/2. HAProxy refuses 0x00, a line feed and a carriage return in either value, with `400` over HTTP/1.1 and a reset stream over HTTP/2.
+- **a trailer value holding a control byte is served**: A request trailer value holding one of the bytes 0x01 to 0x08, 0x0B, 0x0C, 0x0E to 0x1F or 0x7F is served, the service receiving the body and no trailer, where Envoy answers `400` over HTTP/1.1 and closes the connection over HTTP/2. A header value holding one is answered `400` over HTTP/1.1, as by Envoy, and its stream is reset over HTTP/2, where Envoy closes the connection; HAProxy refuses 0x00, a line feed and a carriage return in either value, with `400` over HTTP/1.1 and a reset stream over HTTP/2.
 - **without timeouts.request, an answer that keeps arriving runs past 15 s**: Without `timeouts.request`, a service that keeps sending runs past 15 s, where the Envoy output ends a request 15 s after it starts: HAProxy's `timeout server` counts the time without data (on HAProxy 3.4.7, a service that sent one byte a second for 10 s under a 2 s `timeout server` was served).
 <!-- /keys -->
 
@@ -294,6 +624,9 @@ origins and patterns over HTTP/1.1 and HTTP/2:
 With `allow_headers: "*"`, a preflight that asks for no headers gets no `Access-Control-Allow-Headers`, where Envoy
 sends the header empty: the difference HAProxy's row of `cors.allow_headers` names.
 
+An origin an environment admits but that is too long for the file to echo is answered `403`, before the check and the
+service ([the differences of the auth check](#where-haproxy-answers-the-check-otherwise-than-the-envoy-output)).
+
 ## TLS
 
 The listener takes TLS 1.2 and 1.3, of TLS 1.2 the ECDHE suites with AES-GCM or ChaCha20 alone, and the key exchange
@@ -326,6 +659,14 @@ peer's address alone when the client sent none or an empty one; `x-envoy-externa
 underscores, such as `x_forwarded_proto`, is another header to both proxies and reaches the service as sent. Measured
 on HAProxy 3.2.26 and 3.4.7 beside Envoy 1.40.2 over HTTP/1.1 and HTTP/2.
 
+Under `forwarded`, a request is answered `404` when its `X-Forwarded-Proto` is empty, comes as two empty lines or, over
+HTTP/1.1, is spaces alone, before the file reads the request's origin, preflight, dot segment or upgrade, as Envoy does.
+HAProxy's HTTP/2 decoder drops the spaces of a value, so over HTTP/2 spaces alone are answered `404` too, where Envoy
+serves them. A client's own
+`X-Request-Id` that is too long for the room HAProxy keeps for the lines it adds to an answer is answered `400` before the
+check and the service
+([the differences of the auth check](#where-haproxy-answers-the-check-otherwise-than-the-envoy-output)).
+
 ## What HAProxy writes with no key
 
 Each of these is in every file the HAProxy generator writes. Each was measured on HAProxy 3.2.26 and 3.4.7, and
@@ -334,12 +675,18 @@ Envoy's answers on Envoy 1.40.2, unless it says otherwise.
 - **No request is tried again** (`retries 0`): without the line, HAProxy 3.4.7 tried a connection the service refused
   three more times, where the Envoy output tries a request again only when a route's `retries` asks, a key this
   version refuses.
-- **A service has 5 s to take the connection** (`timeout connect 5s`), Envoy's default connect timeout (read in
-  Envoy's documentation, not run).
+- **A service has 5 s to take the connection** (`timeout connect 5s`), Envoy's default connect timeout (Envoy
+  answered a service that never took the connection after 5.01 s). A gRPC service has 15 s: HAProxy does not bound an
+  HTTP/2 connection to a service by `timeout connect`, so one that never takes the connection is answered after the
+  15 s a service that sends nothing gets (15.02 s), a gRPC call as below and any other request `504`, where Envoy's
+  answer to it is an empty `502` (declared on `services.<service name>.grpc`).
 - **5 minutes with no data from the client end a request** (`timeout client 300s`), Envoy's default stream idle
   timeout (read in each proxy's documentation, not run). **A service that sends nothing for 15 s is answered `504`**
   (`timeout server 15s`), at the same time as by the Envoy output, which ends a request 15 s after it starts when
   `timeouts.request` is not written (measured over HTTP/1.1 and HTTP/2: `504` after 15.01 s, Envoy's after 15.00 s).
+  The `504` carries Envoy's body, `upstream request timeout` as `text/plain`, and Envoy's reason, `Gateway Timeout`,
+  where HAProxy's own is an HTML page with the reason `Gateway Time-out`: the file writes the body from a variable the
+  frontend sets for every request but a gRPC call, whose `504` has none, and the reason with `set-status`.
   HAProxy counts its limits in time without data, so a service that keeps sending runs past 15 s (measured on HAProxy
   3.4.7, a service that sent one byte a second for 10 s under a 2 s `timeout server` was served), the difference
   HAProxy's row of `timeouts.request` names. With `timeouts.request: none` the service has 5 minutes of silence
@@ -348,7 +695,28 @@ Envoy's answers on Envoy 1.40.2, unless it says otherwise.
   as by the Envoy output: HAProxy's own answer is a `503`, which the file writes with an empty body
   (`http-error status 503`) and turns into `502`. Over HTTP/1.1, a service that does not take the connection within
   the 5 s gets the same `502`. A service that closes the connection before its answer gets an empty `502` too
-  (`http-error status 502`), where HAProxy's own is an HTML page.
+  (`http-error status 502`), where HAProxy's own is an HTML page. The `502` carries Envoy's reason, `Bad Gateway`,
+  where HAProxy's `set-status` wrote `Bad Gateway or Proxy Error` over HTTP/1.1. Over HTTP/2 it carries
+  `content-length: 0`, where Envoy's carries none; over HTTP/1.1 both carry it.
+- **A gRPC call the file refuses before any service is answered as Envoy answers it**: `200` with
+  `content-type: application/grpc` and the `grpc-status` of the refusal's status, where HAProxy answered the status
+  itself. A host no environment names, an empty `X-Forwarded-Proto` under `forwarded` and no route get 12, where a
+  request that is not gRPC gets `404`; an upgrade other than WebSocket gets 7, with `grpc-message: Invalid CORS request`
+  when the call carries an `Origin`, and a refused origin 7 with that message, where such a request gets `403`; `%00` in
+  the path and a dot segment with an escaped `;` parameter get 13, where such a request gets `400`. Over HTTP/2 the
+  answer is one header frame with no `content-length`, and over HTTP/1.1 it keeps `content-length: 0`, as Envoy's does.
+  A call only HAProxy refuses, where Envoy serves it, gets the plain answer, such as the `400` to a client's
+  `X-Request-Id` too long for HAProxy (declared on `services.<service name>.grpc`), and a dot segment whose `;` is
+  written with dots gets 13, where Envoy resolves the segment and routes the call (declared on the dot segment's row).
+- **A gRPC call HAProxy gets no answer for is answered as Envoy answers it**: `200` with
+  `content-type: application/grpc` and `grpc-status: 14` in one header frame, where HAProxy answered `502` with an
+  empty body, and `504` with its HTML page. That is a service that refuses the connection, resets it, closes it before
+  its answer, resets the stream, answers in HTTP/1.1 or sends nothing for 15 s, and the last three carry Envoy's
+  `grpc-message`: `upstream connect error or disconnect/reset before headers. reset reason: remote reset`, the same
+  with `protocol error`, and `upstream request timeout`. A gRPC call is told by its content type, as the check's
+  refusal tells one: `application/grpc` alone or followed by `+`, compared as written. Over HTTP/1.1 the answer keeps
+  `content-length: 0`, as Envoy's does. A gRPC call to an HTTP service gets the same, except the `REFUSED_STREAM`
+  below.
 - **Each request reaches a service on a connection of its own** (`option http-server-close` and
   `option http-pretend-keepalive`, and `max-reuse 0` on a gRPC server's line): an HTTP service's connection is closed
   after its answer, and a gRPC service's carries one call. HAProxy kept its connections to a service, and when the
@@ -363,7 +731,7 @@ Envoy's answers on Envoy 1.40.2, unless it says otherwise.
 - **An HTTP/2 client whose service never answers the connect is told to retry the request on another connection after
   5 s** (`REFUSED_STREAM`), where an HTTP/1.1 client gets the `502` and Envoy answers `502` over HTTP/2 after the same
   5 s. No service received the request, as the reset says, and curl retried it five times over 30 s before it gave
-  up.
+  up. A gRPC call to such a service gets the same reset, where Envoy answers it `200` with `grpc-status: 14`.
 - **Every response carries `x-request-id`**, as with Envoy: a version 4 UUID HAProxy makes (`uuid(4)`), as Envoy
   makes one, or with `client_address: forwarded` the client's own, which the service receives too; with `connection`
   a client's own id is replaced, as Envoy replaces it.
@@ -377,5 +745,10 @@ Envoy's answers on Envoy 1.40.2, unless it says otherwise.
 - **WebSocket is the one upgrade passed on**, as by Envoy: a request with another `Upgrade`, or with an `Upgrade` that
   holds more than `websocket` on one line or two, is answered `403`, and an `Upgrade` that `Connection` does not name
   is removed. An `h2c` upgrade is answered `400` (above).
+- **A request that carries `Expect: 100-continue` and no body gets no `100 Continue` from HAProxy**, where Envoy sends one
+  before its answer; no client waits for it, since a client sends the expectation only with a body.
+- **Over HTTP/2, an empty answer HAProxy makes itself carries `content-length: 0`**, where Envoy's carries none: a `404`
+  for an unknown host, a `400` and, in a file with the check, the `403` of an unanswered check. Over HTTP/1.1 both send
+  `content-length: 0`.
 - **A render for HAProxy reads no key of the [`envoy`](envoy.md) block and refuses none of them**, so tracing written
   at `envoy.tracing` is Envoy's alone; a render for Envoy reads it as before.

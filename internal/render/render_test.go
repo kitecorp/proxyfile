@@ -172,14 +172,15 @@ func TestExampleFormsMatchTheFolders(t *testing.T) {
 
 // One gateway, whichever way it is written: for each target, a render of each other form of an example is refused
 // exactly when the example's yaml folder commits <target>.refused, and otherwise every file it writes equals the file
-// the yaml folder commits, byte for byte. TestExamplesAreCurrent keeps the yaml folder's files equal to the render of
-// the YAML form, and each form's own refusal lines, which name its own file, line and column.
+// the yaml folder commits, byte for byte. A form that moves a key into the envoy block is compared for the Envoy
+// target alone (testsupport.ExampleForm.EnvoyBlock). TestExamplesAreCurrent keeps the yaml folder's files equal to the
+// render of the YAML form, and each form's own files and refusal lines, which name its own file, line and column.
 func TestBothFormsGiveTheSameFiles(t *testing.T) {
 	for _, target := range Targets {
 		for _, form := range testsupport.ExampleForms {
 			example, _, _ := strings.Cut(form.Dir, "/")
 			yamlDir := example + "/yaml"
-			if form.Dir == yamlDir {
+			if form.Dir == yamlDir || form.EnvoyBlock && target.Name != "envoy" {
 				continue
 			}
 			t.Run(target.Name+"/"+form.Dir, func(t *testing.T) {

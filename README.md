@@ -11,15 +11,15 @@ You describe your gateway in one short file: the services behind it, the routes 
 writes the complete configuration of the proxy you run from it.
 
 Generators: Envoy writes every key; nginx writes routing, CORS with the origin lists, the client's address, header
-removal and TLS ([docs/nginx.md](docs/nginx.md)), and HAProxy routing, TLS and CORS ([docs/haproxy.md](docs/haproxy.md)),
-each refusing by name the keys it does not write.
+removal and TLS ([docs/nginx.md](docs/nginx.md)), and HAProxy routing, TLS, CORS and the auth check
+([docs/haproxy.md](docs/haproxy.md)), each refusing by name the keys it does not write.
 
 ```mermaid
 flowchart TB
     source["Your proxyfile<br/>YAML or HOCON"] --> render["proxyfile render"]
     render --> envoy["The Envoy configuration<br/>every key"]
     render --> nginx["The nginx configuration<br/>routing, CORS, the client's address,<br/>header removal and TLS"]
-    render --> haproxy["The HAProxy configuration<br/>routing, TLS and CORS"]
+    render --> haproxy["The HAProxy configuration<br/>routing, TLS, CORS<br/>and the auth check"]
 ```
 
 <picture>
@@ -79,8 +79,9 @@ proxyfile check -o envoy.yaml                     # in the build: renders again,
 proxyfile render --target nginx -o nginx.conf     # routing, CORS, the client's address, header removal and TLS, and
                                                   # proxyfile.js beside it; other keys are refused, and a line on
                                                   # standard error counts where it is less strict than Envoy
-proxyfile render --target haproxy -o haproxy.cfg  # HAProxy 3.2 or 3.4: routing, TLS, CORS; other keys refused by name,
-                                                  # and the same line counts where it is less strict than Envoy
+proxyfile render --target haproxy -o haproxy.cfg  # HAProxy 3.2 or 3.4: routing, TLS, CORS and the auth check; other
+                                                  # keys refused by name, and the same line counts where it is less
+                                                  # strict than Envoy
 ```
 
 The `envoy.yaml` it writes has the listener on 8000, a cluster for `app` on 3000, the route and the CORS filter for the

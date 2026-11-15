@@ -1,9 +1,3 @@
-examples/tracing/hocon/Proxyfile: auth: "auth" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/tracing/hocon/Proxyfile: auth.accept: "auth.accept" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/tracing/hocon/Proxyfile: auth.ask: "auth.ask" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/tracing/hocon/Proxyfile: auth.enabled: "auth.enabled" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/tracing/hocon/Proxyfile: auth.timeout: "auth.timeout" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/tracing/hocon/Proxyfile: auth.when_unavailable: "auth.when_unavailable" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/tracing/hocon/Proxyfile: tracing: "tracing" is refused by --target haproxy: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy
 examples/tracing/hocon/Proxyfile: tracing.path_in_url: "tracing.path_in_url" is refused by --target haproxy: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy
 examples/tracing/hocon/Proxyfile: tracing.provider: "tracing.provider" is refused by --target haproxy: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy

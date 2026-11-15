@@ -1,0 +1,48 @@
+# The conformance battery's file with an auth check whose service has two addresses: nginx-plain.yaml with the check.
+# The check service, checks, is at 10.0.3.31 and 10.0.3.32, the battery's check-1 and check-2, so a row can make one
+# of them refuse connections and see that each check sent there fails, which no other backend answers. Its
+# when_unavailable is deny, where haproxy.yaml's is allow, so the rows of an answer the check cannot give run in both
+# modes. The check is asked only of a request with an x-api-key header, a header the script passes on line by line,
+# where haproxy.yaml's authorization is one it joins into one line, so the rows hold the condition for both kinds; a
+# row that sends neither is served as on nginx-plain.yaml. It writes no tls and keeps client_address at forwarded, the default with no tls, and send_request
+# tells the check the scheme a client in front sent; accept names x-user-check alone, the header in which the stub's
+# check reports what it was told, so a row reads that from the service's echo. remove_from_clients also names the prefix
+# ho*, which covers Host: a proxy keeps a client's Host under it, as Envoy does, or no request on this file reaches a
+# route. Every entry that runs it, Envoy's too, measures its literals on Envoy.
+listen: 10000
+admin: 9901
+services:
+  shop:
+    http: 8080
+    grpc: 8081
+    addresses: ["10.0.1.11", "10.0.1.12"]
+  accounts: {grpc: 7070, http: 7070, host_header: "127.0.0.1:7070"}
+  catalog: {http: 8090, address: "10.0.2.21"}
+  checks: {http: 7070, addresses: ["10.0.3.31", "10.0.3.32"]}
+auth:
+  ask: checks /auth/check
+  timeout: 1500ms
+  enabled: true
+  when_unavailable: deny
+  only_with_header: x-api-key
+  accept: [x-user-check]
+  send_request: true
+remove_from_clients: [x-request-id, ho*]
+origins:
+  live: {hosts: [api.example.com, api.example.org]}
+  test: {hosts: [api.test.example.com]}
+  local: {hosts: [127.0.0.1, localhost]}
+routes:
+  - rpc:
+      to:
+        example.shop.*: {service: shop, name: shop}
+        "*": accounts
+  - {name: accounts-webhooks, path: /api/webhooks, method: POST, to: accounts, rewrite: /hooks/payments}
+  - {name: catalog, prefix: /catalog/, to: catalog}
+  - {name: hooks, prefix: /hooks/, to: accounts, rewrite: /in/}
+  - {name: shop, prefix: /, to: shop}
+rpc:
+  methods:
+    - {service: example.shop.v1.CartService, method: GetCart}
+    - {service: example.accounts.v1.ProfileService, method: GetProfile}
+    - {service: example.shop.v1.CartService, method: AddItem}

@@ -32,7 +32,8 @@ const (
 // containers are the battery's containers. Their order does not matter: measured on Docker 29.9.3, removing the
 // proxy while accounts still shares its network namespace succeeds, and accounts runs on until it is removed too.
 var containers = []string{accounts, proxy, "proxyfile-conformance-shop-1", "proxyfile-conformance-shop-2",
-	"proxyfile-conformance-catalog", "proxyfile-conformance-resolver"}
+	"proxyfile-conformance-catalog", "proxyfile-conformance-check-1", "proxyfile-conformance-check-2",
+	"proxyfile-conformance-resolver"}
 
 // runFolder holds all a run writes to disk: the rendered file in config, the stub's build in stub, and the TLS files
 // with the server's key in tls and jwt. The battery names it as it names its Docker objects, so a run killed before
@@ -80,12 +81,14 @@ func claimWorld(t *testing.T) {
 // startWorld starts the network of the examples the battery runs and the proxy tg on the rendered file in config, and
 // waits until the proxy is ready; claimWorld, called first, removes all of it when the test ends. The addresses are
 // those examples/full and examples/portable both write: the shop backends at 10.0.1.11 and 10.0.1.12, the resolver at
-// 10.0.0.2 answering catalog.internal.example with 10.0.2.21, and accounts on 127.0.0.1:7070, which only a container
-// in the proxy's own network namespace can answer. 10.0.0.0/22 is the smallest block holding every one of them. The
-// collector at 10.0.3.40, which only examples/full names, is left unreachable: no request waits for it. The ports
-// 10000 and 9901 and the folders /config, /etc/gateway/tls and /etc/gateway/jwt are the examples' listen, admin and
-// tls keys and examples/full's auth.jwt.ca, the same for every target. plain says the rendered file's listener speaks
-// plain HTTP, so the clients do too.
+// 10.0.0.2 answering catalog.internal.example with 10.0.2.21, and accounts on 127.0.0.1:7070, which only a container in
+// the proxy's own network namespace can answer; and the two backends of the check service of
+// conformance/testdata/two-checks.yaml, check-1 at 10.0.3.31 and check-2 at 10.0.3.32, each the stub's accounts on
+// 7070, so a row can make one of them refuse connections. 10.0.0.0/22 is the smallest block holding every one of them.
+// The collector at 10.0.3.40, which only examples/full names, is left unreachable: no request waits for it. The ports
+// 10000 and 9901 and the folders /config, /etc/gateway/tls and /etc/gateway/jwt are the examples' listen, admin and tls
+// keys and examples/full's auth.jwt.ca, the same for every target. plain says the rendered file's listener speaks plain
+// HTTP, so the clients do too.
 func startWorld(t *testing.T, tg target, config string, plain bool) *world {
 	buildStub(t, filepath.Join(runFolder, "stub"))
 	files := certificates(t, runFolder)
@@ -110,6 +113,8 @@ func startWorld(t *testing.T, tg target, config string, plain bool) *world {
 	serve("shop-1", "10.0.1.11", "shop", "8080,8081")
 	serve("shop-2", "10.0.1.12", "shop", "8080,8081")
 	serve("catalog", "10.0.2.21", "catalog", "8090")
+	serve("check-1", "10.0.3.31", "accounts", "7070")
+	serve("check-2", "10.0.3.32", "accounts", "7070")
 	backend("resolver", "10.0.0.2", "dns", "-listen", ":53", "catalog.internal.example=10.0.2.21")
 	// The listener is published on a port Docker picks, so a run never meets a port another program holds.
 	mustDocker(t, append([]string{"run", "-d", "--name", proxy, "--network", network, "--ip", "10.0.0.10",

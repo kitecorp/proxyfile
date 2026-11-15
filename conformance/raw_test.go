@@ -25,7 +25,8 @@ import (
 // HEADERS frame of the same fields, each a literal HPACK field with no index and no Huffman coding, then the body as a
 // DATA frame and the trailers as a second HEADERS frame, and reads frames until the stream ends. A closed or reset connection, or a
 // GOAWAY, before the answer is an error, as a client sees a proxy that refused the request so. The connection is the
-// clients' own (TLS with the client certificate, or plain), opened for this request alone.
+// clients' own (TLS with the client certificate, or plain), opened for this request alone. With r.halfClose it closes
+// its side once the request is written (closeWrite).
 func (w *world) sendRaw(r request) result {
 	start := time.Now()
 	fail := func(err error) result { return result{err: err, elapsed: time.Since(start)} }
@@ -39,6 +40,10 @@ func (w *world) sendRaw(r request) result {
 	}
 	names := slices.Sorted(maps.Keys(r.headers))
 	if r.proto == "h2" {
+		if r.halfClose {
+			// HTTP/2 ends a request with its stream, not with the connection, so this is a mistake in the scenario data.
+			panic("the battery half-closes a raw request over http/1.1 only")
+		}
 		got := w.sendFrames(conn, r, names)
 		got.elapsed = time.Since(start)
 		return got
@@ -70,6 +75,11 @@ func (w *world) sendRaw(r request) result {
 	}
 	if _, err := io.WriteString(conn, text.String()); err != nil {
 		return fail(err)
+	}
+	if r.halfClose {
+		if err := closeWrite(conn); err != nil {
+			return fail(err)
+		}
 	}
 	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
 	if err != nil {
@@ -112,6 +122,22 @@ func (w *world) dialRaw(proto, serverName string) (net.Conn, error) {
 		return nil, fmt.Errorf("the listener chose ALPN %q, not %q", got, config.NextProtos[0])
 	}
 	return conn, nil
+}
+
+// closeWrite closes the sending side of conn and leaves its reading side open. Over TLS it sends close_notify first,
+// which crypto/tls's CloseWrite sends without closing the TCP connection's side (its doc comment), and then the FIN.
+func closeWrite(conn net.Conn) error {
+	if secure, ok := conn.(*tls.Conn); ok {
+		if err := secure.CloseWrite(); err != nil {
+			return err
+		}
+		conn = secure.NetConn()
+	}
+	plain, ok := conn.(*net.TCPConn)
+	if !ok {
+		return fmt.Errorf("the battery half-closes a TCP connection, not a %T", conn)
+	}
+	return plain.CloseWrite()
 }
 
 // HTTP/2's frame types and flags this sender reads or writes (RFC 9113, section 6).

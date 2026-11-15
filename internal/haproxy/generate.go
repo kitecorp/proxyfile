@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"regexp"
 	"slices"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/kitecorp/proxyfile/v2/internal/format"
 	"github.com/kitecorp/proxyfile/v2/internal/generator"
 	"github.com/kitecorp/proxyfile/v2/internal/model"
 	"github.com/kitecorp/proxyfile/v2/internal/origins"
@@ -36,7 +38,8 @@ type view struct {
 	Admin         int64    // 0 without admin
 	Listen        int64
 	ServerTimeout string   // timeout server: 15s without timeouts.request, 300s with none
-	Removed       []string // del-header's arguments, in the order generator.RemovedFromClients gives
+	LongestID     int      // idRoom, the longest X-Request-Id a client may send under forwarded
+	Removed       []string // del-header's arguments (removal), in the order generator.RemovedFromClients gives
 	EnvoyRemoved  []string // generator.RemovedByEnvoy
 	Methods       string   // generator.EnvoyMethods, joined by spaces
 	// ConnectionTokens is generator.ConnectionTokens, and TooManyConnectionTokens the fewest tokens Envoy refuses.
@@ -48,9 +51,48 @@ type view struct {
 	Scheme                  string   // the scheme x-forwarded-proto carries: https with tls, http without
 	Environments            []environment
 	originCheck
+	GRPC     grpcStatuses
 	Routes   []route
 	Rewrites []rewrite
 	Backends []backend
+	// Unchecked is generator.UncheckedMark with auth.ask, enabled or not, whose client's copy is removed after the
+	// others; "" without auth.ask.
+	Unchecked string
+	Check     *checkView // nil without auth.ask or with enabled: false
+}
+
+// checkView is the data of the auth check's lines. The action's arguments come in the order the script reads them:
+// Relay, the socket of the relay to the check service, quoted; Path, Send and Accept, quoted, a list's names joined by
+// commas, a prefix with its *, and - for none; then Millis, Unavailable (allow or deny) and SendRequest (1 or 0), the
+// generator's own words, written bare. Bind is the relay's socket for its bind line, the generator's own text too.
+// OnlyWith is auth.only_with_header, whose own line sets txn.pf_header; Ask is the condition that asks a request,
+// written after if; Questions is the RPC question of each method that has
+// one; Servers is one server line's arguments for each address of the check service.
+type checkView struct {
+	Relay, Bind                 string
+	Path, Send, Accept          string
+	Millis                      int64
+	Unavailable, SendRequest    string
+	OnlyWith                    string // auth.only_with_header, "" without it
+	Ask                         string
+	Questions                   []question
+	Servers                     []string
+	ActionHeader, ReportsHeader string // generator.QuestionHeaders, set for the check and removed after it
+}
+
+// grpcStatuses is the grpc-status of each of the file's own refusals of a gRPC call that Envoy makes too, by the
+// refusal's HTTP status (generator.GRPCStatus): Envoy answers a gRPC call it refuses itself 200 with the status mapped,
+// and the pass rule answers an unanswered check under deny as Envoy does, with the mapped 403.
+type grpcStatuses struct {
+	BadRequest, Forbidden, NotFound int
+}
+
+// question is one header of a method's RPC question: Header is a name of generator.QuestionHeaders and Value its value,
+// written as a log-format string, set on a request of the RPC group route Route whose path is Path, quoted.
+type question struct {
+	Header, Value string
+	Route         int
+	Path          string
 }
 
 type tlsView struct {
@@ -78,22 +120,48 @@ type environment struct {
 // originCheck is the data of the browser origin lines, which every file holds: Envoy refuses another site's origin
 // with 403 and adds Vary: Origin to every answer whatever the file's cors and lists (measured on Envoy 1.40.2). Listed
 // says an environment lists origins or patterns. Answer is the preflight answer's headers every admitted origin gets;
-// Expose is the quoted expose_headers, "" when not written.
+// Expose is the quoted expose_headers, "" when not written. LongestOrigin is the longest admitted Origin the file
+// echoes (echoRoom), and LongestEcho the most an echoed Origin and a client's own X-Request-Id take together under
+// forwarded (idRoom).
 type originCheck struct {
 	Listed         bool
 	Answer, Expose string
+	LongestOrigin  int
+	LongestEcho    int
 }
+
+// echoRoom is the bytes an echoed Origin and expose_headers may take together. HAProxy adds the after-response lines
+// to a service's answer within the 1,024 bytes its buffer keeps for rewrites (tune.maxrewrite), and when the answer
+// had filled the rest of the buffer it answered 500 after the service did the work: with the 36 bytes of the request
+// id HAProxy writes, an Origin and an expose list of 872 bytes together were echoed in every try, and 882 got 500 in
+// most (measured on HAProxy 3.2.26 and 3.4.7 with expose lists of 12 and 32 bytes and an answer of 100 KB, over
+// HTTP/1.1 and HTTP/2, where Envoy 1.40.2 served each).
+const echoRoom = 872
+
+// ownID is the length of the request id HAProxy writes (uuid(4)), with which echoRoom was measured, and idRoom the
+// longest X-Request-Id a client may send under forwarded, where it is kept and echoed on every answer in the same
+// 1,024 bytes: with an answer of 100 KB, an id of 984 bytes and no echoed Origin was served in every try and 988 got
+// 500 in most, and an id, an echoed Origin and expose_headers of 912 bytes together were served and 918 got 500 in
+// most (measured on HAProxy 3.2.26 and 3.4.7, over HTTP/1.1 and HTTP/2, where Envoy 1.40.2 served each). An echoed
+// Origin and the id share echoRoom and ownID's bytes, so the bound of each holds with the other at its longest.
+const (
+	ownID  = 36
+	idRoom = 980
+)
 
 // route is one route the file picks: ID is its number in the generated order, from 1, and Matches the conditions of
 // its rules, one a line: the rpc entry's paths to one service, or the route's one condition. Program is the quoted
 // program of a route's pattern, which the script runs before the condition reads its answer, "" for a route with
-// none; Pattern is the pattern, Go-quoted, for the comment line that says which pattern the program is.
+// none; Pattern is the pattern, Go-quoted, for the comment line that says which pattern the program is. authOff says
+// the route is written auth: off, and methods holds the paths of an rpc entry's route, as the methods give them.
 type route struct {
 	ID      int
 	Matches []string
 	Backend string
 	Program string
 	Pattern string
+	authOff bool
+	methods []string
 }
 
 type rewrite struct {
@@ -119,7 +187,9 @@ func Generate(in generator.Input) ([]generator.File, error) {
 	g := in.Gateway
 	v := view{Header: generator.Header, Listen: g.Listen.Number, ClientAddress: model.ClientForwarded, Scheme: "http",
 		EnvoyRemoved: generator.RemovedByEnvoy, Methods: strings.Join(generator.EnvoyMethods, " "),
-		ConnectionTokens: generator.ConnectionTokens, TooManyConnectionTokens: generator.MostConnectionTokens + 1}
+		ConnectionTokens: generator.ConnectionTokens, TooManyConnectionTokens: generator.MostConnectionTokens + 1, LongestID: idRoom,
+		GRPC: grpcStatuses{BadRequest: generator.GRPCStatus[http.StatusBadRequest], Forbidden: generator.GRPCStatus[http.StatusForbidden],
+			NotFound: generator.GRPCStatus[http.StatusNotFound]}}
 	v.ServerTimeout = "15s"
 	if g.Timeouts.Request != nil {
 		v.ServerTimeout = "300s"
@@ -140,11 +210,12 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		v.Admin = g.Admin.Number
 	}
 	for _, header := range generator.RemovedFromClients(g) {
-		argument := quote(header.Name)
-		if header.Prefix {
-			argument += " -m beg"
+		if line := removal(header); line != "" {
+			v.Removed = append(v.Removed, line)
 		}
-		v.Removed = append(v.Removed, argument)
+	}
+	if g.Auth != nil {
+		v.Unchecked = generator.UncheckedMark
 	}
 	var values values
 	v.Environments, v.originCheck = environments(in.Origins, &values)
@@ -157,6 +228,9 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		return nil, refused
 	}
 	v.Backends = backends(g)
+	if g.Auth != nil && g.Auth.Enabled {
+		v.Check = check(in, v.Routes)
+	}
 	var out bytes.Buffer
 	if err := configuration.Execute(&out, v); err != nil {
 		return nil, fmt.Errorf("haproxy: %w", err)
@@ -213,7 +287,112 @@ func environments(file *origins.File, v *values) ([]environment, originCheck) {
 	if c.ExposeHeaders != "" {
 		expose = logFormat(c.ExposeHeaders)
 	}
-	return list, originCheck{Listed: listed, Answer: answer, Expose: expose}
+	return list, originCheck{Listed: listed, Answer: answer, Expose: expose, LongestOrigin: max(0, echoRoom-len(c.ExposeHeaders)),
+		LongestEcho: max(0, echoRoom+ownID-len(c.ExposeHeaders))}
+}
+
+// keptByPrefix are the headers a prefix of remove_from_clients or auth.accept leaves on the request, as Envoy 1.40.2
+// does: a del-header by the prefix removed Host, so that every request was answered 404, and Transfer-Encoding, so
+// that the service lost the body (measured on HAProxy 3.2.26 and 3.4.7). Envoy removes TE under a prefix, as HAProxy
+// does, and keep-alive, trailer, expect, proxy-connection and http2-settings, as HAProxy does (measured). keptWhole are
+// the ones a name written in full leaves: Envoy sent Transfer-Encoding on with the body chunked, and answered 404
+// without Host, as HAProxy does. notWritten refuses a prefix or a name that covers format.HAProxyNotRemovable.
+var (
+	keptByPrefix = []string{"host", "transfer-encoding"}
+	keptWhole    = []string{"transfer-encoding"}
+)
+
+// removal is del-header's argument for one header removed from clients: its quoted name, "" for a name of keptWhole,
+// which no line removes, or for a prefix the prefix matched at the start of a name, as a regular expression that
+// leaves out the names of keptByPrefix it covers.
+func removal(header model.Header) string {
+	if !header.Prefix {
+		if slices.Contains(keptWhole, header.Name) {
+			return ""
+		}
+		return quote(header.Name)
+	}
+	var kept []string
+	for _, name := range keptByPrefix {
+		if rest, ok := strings.CutPrefix(name, header.Name); ok {
+			kept = append(kept, regexp.QuoteMeta(rest)+"$")
+		}
+	}
+	if kept == nil {
+		return quote(header.Name) + " -m beg"
+	}
+	return quote("^"+regexp.QuoteMeta(header.Name)+"(?!"+strings.Join(kept, "|")+")") + " -m reg"
+}
+
+// check is the data of the auth check's lines, for a gateway whose auth.ask is enabled, with the routes the file picks.
+// The read rules have made the check service a declared service with an http port.
+func check(in generator.Input, routes []route) *checkView {
+	a := in.Gateway.Auth
+	service := in.Gateway.Service(a.Service.Value)
+	port, _ := service.Port(model.HTTP)
+	socket := "abns@proxyfile-" + strconv.FormatInt(in.Gateway.Listen.Number, 10) + "-check"
+	c := &checkView{Relay: quote(socket), Bind: socket, Path: quote(a.Path), Send: headerList(a.Send), Accept: headerList(a.Accept),
+		Millis: a.Timeout.Millis, Unavailable: "deny", SendRequest: "0",
+		ActionHeader: generator.QuestionHeaders[0].Name, ReportsHeader: generator.QuestionHeaders[1].Name}
+	if a.Allow {
+		c.Unavailable = "allow"
+	}
+	if a.SendRequest {
+		c.SendRequest = "1"
+	}
+	// Envoy asks a request whose only_with_header holds a byte, on a route that is not auth: off, that its CORS filter
+	// does not answer as a preflight; and a request with a dot segment and a parameter whatever its route, as the route
+	// of Envoy's own that refuses one is checked (measured on Envoy 1.40.2). It reads the header's lines as one value,
+	// joined by commas, so the template's line sets txn.pf_header when a line is not empty (req.fhdr reads each line
+	// whole, where req.hdr would split it at its commas) or when the header comes on two lines or more, empty ones
+	// too; a header pf_join joins is one line by then. Over HTTP/2 HAProxy reads a value of spaces as empty, which
+	// Envoy asks, so the line sets it for every HTTP/2 request that carries the header, an empty one too, which Envoy
+	// does not ask (auth.only_with_header). A condition cannot hold an OR inside the ask line's AND, hence the variable.
+	header := ""
+	if a.OnlyWithHeader != "" {
+		c.OnlyWith = a.OnlyWithHeader
+		header = "{ var(txn.pf_header) -m bool } "
+	}
+	c.Ask = header
+	routeOf := map[string]int{} // the route of each RPC method's path
+	for _, r := range routes {
+		if r.authOff {
+			c.Ask += "!{ var(txn.route) -m str " + strconv.Itoa(r.ID) + " } "
+		}
+		for _, path := range r.methods {
+			routeOf[path] = r.ID
+		}
+	}
+	c.Ask += "!{ var(txn.pf_preflight) -m bool } || " + header + "dot_segment"
+	// A question's value is set-header's, a log-format string, where % starts a sample.
+	for _, q := range generator.Questions(in) {
+		if q.Action != "" {
+			c.Questions = append(c.Questions, question{Header: c.ActionHeader, Value: logFormat(q.Action), Route: routeOf[q.Path], Path: quote(q.Path)})
+		}
+		if q.Reports != nil {
+			c.Questions = append(c.Questions, question{Header: c.ReportsHeader, Value: logFormat(strings.Join(q.Reports, ",")), Route: routeOf[q.Path], Path: quote(q.Path)})
+		}
+	}
+	for i, address := range service.Addresses {
+		c.Servers = append(c.Servers, server(service.Name, i, address.Value, port.Number))
+	}
+	return c
+}
+
+// headerList is the quoted names of an auth list joined by commas, a prefix written with its *, as the script reads
+// them; - when the list is empty.
+func headerList(headers []model.Header) string {
+	if len(headers) == 0 {
+		return quote("-")
+	}
+	names := make([]string, len(headers))
+	for i, header := range headers {
+		names[i] = header.Name
+		if header.Prefix {
+			names[i] += "*"
+		}
+	}
+	return quote(strings.Join(names, ","))
 }
 
 // routes is the rule of each route, in the written order, with the rpc entry's at its place: one rule per service the
@@ -229,9 +408,9 @@ func routes(in generator.Input, v *values) ([]route, []rewrite, error) {
 			for _, group := range rpcGroups(in.RPC) {
 				var matches []string
 				for _, path := range group.paths {
-					matches = append(matches, "{ path "+path+" }")
+					matches = append(matches, "{ path "+quote(path)+" }")
 				}
-				list = append(list, route{ID: len(list) + 1, Matches: matches, Backend: group.backend})
+				list = append(list, route{ID: len(list) + 1, Matches: matches, Backend: group.backend, methods: group.paths})
 			}
 			continue
 		}
@@ -254,7 +433,8 @@ func routes(in generator.Input, v *values) ([]route, []rewrite, error) {
 		if r.Method != "" {
 			match += " { method " + r.Method + " }"
 		}
-		list = append(list, route{ID: id, Matches: []string{match}, Backend: g.Service(r.To.Value).Cluster(model.HTTP), Program: text, Pattern: pattern})
+		list = append(list, route{ID: id, Matches: []string{match}, Backend: g.Service(r.To.Value).Cluster(model.HTTP), Program: text, Pattern: pattern,
+			authOff: r.AuthOff != nil})
 		if r.Rewrite != nil {
 			key := "routes[].prefix"
 			if r.Match == model.Path {
@@ -267,7 +447,7 @@ func routes(in generator.Input, v *values) ([]route, []rewrite, error) {
 	return list, rewrites, nil
 }
 
-// rpcGroup is the quoted paths of the RPC methods that go to one service, and that service's gRPC backend.
+// rpcGroup is the paths of the RPC methods that go to one service, and that service's gRPC backend.
 type rpcGroup struct {
 	backend string
 	paths   []string
@@ -281,7 +461,7 @@ func rpcGroups(methods []rpc.Route) []rpcGroup {
 			groups = append(groups, rpcGroup{backend: method.Cluster})
 			at = len(groups) - 1
 		}
-		groups[at].paths = append(groups[at].paths, quote(method.Path()))
+		groups[at].paths = append(groups[at].paths, method.Path())
 	}
 	return groups
 }
@@ -299,21 +479,26 @@ func backends(g *model.Gateway) []backend {
 				b.HostHeader = logFormat(service.HostHeader)
 			}
 			for i, address := range service.Addresses {
-				// JoinHostPort writes an IPv6 address in brackets, which HAProxy reads as the address and the port after it
-				// (measured on HAProxy 3.2.26 and 3.4.7).
-				server := fmt.Sprintf("%s%d %s", service.Name, i+1, net.JoinHostPort(address.Value, strconv.FormatInt(port.Number, 10)))
+				line := server(service.Name, i, address.Value, port.Number)
 				// A gRPC service's connection carries one call and is never used again, as an HTTP service's is closed
 				// after each answer (the template's defaults): HAProxy sent a call again on a new connection when the
 				// service closed one it reused (measured on HAProxy 3.2.26 and 3.4.7).
 				if port.Protocol == model.GRPC {
-					server += " proto h2 max-reuse 0"
+					line += " proto h2 max-reuse 0"
 				}
-				b.Servers = append(b.Servers, server)
+				b.Servers = append(b.Servers, line)
 			}
 			list = append(list, b)
 		}
 	}
 	return list
+}
+
+// server is a server line's name and address for the address at index i of a service: the service's name and i+1, and
+// the address with its port. JoinHostPort writes an IPv6 address in brackets, which HAProxy reads as the address and
+// the port after it (measured on HAProxy 3.2.26 and 3.4.7).
+func server(service string, i int, address string, port int64) string {
+	return fmt.Sprintf("%s%d %s", service, i+1, net.JoinHostPort(address, strconv.FormatInt(port, 10)))
 }
 
 // notWritten returns an error for each form of the input this version does not write, nil when there is none. Leaving
@@ -335,7 +520,6 @@ func notWritten(in generator.Input) error {
 		{"timeouts.idle", g.Timeouts.Idle != nil},
 		{"timeouts.upstream_idle", g.Timeouts.UpstreamIdle != nil},
 		{"dns.resolver", g.Resolver != nil},
-		{"auth.ask", g.Auth != nil},
 		{"auth.jwt", g.JWT != nil},
 		{"log", g.Log != nil},
 		{"tracing", g.Tracing != nil},
@@ -378,9 +562,6 @@ func notWritten(in generator.Input) error {
 			}
 			continue
 		}
-		if r.AuthOff != nil {
-			refuse("route %q: auth is not written in this version", r.Name.Value)
-		}
 		if r.Retries > 0 {
 			refuse("route %q: retries is not written in this version", r.Name.Value)
 		}
@@ -388,13 +569,28 @@ func notWritten(in generator.Input) error {
 			refuse("route %q: rate_limit is not written in this version", r.Name.Value)
 		}
 	}
-	for _, method := range in.RPC {
-		if method.Action != "" {
-			refuse("method %s/%s: action is not written in this version", method.Service, method.Method.Method)
+	removals := func(key string, headers []model.Header) {
+		for _, header := range headers {
+			if !header.Prefix {
+				if slices.Contains(format.HAProxyNotRemovable, header.Name) {
+					refuse("%s: %s is not written in this version", key, header.Name)
+				}
+				continue
+			}
+			var covered []string
+			for _, name := range format.HAProxyNotRemovable {
+				if strings.HasPrefix(name, header.Name) {
+					covered = append(covered, name)
+				}
+			}
+			if covered != nil {
+				refuse("%s: %s*, a prefix that covers %s, is not written in this version", key, header.Name, strings.Join(covered, " and "))
+			}
 		}
-		if method.Reports != nil {
-			refuse("method %s/%s: reports is not written in this version", method.Service, method.Method.Method)
-		}
+	}
+	removals("remove_from_clients", g.RemoveFromClients)
+	if g.Auth != nil {
+		removals("auth.accept", g.Auth.Accept)
 	}
 	return errors.Join(errs...)
 }

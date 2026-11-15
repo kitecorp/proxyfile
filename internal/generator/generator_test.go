@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/kitecorp/proxyfile/v2/internal/model"
+	"github.com/kitecorp/proxyfile/v2/internal/rpc"
 )
 
 // The headers removed from a client's request: remove_from_clients as written, then the check's question headers and
@@ -31,6 +32,68 @@ func TestRemovedFromClients(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if got := RemovedFromClients(&c.g); !reflect.DeepEqual(got, c.want) {
 				t.Errorf("RemovedFromClients = %+v, want %+v", got, c.want)
+			}
+		})
+	}
+}
+
+// The names the auth check's generators share, each the literal the Envoy output uses for the same request or answer.
+func TestCheckNames(t *testing.T) {
+	cases := []struct {
+		name      string
+		got, want any
+	}{
+		{"UncheckedMark", UncheckedMark, "x-envoy-auth-failure-mode-allowed"},
+		{"QuestionHeaders", QuestionHeaders, []model.Header{{Name: "x-gateway-action"}, {Name: "x-gateway-reports"}}},
+		{"FramingHeaders", FramingHeaders, []string{"host", "content-length", "transfer-encoding", "connection", "keep-alive",
+			"te", "trailer", "upgrade", "expect", "proxy-connection"}},
+		{"HopHeaders", HopHeaders, []string{"content-length", "transfer-encoding", "connection", "keep-alive", "upgrade",
+			"proxy-connection"}},
+		{"GRPCStatus", GRPCStatus, map[int]int{400: 13, 401: 16, 403: 7, 404: 12, 429: 14, 502: 14, 503: 14, 504: 14}},
+		{"InternalHeader", InternalHeader, "x-envoy-internal"},
+		{"ExpectedTimeoutHeader", ExpectedTimeoutHeader, "x-envoy-expected-rq-timeout-ms"},
+		{"DroppedByEnvoy", DroppedByEnvoy, []string{"keep-alive"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if !reflect.DeepEqual(c.got, c.want) {
+				t.Errorf("%s = %#v, want %#v", c.name, c.got, c.want)
+			}
+		})
+	}
+}
+
+// The RPC question of each method that has an action or reports: its path with both, in the order of in.RPC, and none
+// when the check is not asked.
+func TestQuestions(t *testing.T) {
+	// cart is a method of example.shop.v1.CartService; no reports leaves Reports nil, as rpc reads a method without them.
+	cart := func(method, action string, reports ...string) rpc.Route {
+		return rpc.Route{Method: rpc.Method{Service: "example.shop.v1.CartService", Method: method, Action: action, Reports: reports}}
+	}
+	asked := &model.Gateway{Auth: &model.Auth{Enabled: true}}
+	getCart := Question{Path: "/example.shop.v1.CartService/GetCart", Action: "browse"}
+	addItem := Question{Path: "/example.shop.v1.CartService/AddItem", Action: "buy", Reports: []string{"browse"}}
+	cases := []struct {
+		name string
+		in   Input
+		want []Question
+	}{
+		{"no auth", Input{Gateway: &model.Gateway{}, RPC: []rpc.Route{cart("GetCart", "browse")}}, nil},
+		{"auth not enabled", Input{Gateway: &model.Gateway{Auth: &model.Auth{}}, RPC: []rpc.Route{cart("GetCart", "browse")}}, nil},
+		{"a method with an action", Input{Gateway: asked, RPC: []rpc.Route{cart("GetCart", "browse")}}, []Question{getCart}},
+		{"a method with an action and reports", Input{Gateway: asked, RPC: []rpc.Route{cart("AddItem", "buy", "browse")}},
+			[]Question{addItem}},
+		{"a method with reports alone", Input{Gateway: asked, RPC: []rpc.Route{cart("ListItems", "", "browse")}},
+			[]Question{{Path: "/example.shop.v1.CartService/ListItems", Reports: []string{"browse"}}}},
+		{"a method with neither", Input{Gateway: asked, RPC: []rpc.Route{cart("RemoveItem", "")}}, nil},
+		{"the order of in.RPC is kept",
+			Input{Gateway: asked, RPC: []rpc.Route{cart("GetCart", "browse"), cart("RemoveItem", ""), cart("AddItem", "buy", "browse")}},
+			[]Question{getCart, addItem}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := Questions(c.in); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("Questions = %+v, want %+v", got, c.want)
 			}
 		})
 	}

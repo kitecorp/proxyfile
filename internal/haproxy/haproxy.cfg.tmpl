@@ -44,12 +44,18 @@ defaults
   these lines do not close, so its server line writes max-reuse 0 (backends). */}}
   option http-server-close
   option http-pretend-keepalive
+  {{- /* HAProxy 3.2.26 served a client that sent its request and closed its half of the connection, where Envoy 1.40.2
+  answers it nothing; 3.4.7 has this line on by default. With it neither version gives such a client the service's
+  answer, and a request the check is asked about reaches no service: HAProxy answers 400 or 403 or nothing where Envoy
+  only closes, and a request the check is not asked about may still reach the service, as through Envoy (measured with
+  and without the check; timeout client-fin and the fs.aborted fetch changed nothing). */}}
+  option abortonclose
   timeout connect 5s
   {{- /* Envoy's stream idle timeout is 5 minutes (read in its documentation). Without timeouts.request the Envoy
   output ends a request 15 s after it (a route's default timeout), which HAProxy cannot write for a whole answer: 15 s
-  with no data from the service gives one that says nothing the same 504 at the same time (measured), and lets an
-  answer that keeps coming run past 15 s, the difference timeouts.request's declaration names. With
-  timeouts.request: none only the 5 minutes are left. */}}
+  with no data from the service gives one that says nothing a 504 at the same time (measured), and lets an answer
+  that keeps coming run past 15 s, the difference timeouts.request's declaration names. With timeouts.request: none
+  only the 5 minutes are left. */}}
   timeout client 300s
   timeout server {{.ServerTimeout}}
   {{- /* Envoy sends the body of a request on and no trailer of it, where HAProxy passed a trailer to the service over
@@ -57,9 +63,12 @@ defaults
   option http-drop-request-trailers
   {{- /* An empty 503 needs no file beside the configuration; the 502 rule of the frontend turns it into Envoy's answer
   to a service out of reach. A service that closed the connection before its answer got HAProxy's HTML 502 without the
-  second line, where Envoy's 502 is empty (measured). */}}
+  second line, where Envoy's 502 is empty (measured). Envoy's 504 is upstream request timeout as text/plain, where
+  HAProxy's is an HTML page, and a gRPC call's carries no body, which the frontend turns into gRPC's form, so the
+  frontend sets the text for every other request (txn.timeout_text). */}}
   http-error status 503
   http-error status 502
+  http-error status 504 content-type text/plain lf-string "%[var(txn.timeout_text)]"
 {{- with .TLS}}
 
 crt-store
@@ -75,11 +84,23 @@ frontend admin
 
 frontend public
   bind :{{.Listen}}{{with .TLS}} ssl crt @/public alpn h2,http/1.1{{with .ClientsCA}} verify required ca-file {{.}}{{end}}{{end}}
+  # a control byte in a header value, refused before any other rule, as Envoy's parser refuses it
+  {{- /* Envoy 1.40.2 answers 400 over HTTP/1, and closes the connection over HTTP/2, to a header value that holds a byte
+  from 0x01 to 0x08, 0x0b, 0x0c, 0x0e to 0x1f or 0x7f, a header remove_from_clients names too, where HAProxy 3.2.26
+  and 3.4.7 passed it to the service; HAProxy's parser refuses CR, LF and NUL itself, and reject resets an HTTP/2
+  stream (measured). The rule's cost was below what 20,000 requests of 90 header lines could show. No fetch reads a
+  request's trailer, so a trailer that holds such a byte is not refused (HAProxy's declaration names it). */}}
+  http-request set-var(txn.control) bool(true) if { req.hdrs -m reg '[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]' }
+  http-request return status 400 if { var(txn.control) -m bool } !{ fc_http_major 2 }
+  http-request reject if { var(txn.control) -m bool }
 {{- with .Removed}}
-  # remove_from_clients, before any other rule
+  # remove_from_clients, before every rule but the control byte refusal
 {{- range .}}
   http-request del-header {{.}}
 {{- end}}
+{{- end}}
+{{- with .Unchecked}}
+  http-request del-header {{.}}
 {{- end}}
   # what Envoy refuses before it reads a request further, and the headers it removes
   {{- /* Each answer was measured on Envoy 1.40.2 beside HAProxy 3.2.26 and 3.4.7, which answered alike. Envoy answers
@@ -136,6 +157,17 @@ frontend public
   origin, for Envoy. A request whose run stopped part way is answered 400. */}}
   http-request lua.pf_join
   http-request return status 400 if !{ var(txn.joined) -m found }
+  # Expect: 100-continue, answered at once and passed to no service
+  {{- /* Envoy answers Expect: 100-continue itself at once, before it routes the request or asks the check, and removes
+  the header, where HAProxy passed it to the service and the client had its 100 only when the service sent one
+  (measured on Envoy 1.40.2 beside HAProxy 3.2.26 and 3.4.7). wait-for-body (the configuration manual, section 4.4,
+  "wait-for-body") sends the 100 and removes the header for a request with a body (src/http_ana.c,
+  http_handle_expect_hdr), and at-least 1 lets the request go on at its first byte, so nothing is held but the
+  headers until the body starts: a 128 MiB upload with Expect took the time and memory one without it took. It
+  answers 408 after time, Envoy's stream idle timeout of 5 minutes, which timeout client 300s matches. A request with
+  no body gets no 100, which no client waits for, and its Expect is removed by the second line. */}}
+  http-request wait-for-body time 300s at-least 1 if { req.hdr(expect) -i -m str 100-continue }
+  http-request del-header expect if { req.hdr(expect) -i -m str 100-continue }
   # client_address: {{.ClientAddress}}
 {{- if .Connection}}
   {{- /* Envoy takes the client for one it faces: it removes what only a proxy in front may send, appends the peer's
@@ -157,6 +189,19 @@ frontend public
   http-request set-header x-request-id %[uuid(4)]{{if not .Connection}} unless { req.hdr(x-request-id) -m found }{{end}}
   http-request set-var(txn.request_id) req.fhdr(x-request-id)
   http-after-response set-header x-request-id %[var(txn.request_id)]
+  # a gRPC call, as Envoy tells one: content type application/grpc alone or before a +, compared as written
+  {{- /* Envoy 1.40.2 answered application/grpc+proto in gRPC's form, and application/grpc;x=1, Application/GRPC and
+  application/grpc-web as any other request (measured). */}}
+  http-request set-var(txn.grpc_call) bool(true) if { req.fhdr(content-type) -m reg '^application/grpc(\+|$)' }
+  # a gRPC call the file refuses itself is answered in gRPC's form, as Envoy answers one
+  {{- /* Envoy 1.40.2 answers a gRPC call it refuses itself before any service 200, with content-type
+  application/grpc, the grpc-status of its status (GRPC) and, on a 403 to a request with an Origin, grpc-message
+  Invalid CORS request, in one header frame (measured over HTTP/1.1 and HTTP/2). Each refusal below that Envoy makes
+  too sets txn.grpc_answer for a gRPC call and answers it so first, as the pass rule does; one Envoy does not make, as
+  for a client's X-Request-Id too long for HAProxy, answers a gRPC call as any other request. HAProxy's return writes
+  no content-type without a body, and writes content-length: 0, which Envoy writes over HTTP/1.1 alone. */}}
+  http-after-response set-header content-type application/grpc if { var(txn.grpc_answer) -m bool }
+  http-after-response del-header content-length if { var(txn.grpc_answer) -m bool } { fc_http_major 2 }
   # the path, normalised before anything reads it
   {{- /* pf_escape escapes what Envoy escapes before it picks a route. The regsub rules turn an escaped slash or
   backslash into a slash before the dot segments are resolved, so /open/..%2fprivate cannot reach a route as /open/ and
@@ -172,6 +217,8 @@ frontend public
   http-request normalize-uri path-merge-slashes
   http-request normalize-uri path-strip-dot
   http-request normalize-uri path-strip-dotdot full
+  http-request set-var(txn.grpc_answer) bool(true) if { path -m sub %00 } { var(txn.grpc_call) -m bool }
+  http-request return status 200 hdr grpc-status {{.GRPC.BadRequest}} if { var(txn.grpc_answer) -m bool }
   http-request return status 400 if { path -m sub %00 }
   # the environment, by the Host header without its port
   http-request set-var(txn.host) req.hdr(host),host_only,lower
@@ -188,7 +235,18 @@ frontend public
 {{- end}}
   http-request set-var(txn.environment) str({{.ID}}) if {{.ID}}_host
 {{- end}}
+  http-request set-var(txn.grpc_answer) bool(true) if !{ var(txn.environment) -m found } { var(txn.grpc_call) -m bool }
+  http-request return status 200 hdr grpc-status {{.GRPC.NotFound}} if { var(txn.grpc_answer) -m bool }
   http-request return status 404 if !{ var(txn.environment) -m found }
+{{- if not .Connection}}
+  {{- /* Under forwarded Envoy 1.40.2 answers 404 to an X-Forwarded-Proto that is empty, two empty lines or, over HTTP/1,
+  spaces alone, before it reads the request's origin, preflight, dot segment or upgrade, where HAProxy passed it on
+  (measured). HAProxy's HTTP/2 decoder drops a value's spaces, so spaces alone over HTTP/2 are answered 404 too, where
+  Envoy serves them. */}}
+  http-request set-var(txn.grpc_answer) bool(true) if { req.fhdr(x-forwarded-proto) -m found } !{ req.fhdr(x-forwarded-proto) -m len gt 0 } { var(txn.grpc_call) -m bool }
+  http-request return status 200 hdr grpc-status {{.GRPC.NotFound}} if { var(txn.grpc_answer) -m bool }
+  http-request return status 404 if { req.fhdr(x-forwarded-proto) -m found } !{ req.fhdr(x-forwarded-proto) -m len gt 0 }
+{{- end}}
   # the routes, in the written order: the first that matches is the request's route
 {{- range .Routes}}
 {{- if .Program}}
@@ -211,6 +269,8 @@ frontend public
   route; Envoy answers a request with none 404 before it reads its upgrade or its origin, and the dot segment 400
   after both, with no CORS header (measured on Envoy 1.40.2). */}}
   acl dot_segment path_reg '/\.\.?(;|%3[Bb])'
+  http-request set-var(txn.grpc_answer) bool(true) if !{ var(txn.route) -m found } !dot_segment { var(txn.grpc_call) -m bool }
+  http-request return status 200 hdr grpc-status {{.GRPC.NotFound}} if { var(txn.grpc_answer) -m bool }
   http-request return status 404 if !{ var(txn.route) -m found } !dot_segment
   # WebSocket is the one upgrade passed on
   {{- /* Envoy answers every 403 of its own with the body Invalid CORS request when the request carries an Origin
@@ -218,6 +278,9 @@ frontend public
   acl has_origin req.fhdr(origin) -m found
   acl upgrade req.fhdr(upgrade) -m found
   acl websocket req.fhdr(upgrade) -i -m str websocket
+  http-request set-var(txn.grpc_answer) bool(true) if upgrade !websocket { var(txn.grpc_call) -m bool }
+  http-request return status 200 hdr grpc-status {{.GRPC.Forbidden}} hdr grpc-message "Invalid CORS request" if { var(txn.grpc_answer) -m bool } has_origin
+  http-request return status 200 hdr grpc-status {{.GRPC.Forbidden}} if { var(txn.grpc_answer) -m bool }
   http-request return status 403 content-type text/plain string "Invalid CORS request" if upgrade !websocket has_origin
   http-request return status 403 if upgrade !websocket
   {{- /* Every file checks the browser origin, as Envoy does with or without cors and lists; only the lines that read a
@@ -249,7 +312,68 @@ frontend public
 {{- range .Environments}}
   http-request set-var(txn.admitted) bool(true) if { var(txn.environment) -m str {{.ID}} } {{.ID}}_own
 {{- end}}
+  http-request set-var(txn.grpc_answer) bool(true) if !{ var(txn.admitted) -m bool } { var(txn.grpc_call) -m bool }
+  http-request return status 200 hdr grpc-status {{.GRPC.Forbidden}} hdr grpc-message "Invalid CORS request" if { var(txn.grpc_answer) -m bool }
   http-request return status 403 content-type text/plain string "Invalid CORS request" if !{ var(txn.admitted) -m bool }
+{{- if .Listed}}
+  {{- /* An admitted Origin longer than the file echoes (echoRoom) is refused before the check and the service, as Envoy
+  answers its own 403s, where HAProxy answered 500 after the service did the work. */}}
+  http-request return status 403 content-type text/plain string "Invalid CORS request" if { var(txn.cors) -m bool } { req.fhdr(origin) -m len gt {{.LongestOrigin}} }
+{{- end}}
+{{- if not .Connection}}
+  {{- /* Under forwarded a client's own X-Request-Id is kept and echoed on every answer, in the same room as an echoed
+  Origin, so one longer than the room left (idRoom) is answered 400 before the check and the service, where HAProxy
+  answered 500 after the service did the work and Envoy serves it. */}}
+{{- if .Listed}}
+  http-request set-var(txn.id_length) var(txn.request_id),length
+  http-request return status 400 if { var(txn.cors) -m bool } { req.fhdr(origin),length,add(txn.id_length) gt {{.LongestEcho}} }
+{{- end}}
+  http-request return status 400 if { var(txn.request_id) -m len gt {{.LongestID}} }
+{{- end}}
+{{- with .Check}}
+  # the auth check
+  {{- /* Envoy asks its check after CORS and before the route that answers a dot segment (measured on Envoy 1.40.2), so
+  the check comes here: Ask holds which requests it asks (generate.go). A preflight Envoy's CORS filter answers is
+  never asked. Each method's RPC question is set for the check alone: the client's copies went first, and the two
+  headers go after it. The action (proxyfile.lua) asks the check through the relay at the end of the file, which bounds
+  the connection's time, and sets txn.pf_passed only when the request may go on: a runtime error in an action lets
+  the request continue to the next rule, and HAProxy 3.4.7 aborted the action for a client that half-closed, so the
+  pass rule refuses an asked request it did not let through (measured on HAProxy 3.2.26 and 3.4.7). The action copies
+  a denial itself and leaves every other refusal to the pass rule, which answers as Envoy answers an unanswered check
+  under deny: a gRPC call 200 with grpc-status 7, any other request 403, each with Invalid CORS request (grpc-message,
+  or the body) when it carries an Origin (measured on Envoy 1.40.2); a gRPC call's content type and length come from
+  the lines after txn.grpc_call. Envoy's denial carries an admitted origin's CORS answer; the origin is let go after
+  the pass rule, as the dot segment's answer carries none. HAProxy writes content-length: 0 on a 304 and on an HTTP/2
+  gRPC denial the script copies, where Envoy writes none, so the script asks for its removal with txn.pf_no_length. */}}
+  acl pf_preflight method OPTIONS
+  acl pf_preflight_method req.fhdr(access-control-request-method) -m len gt 0
+  http-request set-var(txn.pf_preflight) bool(true) if has_origin pf_preflight pf_preflight_method !dot_segment
+{{- range .Questions}}
+  http-request set-header {{.Header}} {{.Value}} if { var(txn.route) -m str {{.Route}} } { path {{.Path}} }
+{{- end}}
+{{- with .OnlyWith}}
+  http-request set-var(txn.pf_header) bool(true) if { req.fhdr({{.}}) -m len gt 0 } || { req.fhdr_cnt({{.}}) gt 1 } || { req.ver 2.0 } { req.fhdr({{.}}) -m found }
+{{- end}}
+  http-request set-var(txn.pf_ask) bool(true) if {{.Ask}}
+{{- if $.Listed}}
+  http-request set-var(txn.origin) req.fhdr(origin) if { var(txn.cors) -m bool }
+{{- end}}
+  http-request lua.pf_auth {{.Relay}} {{.Path}} {{.Millis}} {{.Unavailable}} {{.Send}} {{.Accept}} {{.SendRequest}} if { var(txn.pf_ask) -m bool }
+  http-request set-var(txn.pf_refused) bool(true) if { var(txn.pf_ask) -m bool } !{ var(txn.pf_passed) -m bool }
+  http-request set-var(txn.grpc_answer) bool(true) if { var(txn.pf_refused) -m bool } { var(txn.grpc_call) -m bool }
+  http-request return status 200 hdr grpc-status {{$.GRPC.Forbidden}} hdr grpc-message "Invalid CORS request" if { var(txn.grpc_answer) -m bool } has_origin
+  http-request return status 200 hdr grpc-status {{$.GRPC.Forbidden}} if { var(txn.grpc_answer) -m bool }
+  http-request return status 403 content-type text/plain string "Invalid CORS request" if { var(txn.pf_refused) -m bool } has_origin
+  http-request return status 403 if { var(txn.pf_refused) -m bool }
+{{- if $.Listed}}
+  http-request unset-var(txn.origin)
+{{- end}}
+  http-request del-header {{.ActionHeader}}
+  http-after-response del-header content-length if { var(txn.pf_no_length) -m bool }
+  http-request del-header {{.ReportsHeader}}
+{{- end}}
+  http-request set-var(txn.grpc_answer) bool(true) if dot_segment { var(txn.grpc_call) -m bool }
+  http-request return status 200 hdr grpc-status {{.GRPC.BadRequest}} if { var(txn.grpc_answer) -m bool }
   http-request return status 400 if dot_segment
   acl preflight method OPTIONS
   acl preflight_method req.fhdr(access-control-request-method) -m len gt 0
@@ -270,8 +394,32 @@ frontend public
 {{- end}}
   # a service that cannot be reached: 502 with an empty body
   {{- /* S with C or H: the service refused the connection or closed it before its answer's headers; sC: the
-  connection to it timed out. */}}
-  http-after-response set-status 502 if { txn.sess_term_state -m reg ^S[CH] } || { txn.sess_term_state -m str sC }
+  connection to it timed out. Envoy 1.40.2's reason is Bad Gateway, HAProxy's Bad Gateway or Proxy Error (measured
+  over HTTP/1.1). */}}
+  http-after-response set-status 502 reason "Bad Gateway" if { txn.sess_term_state -m reg ^S[CH] } || { txn.sess_term_state -m str sC }
+  # a service that sends nothing in time: 504 with Envoy's text and reason
+  {{- /* sH: HAProxy's timeout server passed before the answer's headers (measured with Envoy 1.40.2 beside HAProxy
+  3.2.26 and 3.4.7, over HTTP/1.1 and HTTP/2, to an HTTP and a gRPC service: Envoy's reason is Gateway Timeout,
+  HAProxy's Gateway Time-out). */}}
+  http-request set-var-fmt(txn.timeout_text) "upstream request timeout" unless { var(txn.grpc_call) -m bool }
+  http-after-response set-status 504 reason "Gateway Timeout" if { txn.sess_term_state -m str sH }
+  # a gRPC call to a service that cannot be reached or sends nothing in time: 200 with grpc-status 14
+  {{- /* Envoy 1.40.2 answers it 200 with content-type application/grpc and grpc-status 14 in one header frame, with a
+  grpc-message that names a reset of the stream, an answer that is not HTTP/2 and a timeout, where HAProxy 3.2.26 and
+  3.4.7 answered 502 and 504, each without the form (measured). HAProxy's own 502, 503 and a gRPC call's 504 have no
+  body (the defaults), so the form carries none. bc_err is 0 for a service that took the connection and sent nothing,
+  and has no value for one that never took it, which Envoy's answer names no timeout for; bs.rst_code is the service's
+  reset of the stream, and bc_glitches counts an answer in HTTP/1.1 on the connection, which carries one call
+  (measured). */}}
+  http-after-response set-var(txn.unreached) bool(true) if { var(txn.grpc_call) -m bool } { txn.sess_term_state -m reg ^[Ss][CH] }
+  http-after-response set-status 200 if { var(txn.unreached) -m bool }
+  http-after-response set-header content-type application/grpc if { var(txn.unreached) -m bool }
+  http-after-response set-header grpc-status 14 if { var(txn.unreached) -m bool }
+  http-after-response set-header grpc-message "upstream request timeout" if { var(txn.unreached) -m bool } { txn.sess_term_state -m str sH } { bc_err eq 0 }
+  http-after-response set-header grpc-message "upstream connect error or disconnect/reset before headers. reset reason: remote reset" if { var(txn.unreached) -m bool } { bs.rst_code -m found }
+  http-after-response set-header grpc-message "upstream connect error or disconnect/reset before headers. reset reason: protocol error" if { var(txn.unreached) -m bool } { bc_glitches gt 0 }
+  {{- /* Envoy's answer in one header frame carries no content-length, as the file's own refusal (txn.grpc_answer). */}}
+  http-after-response del-header content-length if { var(txn.unreached) -m bool } { fc_http_major 2 }
 {{- range .Routes}}
   use_backend {{.Backend}} if { var(txn.route) -m str {{.ID}} }
 {{- end}}
@@ -281,6 +429,28 @@ backend {{.Name}}
 {{- with .HostHeader}}
   http-request set-header host {{.}}
 {{- end}}
+{{- range .Servers}}
+  server {{.}}
+{{- end}}
+{{- end}}
+{{- with .Check}}
+
+# the relay to the check service
+{{- /* A socket's timeout in the script does not bound its connect (to an address that never answered: 303 s on HAProxy
+3.4.7, 6.0 s on 3.2.26, against a timeout of 1.5 s), so the action connects to this relay, whose timeouts are
+auth.timeout; retries 0 because Envoy's check cluster tries no other backend, and nolinger because without it the relay
+read a check that kept sending for as long as it sent (measured). Its own defaults keep the HTTP options above off the
+relay: without it HAProxy warns that two of them are ignored. */}}
+defaults
+  mode tcp
+
+listen check
+  bind {{.Bind}}
+  timeout connect {{.Millis}}ms
+  timeout client {{.Millis}}ms
+  timeout server {{.Millis}}ms
+  retries 0
+  option nolinger
 {{- range .Servers}}
   server {{.}}
 {{- end}}

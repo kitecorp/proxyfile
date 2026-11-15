@@ -61,6 +61,9 @@ func (b *backend) reply(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(status)
 	e := b.describe(r, attempt)
 	e.Body = string(body)
+	if size, err := strconv.Atoi(r.Header.Get("x-stub-pad")); err == nil {
+		e.Pad = strings.Repeat("p", size)
+	}
 	json.NewEncoder(w).Encode(e)
 }
 
@@ -142,6 +145,9 @@ type echo struct {
 	// its headers, read once the body has ended, including those no Trailer header declared.
 	Body     string            `json:"body,omitempty"`
 	Trailers map[string]string `json:"trailers,omitempty"`
+	// Pad is as many bytes as the request's x-stub-pad asks for, so a scenario gets an answer of that size: HAProxy
+	// reads the first part of an answer into one buffer, and the lines it adds to an answer must fit beside it.
+	Pad string `json:"pad,omitempty"`
 }
 
 func (b *backend) describe(r *http.Request, attempt int) echo {
