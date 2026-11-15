@@ -20,6 +20,14 @@ import (
 // writes, so its output holds every block the generator writes.
 const batteryFile = "../../conformance/testdata/nginx.yaml"
 
+// batteryLimits, batteryTimeouts and batteryLog are the battery file's limits, timeouts and log, which a test replaces
+// (rewritten) to read the output of other values, or of none.
+const (
+	batteryLimits   = "limits:\n  request_headers: {size: 60KiB, count: 100}\n"
+	batteryTimeouts = "timeouts:\n  idle: 2s\n  upstream_idle: 3s\n"
+	batteryLog      = "log: {status_from: 400, sample: 1%}\n"
+)
+
 // generate returns the text of the configuration nginx.Generate writes for the proxyfile text, read as render reads a
 // proxyfile that writes its origins and its RPC methods. A problem or an error ends the test.
 func generate(t *testing.T, proxyfile string) string {
@@ -144,6 +152,28 @@ func TestSecurityLines(t *testing.T) {
 	noCORS := generate(t, rewritten(t, oneWithout, corsLine, ""))
 	tlsAlone := generate(t, rewritten(t, oneWithout, "  clients: {ca: /etc/gateway/tls/clients-ca.pem}\n", ""))
 	firstServer := strings.Index(out, "\n  server {\n")
+	// The battery file with no timeouts, whose lines are then nginx's own for none.
+	noTimeouts := generate(t, rewritten(t, battery, batteryTimeouts, ""))
+	// The battery file with limits.request_headers of the size given and 20 fields.
+	headerLimits := func(size string) string {
+		return generate(t, rewritten(t, battery, batteryLimits, "limits: {request_headers: {size: "+size+", count: 20}}\n"))
+	}
+	// The battery file whose client's X-Forwarded-Proto is read: with client_address forwarded, with client_address not
+	// written and no tls, which reads as forwarded, and with forwarded and the header removed from every client request,
+	// which leaves nothing of the client's to read.
+	forwardedFile := rewritten(t, battery, "client_address: connection\n", "client_address: forwarded\n")
+	forwarded := generate(t, forwardedFile)
+	unset := generate(t, rewritten(t, rewritten(t, battery, tlsLines, ""), "client_address: connection\n", ""))
+	forwardedRemoved := generate(t, rewritten(t, forwardedFile, "remove_from_clients: [x-client-id]\n",
+		"remove_from_clients: [x-client-id, x-forwarded-proto]\n"))
+	// The battery file with the timeouts given in place of its own.
+	withTimeouts := func(timeouts string) string {
+		return generate(t, rewritten(t, battery, batteryTimeouts, "timeouts: "+timeouts+"\n"))
+	}
+	// The battery file with the log given in place of its own.
+	withLog := func(log string) string {
+		return generate(t, rewritten(t, battery, batteryLog, "log: "+log+"\n"))
+	}
 	cases := []struct {
 		name  string
 		check func() string // "" when the output keeps the rule, else what breaks it
@@ -160,8 +190,20 @@ func TestSecurityLines(t *testing.T) {
 			return ""
 		}},
 		{"no redirect to a URI", func() string {
+			// A request goes on through named locations, as a redirect to a URI would search the locations again for
+			// another path. The admin server, which "the admin server" holds line by line, sends stub_status's 405 back
+			// to /stats on purpose, so the request is read without it.
+			public := out
+			for _, server := range blocks(lines(out), "  server {") {
+				if slices.Contains(server, "    listen 127.0.0.1:9901;") {
+					public = strings.Replace(public, strings.Join(server, "\n"), "", 1)
+				}
+			}
+			if public == out {
+				return "the file has no admin server"
+			}
 			redirect := regexp.MustCompile(`(?m)^\s*(rewrite\s.*\s(last|redirect|permanent);|try_files\s|index\s|error_page\s[0-9 ]+(=[0-9]*)?\s*/)`)
-			if found := redirect.FindAllString(out, -1); found != nil {
+			if found := redirect.FindAllString(public, -1); found != nil {
 				return fmt.Sprintf("lines that send the request to a URI: %q", found)
 			}
 			return ""
@@ -220,7 +262,8 @@ func TestSecurityLines(t *testing.T) {
 			return ""
 		}},
 		{"a route without a rewrite sends the path as written, or as nginx has normalised it", func() string {
-			// catalog, route 10, has no rewrite; accounts-webhooks, route 5, has one, which reads $uri in both modes.
+			// catalog, route 10, has no rewrite; accounts-webhooks, route 5, has one, which reads $uri in both modes. Each
+			// location names its route and upstream for the request log on its first two lines, then rewrites the path.
 			for _, server := range environmentServers(out) {
 				for _, want := range [][2]string{
 					{"    location @pf_r_10 {", "      proxy_set_header Host $pf_authority;"},
@@ -228,8 +271,8 @@ func TestSecurityLines(t *testing.T) {
 					{"    location @pf_r_5 {", `      rewrite "^/api/webhooks((?s).*)\\z" "/hooks/payments$1" break;`},
 				} {
 					at := slices.Index(server, want[0])
-					if at < 0 || at+1 >= len(server) || server[at+1] != want[1] {
-						return fmt.Sprintf("an environment server holds no %q followed by %q", want[0], want[1])
+					if at < 0 || at+3 >= len(server) || server[at+3] != want[1] {
+						return fmt.Sprintf("an environment server holds no %q with %q after its two log lines", want[0], want[1])
 					}
 				}
 				if slices.Contains(server, "    location @pf_r_5-uri {") {
@@ -327,24 +370,52 @@ func TestSecurityLines(t *testing.T) {
 			}
 			return ""
 		}},
-		{"a refused service is answered 502 with no body", func() string {
+		{"a service that fails is answered 502 with no body, and a gRPC call 200 with grpc-status 14", func() string {
+			// A request nginx answers 502 itself, because its service refused the connection, took none in its connect
+			// time, reset the connection or the call's stream, closed it or answered in a form nginx cannot read, is
+			// answered 502 with no body; a gRPC call, a request whose content-type is application/grpc or starts
+			// application/grpc+, is answered as the Envoy output answers it, 200 with grpc-status 14 and no body in one
+			// header frame, with the server's add_header lines repeated, as a location with one of its own inherits none,
+			// and with no grpc-message, where Envoy names a stream reset or an HTTP/1.1 answer in one
+			// (services.<service name>.grpc). Measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2, over HTTP/2 and
+			// HTTP/1.1, to a gRPC route and a plain one.
+			if broken := missing(out, `  map $http_content_type $pf_grpc_call { "~^application/grpc(?:\\+|\\z)" -grpc; default ""; }`); broken != "" {
+				return broken
+			}
 			servers := environmentServers(out)
 			routeLocations := 0
-			for _, server := range servers {
+			for n, server := range servers {
 				for _, location := range blocks(server, "    location @pf_r_") {
 					if !regexp.MustCompile(`^    location @pf_r_[0-9]+(-uri)? \{$`).MatchString(location[0]) {
 						continue
 					}
 					routeLocations++
-					if !slices.Contains(location, "      error_page 502 = @pf_502;") {
-						return fmt.Sprintf("%q holds no error_page 502 = @pf_502", location[0])
+					if !slices.Contains(location, "      error_page 502 = @pf_502$pf_grpc_call;") {
+						return fmt.Sprintf("%q holds no error_page 502 = @pf_502$pf_grpc_call", location[0])
 					}
 				}
+				name := server[slices.IndexFunc(server, func(line string) bool { return strings.HasPrefix(line, "    server_name ") })]
 				at := slices.Index(server, "    location @pf_502 {")
 				if at < 0 || at+1 >= len(server) || server[at+1] != `      return 502 "$pf_empty";` {
-					name := server[slices.IndexFunc(server, func(line string) bool { return strings.HasPrefix(line, "    server_name ") })]
 					return fmt.Sprintf("the server of %q holds no location @pf_502 answering 502 with no body", name)
 				}
+				grpc := blocks(server, "    location @pf_502-grpc {")
+				want := []string{"    location @pf_502-grpc {", "      default_type application/grpc;",
+					"      add_header x-request-id $pf_request_id always;", "      add_header Vary Origin always;",
+					fmt.Sprintf("      add_header Access-Control-Allow-Origin $pf_acao%d always;", n+1),
+					fmt.Sprintf("      add_header Access-Control-Expose-Headers $pf_aceh%d always;", n+1),
+					"      add_header grpc-status 14 always;", `      return 200 "$pf_empty";`, "    }"}
+				if len(grpc) != 1 || !slices.Equal(grpc[0], want) {
+					return fmt.Sprintf("the server of %q holds %q, want %q", name, grpc, want)
+				}
+			}
+			// A server with no Access-Control lines repeats the other two.
+			want := []string{"    location @pf_502-grpc {", "      default_type application/grpc;",
+				"      add_header x-request-id $pf_request_id always;", "      add_header Vary Origin always;",
+				"      add_header grpc-status 14 always;", `      return 200 "$pf_empty";`, "    }"}
+			if got := blocks(lines(generate(t, string(testsupport.ReadFile(t, "../../examples/grpc/yaml/proxyfile.yaml")))),
+				"    location @pf_502-grpc {"); len(got) != 1 || !slices.Equal(got[0], want) {
+				return fmt.Sprintf("the gRPC example holds %q, want %q", got, want)
 			}
 			// 80 places of a route in each of four environments, each with a second location but the two with a
 			// rewrite.
@@ -355,9 +426,9 @@ func TestSecurityLines(t *testing.T) {
 		}},
 		{"the hosts each environment admits a browser origin on", func() string {
 			for _, line := range []string{
-				`  map $pf_origin $pf_o1 { "" 0; "~," 1; "~^https?://api\\.example\\.com(:[0-9]+)?\\z" 0; "~^https?://api\\.example\\.org(:[0-9]+)?\\z" 0; "~*^https://example\\.com\\z" 0; "~*^https://www\\.example\\.com\\z" 0; "~^https://.*\\.example\\.com\\z" 0; default 1; }`,
-				`  map $pf_origin $pf_o2 { "" 0; "~," 1; "~^https?://api\\.test\\.example\\.com(:[0-9]+)?\\z" 0; "~*^http://localhost:3000\\z" 0; "~*^https://test\\.example\\.com\\z" 0; "~^https://.*\\.test\\.example\\.com\\z" 0; default 1; }`,
-				`  map $pf_origin $pf_o3 { "" 0; "~," 1; "~^https?://127\\.0\\.0\\.1(:[0-9]+)?\\z" 0; "~^https?://localhost(:[0-9]+)?\\z" 0; "~^http://(?>.*?\\.example\\.com:).*\\z" 0; "~^http://localhost:.*\\z" 0; default 1; }`,
+				`  map $pf_origin $pf_o1 { "" 0; "~," 1; "~^https?://api\\.example\\.com(:[0-9]+)?\\z" 0; "~^https?://api\\.example\\.org(:[0-9]+)?\\z" 0; "~(?s)\\A.{8193}" 1; "~*^https://example\\.com\\z" 0; "~*^https://www\\.example\\.com\\z" 0; "~^https://.*\\.example\\.com\\z" 0; default 1; }`,
+				`  map $pf_origin $pf_o2 { "" 0; "~," 1; "~^https?://api\\.test\\.example\\.com(:[0-9]+)?\\z" 0; "~(?s)\\A.{8193}" 1; "~*^http://localhost:3000\\z" 0; "~*^https://test\\.example\\.com\\z" 0; "~^https://.*\\.test\\.example\\.com\\z" 0; default 1; }`,
+				`  map $pf_origin $pf_o3 { "" 0; "~," 1; "~^https?://127\\.0\\.0\\.1(:[0-9]+)?\\z" 0; "~^https?://localhost(:[0-9]+)?\\z" 0; "~(?s)\\A.{8193}" 1; "~^http://(?>.*?\\.example\\.com:).*\\z" 0; "~^http://localhost:.*\\z" 0; default 1; }`,
 			} {
 				if broken := missing(out, line); broken != "" {
 					return broken
@@ -681,7 +752,7 @@ func TestSecurityLines(t *testing.T) {
 				"  client_header_timeout 5m;", "  client_body_timeout 5m;", "  send_timeout 5m;", "  proxy_send_timeout 5m;",
 				"  grpc_send_timeout 5m;", "  keepalive_timeout 1h;",
 			} {
-				if at := strings.Index(out, "\n"+line+"\n"); at < 0 || at > firstServer {
+				if at := strings.Index(noTimeouts, "\n"+line+"\n"); at < 0 || at > strings.Index(noTimeouts, "\n  server {\n") {
 					return fmt.Sprintf("no line %q before the first server", line)
 				}
 			}
@@ -794,6 +865,316 @@ func TestSecurityLines(t *testing.T) {
 			}
 			return ""
 		}},
+		{"the header limits", func() string {
+			// Without limits.request_headers, Envoy's own limits: a header block of 60 KiB and 100 fields. nginx reads a
+			// request into a first buffer of 64 bytes and moves the line that does not fit, with the lines after it, into
+			// a large buffer, never splitting a line, so the head stays within the size: one buffer of the size less 64
+			// bytes up to 65,600 bytes, and above it as many buffers of at most 64 KiB as the size needs.
+			for _, want := range []struct {
+				file  string
+				lines []string // lines of the http block
+			}{
+				{out, []string{"  max_headers 100;", "  client_header_buffer_size 64;", "  large_client_header_buffers 1 61376;", `  map "" $pf_header_count { default 100; }`}},
+				{headerLimits("4KiB"), []string{"  max_headers 20;", "  client_header_buffer_size 64;", "  large_client_header_buffers 1 4032;", `  map "" $pf_header_count { default 20; }`}},
+				{headerLimits("96KiB"), []string{"  large_client_header_buffers 2 49120;"}},
+				{headerLimits("8MiB"), []string{"  large_client_header_buffers 128 65535;"}},
+			} {
+				first := strings.Index(want.file, "\n  server {\n")
+				for _, line := range want.lines {
+					if at := strings.Index(want.file, "\n"+line+"\n"); at < 0 || at > first {
+						return fmt.Sprintf("no line %q before the first server", line)
+					}
+				}
+			}
+			return ""
+		}},
+		{"a long Origin", func() string {
+			// An Origin over 8,192 bytes is answered as one no list takes, before an origin pattern reads it, in each map
+			// that runs the patterns: the origin check ($pf_o<n>, 1) and the CORS answer ($pf_c<n>, 0).
+			for _, fragment := range []string{
+				`"~^https?://api\\.example\\.org(:[0-9]+)?\\z" 0; "~(?s)\\A.{8193}" 1; "~*^https://example\\.com\\z" 0;`,
+				`  map $pf_origin $pf_c1 { "~," 0; "~(?s)\\A.{8193}" 0; "~*^https://example\\.com\\z" 1;`,
+				`"~^https?://api\\.test\\.example\\.com(:[0-9]+)?\\z" 0; "~(?s)\\A.{8193}" 1; "~*^http://localhost:3000\\z" 0;`,
+				`  map $pf_origin $pf_c2 { "~," 0; "~(?s)\\A.{8193}" 0; "~*^http://localhost:3000\\z" 1;`,
+				`"~^https?://localhost(:[0-9]+)?\\z" 0; "~(?s)\\A.{8193}" 1; "~^http://(?>.*?\\.example\\.com:).*\\z" 0;`,
+				`  map $pf_origin $pf_c3 { "~," 0; "~(?s)\\A.{8193}" 0; "~^http://(?>.*?\\.example\\.com:).*\\z" 1;`,
+				`"~^https?://patterns\\.example\\.net(:[0-9]+)?\\z" 0; "~(?s)\\A.{8193}" 1; "~^https://(?>.*?\\.).*\\.example1\\.org\\z" 0;`,
+				`  map $pf_origin $pf_c4 { "~," 0; "~(?s)\\A.{8193}" 0; "~^https://(?>.*?\\.).*\\.example1\\.org\\z" 1;`,
+			} {
+				if !strings.Contains(out, fragment) {
+					return fmt.Sprintf("the file holds no %q", fragment)
+				}
+			}
+			// The test environment with origins and no pattern reads no Origin's length.
+			originsAlone := generate(t, rewritten(t, battery, testLists, "  test:\n    hosts: [api.test.example.com]\n    origins: [\"http://localhost:3000\"]\n"))
+			for _, line := range []string{
+				`  map $pf_origin $pf_o2 { "" 0; "~," 1; "~^https?://api\\.test\\.example\\.com(:[0-9]+)?\\z" 0; "~*^http://localhost:3000\\z" 0; default 1; }`,
+				`  map $pf_origin $pf_c2 { "~," 0; "~*^http://localhost:3000\\z" 1; default 0; }`,
+			} {
+				if broken := missing(originsAlone, line); broken != "" {
+					return broken
+				}
+			}
+			return ""
+		}},
+		{"an empty X-Forwarded-Proto", func() string {
+			// With client_address forwarded, or not written in a file without tls, the Envoy output answers an
+			// X-Forwarded-Proto line that is present and empty 404 before it reads the host or the origin, where nginx's
+			// $http_x_forwarded_proto reads it as none and would send the service the connection's scheme. Every server
+			// refuses it after the request checks, and a refused request carries no Access-Control line.
+			proto := []string{"    if ($pf_f_proto) {", `      return 404 "$pf_empty";`, "    }"}
+			for _, file := range []string{forwarded, unset} {
+				for _, line := range []string{"  js_set $pf_js_proto pf.forwardedProto;", `  map $pf_js_proto $pf_f_proto { "0" 0; default 1; }`} {
+					if at := strings.Index(file, "\n"+line+"\n"); at < 0 || at > strings.Index(file, "\n  server {\n") {
+						return fmt.Sprintf("no line %q before the first server", line)
+					}
+				}
+				checked := 0
+				for _, server := range blocks(lines(file), "  server {") {
+					if !slices.ContainsFunc(server, func(line string) bool { return strings.HasPrefix(line, "    listen 10000") }) {
+						continue
+					}
+					checked++
+					at := slices.Index(server, "    if ($pf_f_426) {") + 3
+					firstLocation := slices.IndexFunc(server, func(line string) bool { return strings.HasPrefix(line, "    location ") })
+					if at < 3 || at+len(proto) > len(server) || !slices.Equal(server[at:at+len(proto)], proto) || at > firstLocation {
+						return fmt.Sprintf("a server holds no %q right after its request checks", proto)
+					}
+				}
+				if checked != 5 {
+					return fmt.Sprintf("%d servers on the listener, want 5", checked)
+				}
+			}
+			if broken := missing(forwarded, `  map "$pf_reached:$pf_f_request$pf_f_426$pf_f_host_dot$pf_f_proto:$pf_route:$pf_c1" $pf_cors1 { "~^1:0000:(?:[0-9]+(?:-uri)?|preflight):1\\z" 1; default 0; }`); broken != "" {
+				return broken
+			}
+			// With client_address connection the Envoy output sends the connection's scheme whatever the client wrote,
+			// and with the header removed it reads no client copy, so neither file reads it.
+			for _, file := range []string{out, forwardedRemoved} {
+				for _, text := range []string{"pf_f_proto", "forwardedProto"} {
+					if strings.Contains(file, text) {
+						return fmt.Sprintf("a file that reads no client X-Forwarded-Proto holds %q", text)
+					}
+				}
+			}
+			return ""
+		}},
+		{"a 504 from the idle time", func() string {
+			// A service that sends nothing for the read time is answered with the Envoy output's text: "stream timeout"
+			// when timeouts.idle is the read time, and when Envoy's 5 minutes of silence are, "upstream request timeout"
+			// when the route's 15 s are. A service that does not take the connection in the cluster's 5 s is answered 502
+			// with no body, as the Envoy output answers it, wherever the connect time is those 5 s, through @pf_502 so a
+			// gRPC call gets the gRPC answer; under idle: 2s Envoy's idle timer ends it first, with its text. With idle
+			// and request none nothing but the connection is timed.
+			idleText := []string{"    location @pf_504 {", `      return 504 "stream timeout";`, "    }"}
+			checked := func(answer string) []string {
+				return []string{"    location @pf_504 {", "      error_page 502 = @pf_502$pf_grpc_call;",
+					`      if ($upstream_connect_time = "-") {`, "        return 502;", "      }", answer, "    }"}
+			}
+			routeLocation := regexp.MustCompile(`^    location @pf_r_[0-9]+(-uri)? \{$`)
+			for _, want := range []struct {
+				file   string
+				answer []string // the server's @pf_504 location
+			}{
+				{withTimeouts("{idle: 2s}"), idleText},
+				{withTimeouts("{idle: 10s}"), checked(`      return 504 "stream timeout";`)},
+				{withTimeouts("{request: none, idle: 6m}"), checked(`      return 504 "stream timeout";`)},
+				{noTimeouts, checked(`      return 504 "upstream request timeout";`)},
+				{withTimeouts("{idle: 90s}"), checked(`      return 504 "upstream request timeout";`)},
+				{withTimeouts("{request: none}"), checked(`      return 504 "stream timeout";`)},
+				{withTimeouts("{request: none, idle: none}"), checked("      return 504;")},
+			} {
+				servers, locations := 0, 0
+				for _, server := range environmentServers(want.file) {
+					servers++
+					at := slices.Index(server, want.answer[0])
+					if at < 0 || at+len(want.answer) > len(server) || !slices.Equal(server[at:at+len(want.answer)], want.answer) {
+						return fmt.Sprintf("a server holds no %q", want.answer)
+					}
+				}
+				for _, location := range blocks(lines(want.file), "    location @pf_r_") {
+					if !routeLocation.MatchString(location[0]) {
+						continue
+					}
+					locations++
+					at := slices.Index(location, "      error_page 502 = @pf_502$pf_grpc_call;")
+					if at < 0 || at+1 >= len(location) || location[at+1] != "      error_page 504 = @pf_504;" {
+						return fmt.Sprintf("%s holds no error_page 504 = @pf_504 after its error_page 502", location[0])
+					}
+				}
+				if servers != 4 || locations != 632 {
+					return fmt.Sprintf("%d servers and %d route locations, want 4 and 632", servers, locations)
+				}
+			}
+			return ""
+		}},
+		{"the admin server", func() string {
+			// The admin server, on 127.0.0.1 alone, answers every method on /ready, /stats and /server_info as Envoy's
+			// admin answers it: a method Envoy's parser does not know 400, then a query 404 before a location reads the
+			// path; /stats asks stub_status again with GET, as error_page does, for a method stub_status refuses with
+			// 405, and nginx's own 405 to TRACE has no body (measured on Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8 with
+			// GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS, TRACE and FOO). No public server serves stub_status.
+			if broken := missing(out, `  map $request_uri $pf_admin_query { "~\\?" 1; default 0; }`); broken != "" {
+				return broken
+			}
+			want := []string{
+				"  server {",
+				"    listen 127.0.0.1:9901;",
+				"    access_log off;",
+				"    error_page 405 = @pf_admin_405;",
+				"    if ($pf_f_method) {",
+				`      return 400 "$pf_empty";`,
+				"    }",
+				"    if ($pf_admin_query) {",
+				`      return 404 "$pf_empty";`,
+				"    }",
+				"    location = /ready {",
+				"      default_type text/plain;",
+				`      return 200 "LIVE\n";`,
+				"    }",
+				"    location = /stats {",
+				"      stub_status;",
+				"      error_page 405 = /stats;",
+				"    }",
+				"    location = /server_info {",
+				"      default_type application/json;",
+				`      return 200 '{"version":"$nginx_version"}\n';`,
+				"    }",
+				"    location / {",
+				`      return 404 "$pf_empty";`,
+				"    }",
+				"    location @pf_admin_405 {",
+				`      return 405 "$pf_empty";`,
+				"    }",
+				"  }",
+			}
+			var admins [][]string
+			for _, server := range blocks(lines(out), "  server {") {
+				if slices.Contains(server, "    listen 127.0.0.1:9901;") {
+					admins = append(admins, server)
+				} else if slices.Contains(server, "      stub_status;") {
+					return "a public server serves stub_status"
+				}
+			}
+			if len(admins) != 1 {
+				return fmt.Sprintf("%d admin servers, want 1", len(admins))
+			}
+			if !slices.Equal(admins[0], want) {
+				return fmt.Sprintf("the admin server is\n%s\nwant\n%s", strings.Join(admins[0], "\n"), strings.Join(want, "\n"))
+			}
+			return ""
+		}},
+		{"the log line", func() string {
+			// A log line holds no request line, path or query, which can carry a token: its format reads the variables
+			// of its own maps and five of nginx's, compared by whole name. A request id or Host holding a byte above 0x7F
+			// is logged empty, so every line stays UTF-8, and the admin server writes no line, as Envoy's admin writes
+			// none.
+			own := []string{"request_length", "body_bytes_sent", "request_method", "time_iso8601"}
+			format := ""
+			for _, line := range lines(out) {
+				if strings.HasPrefix(line, "  log_format pf_request escape=json '") {
+					format = line
+				}
+			}
+			if format == "" {
+				return "no log_format pf_request escape=json"
+			}
+			for _, name := range variable.FindAllStringSubmatch(format, -1) {
+				if !strings.HasPrefix(name[1], "pf_") && !slices.Contains(own, name[1]) {
+					return fmt.Sprintf("the log format reads $%s", name[1])
+				}
+			}
+			// The status is a number with no leading zero, as Envoy writes it, where nginx's $status has three digits:
+			// 009 for an answer nginx reads with no status line, which Envoy logs 2000 or 502, and 000 for an HTTP/2
+			// stream a client cut in its headers, which Envoy logs 0 (measured on nginx 1.30.6 and 1.31.8 beside Envoy
+			// 1.40.2). Neither is a number a JSON reader takes.
+			code := regexp.MustCompile(`(?m)^  map \$status \$pf_log_code \{ "~(.*)" \$pf_log_c; \}$`).FindStringSubmatch(out)
+			if code == nil {
+				return "no map of $status to $pf_log_code"
+			}
+			// The key read as nginx reads it, the quoted string's \\ as one \, then run on $status as nginx writes it.
+			key := regexp.MustCompile(strings.ReplaceAll(code[1], `\\`, `\`))
+			for status, want := range map[string]string{"000": "0", "009": "9", "200": "200", "404": "404"} {
+				if got := key.FindStringSubmatch(status); got == nil || got[key.SubexpIndex("pf_log_c")] != want {
+					return fmt.Sprintf("$status %s logs %q, want %s", status, got, want)
+				}
+			}
+			for _, field := range []string{`"request_id":"$pf_log_request_id"`, `"host":"$pf_log_host"`, `"status":$pf_log_code,`} {
+				if !strings.Contains(format, field) {
+					return fmt.Sprintf("the log format holds no %s", field)
+				}
+			}
+			for _, line := range []string{
+				`  map $pf_request_id $pf_log_request_id { "~[\\x80-\\xFF]" ""; default $pf_request_id; }`,
+				`  map $pf_authority $pf_log_host { "~[\\x80-\\xFF]" ""; default $pf_authority; }`,
+			} {
+				if broken := missing(out, line); broken != "" {
+					return broken
+				}
+			}
+			// With no log every request is logged.
+			if broken := missing(generate(t, rewritten(t, battery, batteryLog, "")), "  access_log /dev/stdout pf_request;"); broken != "" {
+				return broken
+			}
+			// The battery file's own log, {status_from: 400, sample: 1%}; TestLogStatuses holds the statuses each
+			// status_from takes.
+			for _, line := range []string{"  split_clients $pf_request_id $pf_log_sampled { 1% 1; * 0; }",
+				`  map "$pf_log_status$pf_log_sampled$pf_log_flagged" $pf_log { "000" 0; default 1; }`,
+				// A response the Envoy output flags is logged below status_from too: nginx's own answers but its preflight
+				// 200 and its 403s, which Envoy answers with no flag, and every failure of a service.
+				`  map "$upstream_header_time:$status:$pf_log_cut" $pf_log_flagged { "~:UPE\\z" 1; "~^[0-9][^:]*:(?!499:)" 0; "~^:(?:200|403):" 0; default 1; }`,
+				"  access_log /dev/stdout pf_request if=$pf_log;"} {
+				if broken := missing(out, line); broken != "" {
+					return broken
+				}
+			}
+			byStatus := withLog("{status_from: 404, sample: 0%}")
+			if strings.Contains(byStatus, "split_clients") {
+				return "sample: 0% writes split_clients, which nginx refuses at 0%"
+			}
+			if broken := missing(byStatus, `  map "$pf_log_status$pf_log_flagged" $pf_log { "00" 0; default 1; }`); broken != "" {
+				return broken
+			}
+			if broken := missing(withLog("{status_from: 500, sample: 100%}"), "  access_log /dev/stdout pf_request;"); broken != "" {
+				return broken
+			}
+			for _, server := range blocks(lines(out), "  server {") {
+				if slices.Contains(server, "    listen 127.0.0.1:9901;") && !slices.Contains(server, "    access_log off;") {
+					return "the admin server writes log lines"
+				}
+			}
+			// One location of the first route in each of the battery file's four environments.
+			first := blocks(lines(out), "    location @pf_r_1 {")
+			if len(first) != 4 {
+				return fmt.Sprintf("%d locations @pf_r_1, want 4", len(first))
+			}
+			for _, location := range first {
+				if len(location) < 3 || location[1] != `      set $pf_log_route "accounts-events";` || location[2] != `      set $pf_log_upstream "accounts_http";` {
+					return fmt.Sprintf("%q does not name its route and upstream first", location[0])
+				}
+			}
+			return ""
+		}},
+		{"the upstream-failure line", func() string {
+			// A service that fails before its answer, or cuts an answer it started with a content-length, writes the
+			// Envoy output's second line with the flag Envoy gives it; a timeout Envoy counts as its idle timer's writes
+			// none, as Envoy writes none for it. A 502 after the connection opened is UC when the service sent nothing
+			// and UPE when it sent an answer nginx could not read, as Envoy flags them.
+			format := `  log_format pf_upstream_failure escape=json '{"event":"gateway_upstream_failure","flags":"$pf_log_failure","route":"$pf_log_route","status":$pf_log_code,"upstream":"$pf_log_upstream"}';`
+			for _, want := range []struct{ file, failure string }{
+				{noTimeouts, `  map "$upstream_status:$upstream_connect_time:$upstream_header_time:$pf_log_cut:$upstream_bytes_received" $pf_log_failure { "~:UPE:" UPE; "~^502:-:" UF; "~^502:[0-9][^:]*:-::0\\z" UC; "~^502:[0-9][^:]*:-:" UPE; "~^504:-:" UF; "~^504:[0-9][^:]*:-:" UT; default ""; }`},
+				{withTimeouts("{idle: 2s}"), `  map "$upstream_status:$upstream_connect_time:$upstream_header_time:$pf_log_cut:$upstream_bytes_received" $pf_log_failure { "~:UPE:" UPE; "~^502:-:" UF; "~^502:[0-9][^:]*:-::0\\z" UC; "~^502:[0-9][^:]*:-:" UPE; default ""; }`},
+				{withTimeouts("{idle: 10s}"), `  map "$upstream_status:$upstream_connect_time:$upstream_header_time:$pf_log_cut:$upstream_bytes_received" $pf_log_failure { "~:UPE:" UPE; "~^502:-:" UF; "~^502:[0-9][^:]*:-::0\\z" UC; "~^502:[0-9][^:]*:-:" UPE; "~^504:-:" UF; default ""; }`},
+			} {
+				for _, line := range []string{format, want.failure, "  access_log /dev/stdout pf_upstream_failure if=$pf_log_failure;",
+					`  map "$request_method:$upstream_status:$upstream_response_length:$upstream_http_content_length" $pf_log_cut { "~^HEAD:" ""; "~^[A-Z]+:(?:1[0-9][0-9]|204|304):" ""; "~^[A-Z]+:[0-9]+:(?<pf_log_got>[0-9]+):(?!\\k<pf_log_got>\\z)[0-9]+\\z" UPE; default ""; }`} {
+					if broken := missing(want.file, line); broken != "" {
+						return broken
+					}
+				}
+			}
+			return ""
+		}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -835,6 +1216,9 @@ func everyRouteLocation(out string, check func(location []string, set string) st
 
 // corsLine is the battery file's cors key, examples/full's.
 const corsLine = `cors: {allow_methods: "*", allow_headers: "*", expose_headers: "Content-Disposition,X-Request-Id", max_age: "600"}` + "\n"
+
+// tlsLines is the battery file's tls key, examples/full's with client certificates.
+const tlsLines = "tls:\n  certificate: /etc/gateway/tls/certificate.pem\n  key: /etc/gateway/tls/key.pem\n  clients: {ca: /etc/gateway/tls/clients-ca.pem}\n"
 
 // testLists is the battery file's test environment with examples/full's lists.
 const testLists = "  test:\n    hosts: [api.test.example.com]\n    origins: [\"http://localhost:3000\", \"https://test.example.com\"]\n" +
@@ -1046,7 +1430,7 @@ func TestManyRoutes(t *testing.T) {
 		`  map "` + strings.Join(last, ":") + `:" $pf_g10` + group,
 		`  map "` + strings.Join(top, ":") + `:" $pf_g11` + group,
 		`  map "$pf_f_dotparam$pf_f_backslash$pf_f_control$pf_f_upgrade$pf_f_preflight:$pf_mode:$pf_g11" $pf_route {`,
-		"  variables_hash_max_size 7476;",
+		"  variables_hash_max_size 7560;",
 	} {
 		if broken := missing(out, line); broken != "" {
 			t.Error(broken)
@@ -1099,22 +1483,118 @@ var (
 )
 
 // TestReadTimeouts: a service that says nothing is answered 504 when Envoy answers it: 15 s after the request without
-// timeouts.request (the route's timeout the Envoy output keeps), and after 5 minutes with timeouts.request: none
-// (Envoy's stream idle timeout).
+// timeouts.request (the route's timeout the Envoy output keeps), after 5 minutes with timeouts.request: none (Envoy's
+// stream idle timeout), and after timeouts.idle when it is shorter. timeouts.idle also holds a client's body, the answer
+// to the client, the request to the service and the service's connection, nginx's own timer for each standing for the
+// one idle timer of the Envoy output; none is the longest time nginx reads.
 func TestReadTimeouts(t *testing.T) {
-	cases := []struct{ name, timeouts, want string }{
-		{"without timeouts.request", "", "15s"},
-		{"with timeouts.request: none", "timeouts: {request: none}\n", "5m"},
+	cases := []struct {
+		name, timeouts string
+		want           []string
+	}{
+		{"without timeouts.request", "", []string{"  proxy_read_timeout 15s;", "  grpc_read_timeout 15s;",
+			"  proxy_connect_timeout 5s;", "  grpc_connect_timeout 5s;", "  client_body_timeout 5m;", "  send_timeout 5m;",
+			"  proxy_send_timeout 5m;", "  grpc_send_timeout 5m;"}},
+		{"with timeouts.request: none", "timeouts: {request: none}\n", []string{"  proxy_read_timeout 5m;", "  grpc_read_timeout 5m;"}},
+		{"idle: 2s", "timeouts: {idle: 2s}\n", []string{"  proxy_read_timeout 2s;", "  grpc_read_timeout 2s;",
+			"  proxy_connect_timeout 2s;", "  grpc_connect_timeout 2s;", "  client_body_timeout 2s;", "  send_timeout 2s;",
+			"  proxy_send_timeout 2s;", "  grpc_send_timeout 2s;"}},
+		{"idle: 1500ms", "timeouts: {idle: 1500ms}\n", []string{"  proxy_read_timeout 1500ms;", "  proxy_connect_timeout 1500ms;",
+			"  client_body_timeout 1500ms;"}},
+		{"idle: 90s", "timeouts: {idle: 90s}\n", []string{"  proxy_read_timeout 15s;", "  grpc_read_timeout 15s;",
+			"  proxy_connect_timeout 5s;", "  grpc_connect_timeout 5s;", "  client_body_timeout 90s;", "  send_timeout 90s;",
+			"  proxy_send_timeout 90s;", "  grpc_send_timeout 90s;"}},
+		{"idle: 90s, request: none", "timeouts: {request: none, idle: 90s}\n", []string{"  proxy_read_timeout 90s;",
+			"  grpc_read_timeout 90s;", "  proxy_connect_timeout 5s;"}},
+		{"idle: 6m, request: none", "timeouts: {request: none, idle: 6m}\n", []string{"  proxy_read_timeout 6m;",
+			"  grpc_read_timeout 6m;", "  proxy_connect_timeout 5s;", "  client_body_timeout 6m;"}},
+		{"idle: none", "timeouts: {idle: none}\n", []string{"  proxy_read_timeout 15s;", "  grpc_read_timeout 15s;",
+			"  proxy_connect_timeout 5s;", "  grpc_connect_timeout 5s;", "  client_body_timeout 9223372036854775807ms;",
+			"  send_timeout 9223372036854775807ms;", "  proxy_send_timeout 9223372036854775807ms;",
+			"  grpc_send_timeout 9223372036854775807ms;"}},
+		{"idle: none, request: none", "timeouts: {request: none, idle: none}\n", []string{
+			"  proxy_read_timeout 9223372036854775807ms;", "  grpc_read_timeout 9223372036854775807ms;",
+			"  proxy_connect_timeout 5s;", "  client_body_timeout 9223372036854775807ms;"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			out := generate(t, c.timeouts+smallFile("{name: app, prefix: /, to: app}"))
-			for _, line := range []string{"  proxy_read_timeout " + c.want + ";", "  grpc_read_timeout " + c.want + ";"} {
+			for _, line := range c.want {
 				if broken := missing(out, line); broken != "" {
 					t.Error(broken)
 				}
 			}
 		})
+	}
+}
+
+// TestUpstreamIdle: each service's idle connections are kept as long as the Envoy output keeps them: an hour, Envoy's
+// default, without timeouts.upstream_idle, the time written with it, and the longest time nginx reads with none.
+func TestUpstreamIdle(t *testing.T) {
+	cases := []struct{ name, timeouts, want string }{
+		{"without timeouts.upstream_idle", "", "    keepalive_timeout 1h;"},
+		{"upstream_idle: 45s", "timeouts: {upstream_idle: 45s}\n", "    keepalive_timeout 45s;"},
+		{"upstream_idle: none", "timeouts: {upstream_idle: none}\n", "    keepalive_timeout 9223372036854775807ms;"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := generate(t, c.timeouts+"listen: 8000\nservices:\n  app: {http: 3000}\n  api: {http: 3001}\n"+
+				"origins:\n  local: {hosts: [localhost]}\nroutes:\n  - {name: api, prefix: /api/, to: api}\n"+
+				"  - {name: app, prefix: /, to: app}\n")
+			upstreams := blocks(lines(out), "  upstream ")
+			if len(upstreams) != 2 {
+				t.Fatalf("%d upstreams, want 2", len(upstreams))
+			}
+			for _, upstream := range upstreams {
+				if !slices.Contains(upstream, c.want) {
+					t.Errorf("%s holds no line %q", upstream[0], c.want)
+				}
+			}
+		})
+	}
+}
+
+// TestLogStatuses: log.status_from logs every status at or above it, as the Envoy output's filter does, written as
+// nginx's three digits, and 009, which nginx writes for an answer it reads with no status line: one whose status has
+// four digits, which Envoy logs at any status_from, and one with no status line at all, which Envoy answers 502 with the
+// flag UPE and logs too (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2 with answers of 600, 999, 2000 and
+// none).
+func TestLogStatuses(t *testing.T) {
+	file := func(statusFrom int) string {
+		return generate(t, fmt.Sprintf("log: {status_from: %d, sample: 0%%}\n", statusFrom)+
+			"listen: 8000\nservices:\n  app: {http: 3000}\norigins:\n  local: {hosts: [localhost]}\nroutes:\n"+
+			"  - {name: app, prefix: /, to: app}\n")
+	}
+	cases := []struct {
+		statusFrom int
+		want       string
+	}{
+		{100, `  map $status $pf_log_status { "~^(?:10[0-9]|1[1-9][0-9]|[2-9][0-9][0-9]|009)\\z" 1; default 0; }`},
+		{480, `  map $status $pf_log_status { "~^(?:48[0-9]|49[0-9]|[5-9][0-9][0-9]|009)\\z" 1; default 0; }`},
+		{499, `  map $status $pf_log_status { "~^(?:499|[5-9][0-9][0-9]|009)\\z" 1; default 0; }`},
+		{590, `  map $status $pf_log_status { "~^(?:59[0-9]|[6-9][0-9][0-9]|009)\\z" 1; default 0; }`},
+		{599, `  map $status $pf_log_status { "~^(?:599|[6-9][0-9][0-9]|009)\\z" 1; default 0; }`},
+	}
+	for _, c := range cases {
+		t.Run(fmt.Sprint(c.statusFrom), func(t *testing.T) {
+			if broken := missing(file(c.statusFrom), c.want); broken != "" {
+				t.Error(broken)
+			}
+		})
+	}
+	// The map's key read as nginx reads it, the quoted string's \\ as one \, then run on $status as nginx writes it.
+	key := regexp.MustCompile(`(?m)^  map \$status \$pf_log_status \{ "~(.*)" 1; default 0; \}$`).FindStringSubmatch(file(400))
+	if key == nil {
+		t.Fatal("status_from: 400 writes no map of $status to $pf_log_status")
+	}
+	taken := regexp.MustCompile(strings.ReplaceAll(key[1], `\\`, `\`))
+	for _, c := range []struct {
+		status string
+		want   bool
+	}{{"399", false}, {"400", true}, {"599", true}, {"600", true}, {"999", true}, {"009", true}, {"000", false}} {
+		if got := taken.MatchString(c.status); got != c.want {
+			t.Errorf("status_from: 400 takes $status %s: %t, want %t", c.status, got, c.want)
+		}
 	}
 }
 
@@ -1284,9 +1764,10 @@ func TestPathModes(t *testing.T) {
 
 // TestScript: the script beside the configuration starts with the header every generated file carries, in the
 // script's own comment syntax, and defines and exports each function the configuration names: nginx -t passes a
-// configuration whose function the script lacks, and nginx then answers every request 500.
+// configuration whose function the script lacks, and nginx then answers every request 500. The battery file is read
+// with client_address forwarded, so the configuration names every function the script holds.
 func TestScript(t *testing.T) {
-	config, script := generateFiles(t, string(testsupport.ReadFile(t, batteryFile)))
+	config, script := generateFiles(t, rewritten(t, string(testsupport.ReadFile(t, batteryFile)), "client_address: connection\n", "client_address: forwarded\n"))
 	if first, _, _ := strings.Cut(script, "\n"); first != "// Generated by proxyfile. Do not edit: change the proxyfile beside it and run proxyfile render; proxyfile check fails on a hand edit." {
 		t.Errorf("the script's first line is %q", first)
 	}
@@ -1294,14 +1775,31 @@ func TestScript(t *testing.T) {
 	for _, m := range regexp.MustCompile(`(?m)^\s*js_(?:set \$\w+|content|header_filter|body_filter|access) pf\.(\w+);$`).FindAllStringSubmatch(config, -1) {
 		named = append(named, m[1])
 	}
-	if !slices.Equal(named, []string{"headerNames", "origin"}) {
-		t.Fatalf("the configuration names the functions %q, want headerNames and origin", named)
+	if !slices.Equal(named, []string{"headerNames", "forwardedProto", "origin"}) {
+		t.Fatalf("the configuration names the functions %q, want headerNames, forwardedProto and origin", named)
 	}
 	// A header value holding a control byte other than a tab is refused: nginx passes one to the service, where Envoy
 	// answers 400 over HTTP/1.1 and closes the connection over HTTP/2 (measured on nginx 1.30.6 and 1.31.8 beside
 	// Envoy 1.40.2).
 	if check := "\n        if (/[\\x00-\\x08\\x0A-\\x1F\\x7F]/.test(raw[i][1])) {\n            return \"1\";\n        }\n"; !strings.Contains(script, check) {
 		t.Errorf("the script holds no %q", check)
+	}
+	// Over HTTP/2 a request with more fields than limits.request_headers.count as Envoy counts them is refused: with all
+	// four pseudo-headers, :authority counted whether or not the client sent it, because nginx gives :authority, a host
+	// field or both one host line, and max_headers counts none of them; and with each cookie field, which nginx joins
+	// into one line and max_headers does not count either (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2).
+	for _, check := range []string{
+		"\n    var h2 = r.httpVersion == \"2.0\";\n    var fields = raw.length + 4;\n",
+		"\n        if (h2 && low == \"cookie\") {\n            fields += raw[i][1].split(\"; \").length - 1;\n        }\n",
+		"\n    if (h2 && fields > Number(r.variables.pf_header_count)) {\n        return \"1\";\n    }\n    return \"0\";\n}\n",
+		// An X-Forwarded-Proto line that is empty as Envoy reads it, over HTTP/1 once the spaces and tabs around it are
+		// left out, is flagged.
+		"\n        if (raw[i][0].toLowerCase() == \"x-forwarded-proto\" && asEnvoyReads(r, raw[i][1]) == \"\") {\n            return \"1\";\n        }\n",
+		"\nfunction asEnvoyReads(r, value) {\n    if (r.httpVersion == \"2.0\") {\n        return value;\n    }\n    return value.replace(/^[ \\t]+|[ \\t]+$/g, \"\");\n}\n",
+	} {
+		if !strings.Contains(script, check) {
+			t.Errorf("the script holds no %q", check)
+		}
 	}
 	exported := regexp.MustCompile(`(?m)^export default \{(.*)\};$`).FindStringSubmatch(script)
 	if exported == nil {

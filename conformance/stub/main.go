@@ -16,6 +16,7 @@ import (
 )
 
 const usage = `usage: stub serve -service <name> -instance <id> -ports <port>[,<port>...] [-state <dir>] [-hang <duration>]
+       stub hold -port <port>
        stub dns -listen <addr> <name>=<ipv4>...
        stub fetch <url>`
 
@@ -26,6 +27,8 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		serve(os.Args[2:])
+	case "hold":
+		hold(os.Args[2:])
 	case "dns":
 		dns(os.Args[2:])
 	case "fetch":
@@ -106,6 +109,46 @@ func serve(args []string) {
 			}
 		}
 	}
+}
+
+// hold plays a service that takes no connection: it listens on port and never accepts, and first fills the
+// listener's queue with connections of its own, so the kernel drops the opening packet of every connection after
+// them and a client's connect waits until its own time runs out, as one to an address that answers nothing does
+// (Linux drops a SYN while a listener's queue of accepted connections is full, tcp_conn_request in
+// net/ipv4/tcp_input.c). The battery runs it with net.core.somaxconn at 1, so the queue holds two (the kernel takes
+// one past the backlog) and fills at once; a dial that times out is the sign it is full.
+func hold(args []string) {
+	flags := flag.NewFlagSet("hold", flag.ExitOnError)
+	port := flags.String("port", "", "the port that takes no connection")
+	flags.Parse(args)
+	if *port == "" || flags.NArg() > 0 {
+		usageError("hold needs -port, and nothing after it")
+	}
+	listener, err := net.Listen("tcp", ":"+*port)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	var queued []net.Conn
+	for {
+		conn, err := net.DialTimeout("tcp", "127.0.0.1:"+*port, 500*time.Millisecond)
+		if err != nil {
+			break
+		}
+		queued = append(queued, conn)
+		// A queue this long is not the one the battery sets up, and filling it would hold a file for each.
+		if len(queued) > 64 {
+			fmt.Fprintf(os.Stderr, "stub: the queue of %s held %d connections and did not fill; run hold with net.core.somaxconn at 1\n", *port, len(queued))
+			os.Exit(1)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "stub holds %s, its queue full with %d connections\n", *port, len(queued))
+	// The listener and the queued connections stay open until the container stops; waiting on a signal keeps the
+	// program running without a goroutine to wake it.
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt)
+	<-stop
+	listener.Close()
 }
 
 // dns answers the queries the proxy's resolver sends, from the records on the command line.

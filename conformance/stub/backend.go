@@ -37,7 +37,9 @@ func (b *backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// reply answers with the echo, in the status x-stub-status names, or 200.
+// reply answers with the echo, in the status x-stub-status names, or 200, after the time x-stub-delay names, and with
+// x-stub-trickle, such as 2x1250ms, after that many pauses of that time that each end with a space, which JSON reads as
+// nothing: a service silent past a proxy's idle time, and one that keeps sending within it.
 func (b *backend) reply(w http.ResponseWriter, r *http.Request) {
 	attempt, ok := b.firstTry(w, r)
 	if !ok {
@@ -56,15 +58,48 @@ func (b *backend) reply(w http.ResponseWriter, r *http.Request) {
 	if code, err := strconv.Atoi(r.Header.Get("x-stub-status")); err == nil {
 		status = code
 	}
+	if delay, err := time.ParseDuration(r.Header.Get("x-stub-delay")); err == nil && !wait(r, delay) {
+		return
+	}
 	askHeaders(w, r)
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(status)
+	if pauses, pause, ok := trickleOf(r.Header.Get("x-stub-trickle")); ok {
+		// The status and headers go out first, so each pause is one inside the body.
+		sent := http.NewResponseController(w)
+		sent.Flush()
+		for range pauses {
+			if !wait(r, pause) {
+				return
+			}
+			io.WriteString(w, " ")
+			sent.Flush()
+		}
+	}
 	e := b.describe(r, attempt)
 	e.Body = string(body)
 	if size, err := strconv.Atoi(r.Header.Get("x-stub-pad")); err == nil {
 		e.Pad = strings.Repeat("p", size)
 	}
 	json.NewEncoder(w).Encode(e)
+}
+
+// trickleOf reads x-stub-trickle's value, a count of pauses, x and the time of each, such as 2x1250ms.
+func trickleOf(value string) (pauses int, pause time.Duration, ok bool) {
+	count, each, found := strings.Cut(value, "x")
+	pauses, countErr := strconv.Atoi(count)
+	pause, pauseErr := time.ParseDuration(each)
+	return pauses, pause, found && countErr == nil && pauseErr == nil
+}
+
+// wait waits for d, and reports false when the request ended first, as one the proxy gave up on does.
+func wait(r *http.Request, d time.Duration) bool {
+	select {
+	case <-time.After(d):
+		return true
+	case <-r.Context().Done():
+		return false
+	}
 }
 
 // asked holds, by the request header that asks for it, an answer header the stub sets to that header's value.

@@ -1,10 +1,4 @@
-examples/full/yaml/proxyfile.yaml:10:1: "limits" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:11:3: "limits.connections" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:12:3: "limits.request_headers" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:12:21: "limits.request_headers.size" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:12:34: "limits.request_headers.count" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:15:3: "timeouts.idle" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:16:3: "timeouts.upstream_idle" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:11:3: "limits.connections" is refused by --target nginx: nginx counts its own listening sockets and every connection to a service against one limit, and closes a client's idle connection to take a new one, so no nginx setting holds client connections to a number; remove limits.connections, or render it for envoy
 examples/full/yaml/proxyfile.yaml:22:5: "services.<service name>.balance" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/yaml/proxyfile.yaml:23:5: "services.<service name>.health" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
 examples/full/yaml/proxyfile.yaml:23:14: "services.<service name>.health.path" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
@@ -55,9 +49,6 @@ examples/full/yaml/proxyfile.yaml:73:39: "routes[].retries" is refused by --targ
 examples/full/yaml/proxyfile.yaml:76:63: "rpc.methods[].action" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/yaml/proxyfile.yaml:78:63: "rpc.methods[].action" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/yaml/proxyfile.yaml:78:76: "rpc.methods[].reports" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:79:1: "log" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:79:7: "log.status_from" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:79:25: "log.sample" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/yaml/proxyfile.yaml:80:1: "tracing" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/yaml/proxyfile.yaml:81:3: "tracing.provider" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/yaml/proxyfile.yaml:82:5: "tracing.provider.otel" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

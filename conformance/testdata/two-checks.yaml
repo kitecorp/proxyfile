@@ -1,4 +1,5 @@
-# The conformance battery's file with an auth check whose service has two addresses: nginx-plain.yaml with the check.
+# The conformance battery's file with an auth check whose service has two addresses: nginx-plain.yaml with the check
+# and without its hold service.
 # The check service, checks, is at 10.0.3.31 and 10.0.3.32, the battery's check-1 and check-2, so a row can make one
 # of them refuse connections and see that each check sent there fails, which no other backend answers. Its
 # when_unavailable is deny, where haproxy.yaml's is allow, so the rows of an answer the check cannot give run in both

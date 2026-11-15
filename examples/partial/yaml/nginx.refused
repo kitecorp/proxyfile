@@ -7,6 +7,3 @@ examples/partial/yaml/proxyfile.yaml:15:3: "auth.when_unavailable" is refused by
 examples/partial/yaml/proxyfile.yaml:16:3: "auth.send" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/partial/yaml/proxyfile.yaml:17:3: "auth.accept" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/partial/yaml/proxyfile.yaml:24:80: "routes[].auth" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/partial/yaml/proxyfile.yaml:26:1: "log" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/partial/yaml/proxyfile.yaml:26:7: "log.status_from" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/partial/yaml/proxyfile.yaml:26:25: "log.sample" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

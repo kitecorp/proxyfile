@@ -715,8 +715,10 @@ Envoy's answers on Envoy 1.40.2, unless it says otherwise.
   `grpc-message`: `upstream connect error or disconnect/reset before headers. reset reason: remote reset`, the same
   with `protocol error`, and `upstream request timeout`. A gRPC call is told by its content type, as the check's
   refusal tells one: `application/grpc` alone or followed by `+`, compared as written. Over HTTP/1.1 the answer keeps
-  `content-length: 0`, as Envoy's does. A gRPC call to an HTTP service gets the same, except the `REFUSED_STREAM`
-  below.
+  `content-length: 0`, as Envoy's does. A gRPC call to an HTTP service gets the same, except the `REFUSED_STREAM` below.
+  A request that is not a gRPC call, to a gRPC service that resets the stream or answers in HTTP/1.1, gets the empty
+  `502` above, where Envoy answers the stream reset `503` and the HTTP/1.1 answer `502`, each with its text as
+  `text/plain` (declared on `services.<service name>.grpc`).
 - **Each request reaches a service on a connection of its own** (`option http-server-close` and
   `option http-pretend-keepalive`, and `max-reuse 0` on a gRPC server's line): an HTTP service's connection is closed
   after its answer, and a gRPC service's carries one call. HAProxy kept its connections to a service, and when the

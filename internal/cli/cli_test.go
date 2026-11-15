@@ -62,7 +62,7 @@ func TestRun(t *testing.T) {
 				"docs/haproxy.md lists them under \"Where HAProxy is less strict than the Envoy output\"\n"},
 		{name: "render for nginx counts the ways it is less strict", setup: func(t *testing.T, tmp string) { copyExample(t, tmp, "grpc") },
 			args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/nginx.conf --target nginx",
-			stderr: "proxyfile render: this nginx configuration is less strict than the Envoy output in 5 ways; " +
+			stderr: "proxyfile render: this nginx configuration is less strict than the Envoy output in 9 ways; " +
 				"docs/nginx.md lists them under \"Where nginx is less strict than the Envoy output\"\n"},
 		{name: "render for envoy counts nothing", setup: copyMinimal, args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/envoy.yaml"},
 		{name: "check for haproxy counts nothing", args: "check <ex>/minimal/yaml/proxyfile.yaml -o <ex>/minimal/yaml/haproxy.cfg --target haproxy"},

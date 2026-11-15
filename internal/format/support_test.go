@@ -224,6 +224,12 @@ func TestRefusals(t *testing.T) {
 		{name: "a whole-request limit", spec: Proxyfile, target: nginxTarget, document: m.Inserted(7, "timeouts: {request: 30s}"),
 			want: []string{`g.yaml:7:12: "timeouts.request" a time is refused by --target nginx: nginx has no limit on a whole request (its time limits count the time between two reads or writes); write timeouts.request: none, or render it for envoy`}},
 		{name: "no whole-request limit", spec: Proxyfile, target: nginxTarget, document: m.Inserted(7, "timeouts: {request: none}"), want: nil},
+		// nginx closes a client's idle connection to take a new one, and drops a request in flight, where the Envoy
+		// output refuses the new connection (measured with worker_connections 6 on nginx 1.30.6 and 1.31.8 beside
+		// Envoy 1.40.2); the header limits beside it are written.
+		{name: "a connection limit", spec: Proxyfile, target: nginxTarget, document: m.Inserted(7, "limits: {connections: 6, request_headers: {size: 4KiB, count: 20}}"),
+			want: []string{`g.yaml:7:10: "limits.connections" is refused by --target nginx: nginx counts its own listening sockets and every connection to a service against one limit, and closes a client's idle connection to take a new one, so no nginx setting holds client connections to a number; remove limits.connections, or render it for envoy`}},
+		{name: "header limits", spec: Proxyfile, target: nginxTarget, document: m.Inserted(7, "limits: {request_headers: {size: 4KiB, count: 20}}"), want: nil},
 		// nginx reads a $ in a certificate's or a key's path as the start of a variable, and a CA's path as written
 		// (measured on nginx 1.30.6 and 1.31.8).
 		{name: "a $ in the certificate's path", spec: Proxyfile, target: nginxTarget,
@@ -369,7 +375,7 @@ func TestRefusals(t *testing.T) {
 func TestLessStrictWarning(t *testing.T) {
 	for _, c := range []struct{ target, want string }{
 		{"envoy", ""},
-		{"nginx", `this nginx configuration is less strict than the Envoy output in 5 ways; docs/nginx.md lists them under "Where nginx is less strict than the Envoy output"`},
+		{"nginx", `this nginx configuration is less strict than the Envoy output in 9 ways; docs/nginx.md lists them under "Where nginx is less strict than the Envoy output"`},
 		{"haproxy", `this HAProxy configuration is less strict than the Envoy output in 10 ways; docs/haproxy.md lists them under "Where HAProxy is less strict than the Envoy output"`},
 	} {
 		target, _ := TargetNamed(c.target)
@@ -411,10 +417,14 @@ func TestLessStrictWays(t *testing.T) {
 		}},
 		{"nginx", []way{
 			{line, "a request trailer whose name is outside the token characters or whose value holds a control byte is served over HTTP/1.1"},
+			{"limits.request_headers.size", "a request trailer larger than the header limit is served over HTTP/1.1"},
 			{line, "a header line with no colon reaches the service as a header with an empty value"},
 			{line, "a request with no body reaches the service without content-length: 0"},
 			{line, "a WebSocket upgrade a service answers without switching passes the service's body"},
+			{line, "a service's answer with a malformed header line or a malformed status line reaches the client"},
+			{line, "over HTTP/2, empty frames in a row are served"},
 			{"timeouts.request", "without timeouts.request, an answer that keeps arriving runs past 15 s"},
+			{"log", "a chunked answer its service cuts short writes no upstream-failure line"},
 		}},
 	} {
 		target, _ := TargetNamed(c.target)
@@ -470,7 +480,7 @@ func TestHAProxyWrites(t *testing.T) {
 		{key: "services.<service name>", level: Supported},
 		{key: "services.<service name>.http", level: Supported},
 		{key: "services.<service name>.grpc", level: Partial,
-			note: "a service that never takes the connection is answered after 15 s, where Envoy answers after its 5 s connect timeout, a gRPC call with 200 and grpc-status 14 as by Envoy and any other request with 504 and upstream request timeout, where Envoy's is an empty 502: HAProxy does not bound an HTTP/2 connection to a service by its connect timeout, and the 15 s a service that sends nothing gets end the wait (measured without timeouts.request); a gRPC call HAProxy alone refuses before any service, such as one with a client's X-Request-Id of 1,000 bytes under forwarded, gets HAProxy's plain answer, here 400, where Envoy serves the call"},
+			note: "a service that never takes the connection is answered after 15 s, where Envoy answers after its 5 s connect timeout, a gRPC call with 200 and grpc-status 14 as by Envoy and any other request with 504 and upstream request timeout, where Envoy's is an empty 502: HAProxy does not bound an HTTP/2 connection to a service by its connect timeout, and the 15 s a service that sends nothing gets end the wait (measured without timeouts.request); a gRPC call HAProxy alone refuses before any service, such as one with a client's X-Request-Id of 1,000 bytes under forwarded, gets HAProxy's plain answer, here 400, where Envoy serves the call; a request that is not a gRPC call, to a gRPC service that resets its stream or answers in HTTP/1.1, is answered 502 with no body, where the Envoy output answers the stream reset 503 and the HTTP/1.1 answer 502, each with the text upstream connect error or disconnect/reset before headers. reset reason: remote reset, or protocol error, as text/plain"},
 		{key: "services.<service name>.host_header", level: Supported},
 		{key: "services.<service name>.address", level: Partial, note: "an IP address with no zone",
 			refuses: "a DNS name: this version's HAProxy generator writes no DNS name; give the service's IP address, or render it for envoy; " +

@@ -27,6 +27,10 @@ type route struct {
 	pass    string // the proxy_pass or grpc_pass line's target
 	grpc    bool
 	host    string // the Host the service receives, as the file writes it
+	// name and upstream are what the request log writes as route and upstream: the route's name, or the rpc entry's
+	// name for its methods, and the upstream the route sends to, as the Envoy output names its route and cluster.
+	name     string
+	upstream string
 }
 
 // scriptName is the name of the script the configuration loads, written beside it: nginx reads a relative name in
@@ -71,6 +75,12 @@ func (e edge) read(name string) string {
 		return ""
 	}
 	return "$http_" + strings.ReplaceAll(name, "-", "_")
+}
+
+// readsProto says whether the routes send the client's own X-Forwarded-Proto: with client_address forwarded, and the
+// header not removed (writeForwardingMaps).
+func (e edge) readsProto() bool {
+	return !e.connection && e.read("x-forwarded-proto") != ""
 }
 
 // origin is the variable that holds the request's Origin as the Envoy output reads it (writeOrigin), or "" when
@@ -150,16 +160,169 @@ func writeForwardingMaps(w *writer, e edge) {
 	}
 }
 
-// readTimeout is how long nginx waits for a service's answer, counted from the request's end and then between two
-// reads. Without timeouts.request the Envoy output ends a request 15 s after its end (the route's timeout, Envoy's
-// default), which nginx cannot write for a whole answer: 15 s between two reads gives a service that says nothing the
-// same 504 at the same time, and lets an answer that keeps coming run past 15 s, the difference timeouts.request's
-// declaration names. With timeouts.request: none only Envoy's 5 minutes of silence are left.
-func readTimeout(request *model.Time) string {
-	if request == nil {
-		return "15s"
+// The Envoy output's own times where the file writes none: a route ends a request 15 s after its end (the route's
+// timeout), a stream with nothing read or written ends after 5 minutes (the connection manager's stream idle timeout),
+// a service connection is given 5 s to open (the cluster's connect timeout) and is kept idle for an hour (the cluster's
+// idle timeout).
+const (
+	routeTimeout   = 15 * 1000
+	streamIdle     = 5 * 60 * 1000
+	connectTimeout = 5 * 1000
+)
+
+// largestTime is the longest time nginx reads, which it writes for none: both images load 9223372036854775807
+// milliseconds on every timeout line and refuse one more, and neither ended a request to a service silent for 6
+// minutes, or closed an idle service connection reused after 70 s, at it (measured on nginx 1.30.6 and 1.31.8).
+const largestTime = "9223372036854775807ms"
+
+// nginxTime writes a time as nginx reads it, in the largest of its units h, m, s and ms that holds it whole, because
+// nginx reads no fraction; 0, none, is largestTime.
+func nginxTime(millis int64) string {
+	if millis == 0 {
+		return largestTime
 	}
-	return "5m"
+	for _, unit := range []struct {
+		name   string
+		millis int64
+	}{{"h", 60 * 60 * 1000}, {"m", 60 * 1000}, {"s", 1000}} {
+		if millis%unit.millis == 0 {
+			return strconv.FormatInt(millis/unit.millis, 10) + unit.name
+		}
+	}
+	return strconv.FormatInt(millis, 10) + "ms"
+}
+
+// timers are nginx's time limits for the Envoy output's timeouts. nginx counts each limit between two reads or two
+// writes of one operation, where Envoy's idle timer counts a stream's silence in either direction, so timeouts.idle is
+// written on each of nginx's own: a client's body (client_body_timeout), the answer to the client (send_timeout), the
+// request to the service (proxy_send_timeout), the service's answer (proxy_read_timeout) and its connection
+// (proxy_connect_timeout), each where it is shorter than the Envoy output's other time for that silence.
+type timers struct {
+	read     string   // the service's answer: proxy_read_timeout and grpc_read_timeout
+	connect  string   // the service's connection: proxy_connect_timeout and grpc_connect_timeout
+	idle     string   // the client's body, the answer to it and the request to the service
+	upstream string   // an idle service connection kept: keepalive_timeout in each upstream
+	answer   []string // the location a route's 504 goes to (timeoutAnswer)
+	// connectFlag and readFlag are the flags the Envoy output's upstream-failure line gives the request nginx answers
+	// 504 when its connect time or its read time ends it (writeLog): UF for the cluster's connect timeout and UT for
+	// the route's timeout, or "" where Envoy's idle timer ends the request first, which Envoy flags SI and writes no
+	// such line for.
+	connectFlag, readFlag string
+}
+
+// timersOf returns the timers of the file's timeouts. The service's answer is read for the shortest of the times Envoy
+// would end a silent request at: timeouts.idle (the route's idle_timeout, which replaces the stream idle timeout), the
+// route's 15 s without timeouts.request, and Envoy's 5 minutes with timeouts.request: none and no idle. The connection
+// is given 5 s, or timeouts.idle where it is shorter, as Envoy's idle timer runs while the connection opens (measured:
+// with idle: 2s Envoy answered a service that took no connection 504 after 2 s). nginx counts its read time from the
+// request's end and then between two reads, where the route's 15 s count a whole answer: a service that says nothing
+// gets the same 504 at the same time, and an answer that keeps coming runs past 15 s, the difference the support
+// table's less-strict list names for timeouts.request. A request time other than none is refused for nginx, so
+// t.Request is none or nil.
+func timersOf(v *values, t model.Timeouts) timers {
+	const idleKey, requestKey = "timeouts.idle", "timeouts.request"
+	tm := timers{read: nginxTime(routeTimeout), connect: nginxTime(connectTimeout), idle: nginxTime(streamIdle), upstream: "1h",
+		connectFlag: "UF"}
+	idle := t.Idle != nil && t.Idle.Millis != 0
+	if t.Idle != nil {
+		tm.idle = v.token(idleKey, t.Idle.Pos, nginxTime(t.Idle.Millis))
+	}
+	if idle && t.Idle.Millis < connectTimeout {
+		tm.connect, tm.connectFlag = tm.idle, ""
+	}
+	if t.UpstreamIdle != nil {
+		tm.upstream = v.token("timeouts.upstream_idle", t.UpstreamIdle.Pos, nginxTime(t.UpstreamIdle.Millis))
+	}
+	text := ""
+	switch {
+	case idle && (t.Request != nil || t.Idle.Millis < routeTimeout):
+		tm.read, text = tm.idle, "stream timeout"
+	case t.Request == nil:
+		text, tm.readFlag = "upstream request timeout", "UT"
+	case t.Idle == nil:
+		tm.read, text = v.token(requestKey, t.Request.Pos, nginxTime(streamIdle)), "stream timeout"
+	default:
+		// idle and request none: nothing ends a silent request, as in the Envoy output.
+		tm.read = tm.idle
+	}
+	tm.answer = timeoutAnswer(text, tm.connectFlag != "")
+	return tm
+}
+
+// timeoutAnswer is the named location every route location sends nginx's 504 to, which answers a service that sent
+// nothing for the read time with the Envoy output's text for the timer that ended it: "stream timeout" for its idle
+// timers, "upstream request timeout" for its route timeout, or nginx's own 504 where no read time ends a request (text
+// ""). nginx also answers 504 to a service that did not take the connection in its connect time, which it records as
+// $upstream_connect_time -. With connect, when that time is the cluster's 5 s, such a request is answered as one whose
+// service refused the connection, through @pf_502's error_page (the server's recursive_error_pages lets a named
+// location send its own 502 on): 502 with no body, or a gRPC call in gRPC's form, as the Envoy output answers both;
+// under 5 s the connect time is timeouts.idle, and Envoy's idle timer ends the request at the same time with the same
+// text. Measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2: the texts at 2 s, 15 s and 5 minutes, the 502 and
+// the gRPC answer at 5 s with idle: 10s and with no timeouts, and every other answer unchanged.
+func timeoutAnswer(text string, connect bool) []string {
+	answer := []string{"    location @pf_504 {"}
+	if connect {
+		answer = append(answer, "      error_page 502 = @pf_502$pf_grpc_call;", `      if ($upstream_connect_time = "-") {`,
+			"        return 502;", "      }")
+	}
+	if text == "" {
+		return append(answer, "      return 504;", "    }")
+	}
+	return append(answer, `      return 504 "`+text+`";`, "    }")
+}
+
+// headerLimits returns the largest header block, in bytes, and the most header fields a request may carry:
+// limits.request_headers as written, or Envoy's defaults when it is not, 60 KiB and 100 (max_request_headers_kb and
+// max_headers_count in Envoy's protocol.proto), which the Envoy output keeps.
+func headerLimits(limits model.Limits) (size, count int) {
+	if limits.RequestHeaders == nil {
+		return 60 * 1024, 100
+	}
+	return int(limits.RequestHeaders.Size.Bytes), int(limits.RequestHeaders.Count.Number)
+}
+
+// firstHeaderBuffer is the buffer nginx reads each request into first, and largestHeaderBuffer the most bytes one of
+// its large header buffers holds.
+const firstHeaderBuffer, largestHeaderBuffer = 64, 64 * 1024
+
+// The keys of the header limits, as the support table names them.
+const (
+	headerSizeKey  = "limits.request_headers.size"
+	headerCountKey = "limits.request_headers.count"
+)
+
+// headerLines are the http block's limits on a request's head, from headerLimits. Envoy counts the whole head against
+// the size: the request line, every header line with its CRLF and the empty line; it serves a head of exactly the size
+// and answers 431 one byte past (measured on Envoy 1.40.2 at 4 KiB, 60 KiB, 96 KiB, 128 KiB and 8 MiB). nginx reads a
+// request into its first buffer, then moves the line that does not fit, and the lines after it, into a large buffer,
+// never splitting a line between two buffers, so a first buffer of 64 bytes and n buffers of b bytes, n times b at
+// most the size less 64, hold no head larger than the size. Up to a size of 65,600 bytes that is one buffer of the size
+// less 64; above it, as many buffers of at most 64 KiB as the size needs. The cap keeps two costs bounded, measured on
+// nginx 1.30.6 and 1.31.8 and given on docs/nginx.md: a path of 65,005 bytes, about the longest a buffer holds, took
+// nginx's maps 28.79 to 29.12 ms at the median against the 24 pattern routes of the conformance battery's file, where
+// one of 1,000,000 bytes in buffers of 1 MiB took 202 to 231 ms; and a buffer under glibc's threshold of 128 KiB comes
+// from the heap and costs the pages a head touches, so 2,000 connections each holding a silent head of 65, 1,100 or
+// 9,000 bytes grew nginx by 24 to 33 KiB a connection at 60 KiB and at 8 MiB, beside Envoy's 24 to 31, where one buffer
+// of 2 MiB or more took a whole huge page of 2 MiB for every head over 64 bytes. A head within 64 bytes of the size, a line longer than one buffer, and a block of long
+// lines that leaves a buffer's end unused are refused where Envoy serves them, which the size's row declares.
+// max_headers counts the header lines of HTTP/1.1 and the fields of HTTP/2 but its pseudo-headers and cookies, so the
+// script counts those (headerNames) against $pf_header_count.
+func headerLines(v *values, limits model.Limits) []string {
+	size, count := headerLimits(limits)
+	var sizePos, countPos model.Pos
+	if written := limits.RequestHeaders; written != nil {
+		sizePos, countPos = written.Size.Pos, written.Count.Pos
+	}
+	rest := size - firstHeaderBuffer
+	buffers := (rest + largestHeaderBuffer - 1) / largestHeaderBuffer
+	counted := v.token(headerCountKey, countPos, strconv.Itoa(count))
+	return []string{
+		"  max_headers " + counted + ";",
+		"  client_header_buffer_size " + strconv.Itoa(firstHeaderBuffer) + ";",
+		"  large_client_header_buffers " + v.token(headerSizeKey, sizePos, strconv.Itoa(buffers)) + " " +
+			v.token(headerSizeKey, sizePos, strconv.Itoa(rest/buffers)) + ";",
+		`  map "" $pf_header_count { default ` + counted + "; }",
+	}
 }
 
 // Generate returns the whole nginx.conf as the configuration and the script it loads, proxyfile.js. Its error is a
@@ -175,6 +338,7 @@ func Generate(in generator.Input) ([]generator.File, error) {
 	if err != nil {
 		return nil, err
 	}
+	tm := timersOf(&v, g.Timeouts)
 	var w writer
 	w.WriteString(generator.Header)
 	w.lines(
@@ -185,17 +349,20 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		"worker_processes auto;",
 		// nginx logs a request line, with its query, which can carry a token, at error (a refused service) and at
 		// alert (a pattern PCRE2 gave up on), so its own log keeps emerg alone, which still shows a file it cannot
-		// load, until a later version writes log.
+		// load. The request log, which holds no request line, is writeLog's.
 		"error_log stderr emerg;",
-		// The official image's own nginx.conf writes 1024; nginx's default is 512.
+		// The official image's own nginx.conf writes 1024; nginx's default is 512. multi_accept stays off, nginx's
+		// default: with one worker busy with a flood of costly requests it let a plain request on a new connection
+		// wait 1.4 s at the median instead of 15 s, but the worker held 307 MiB after the flood where it held 30 MiB,
+		// and the battery's 2,000 held connections took 43 KiB each instead of 35; with a worker for each CPU the
+		// plain request waited under 1 ms at the median either way (measured on nginx 1.30.6 and 1.31.8, size 128 KiB).
 		"events {",
 		"  worker_connections 1024;",
 		"}",
 		"http {",
-		// Envoy admits 100 request headers when limits.request_headers is not written (max_headers_count's default),
-		// and nginx 1000 (the core module page). Measured on Envoy 1.40.2 and nginx 1.31.8 with this line: both admit
-		// and refuse at the same count.
-		"  max_headers 100;",
+	)
+	w.lines(headerLines(&v, g.Limits)...)
+	w.lines(
 		// nginx refuses a request body over 1 MiB by default (the core module page); the Envoy configuration writes no
 		// limit on a body's size. nginx also keeps a whole body before it sends any of it, where Envoy sends each part
 		// on as it arrives: a body sent over 2 s reached the service over 2 s through Envoy and at once through nginx
@@ -210,8 +377,6 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		"  ignore_invalid_headers off;",
 		// nginx's own answers name nginx without its version.
 		"  server_tokens off;",
-		// nginx's request log is not the request log the Envoy configuration writes; a later version writes log.
-		"  access_log off;",
 		// nginx acts on these headers of a service's answer unless it ignores them: X-Accel-Redirect makes it serve
 		// another URI the service names, the others change its caching, rate, buffering and charset. Envoy acts on
 		// none of them (proxy_ignore_headers on the proxy module page).
@@ -220,20 +385,19 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		// A service's http port is spoken as HTTP/1.1, which a kept connection and a WebSocket upgrade both need;
 		// nginx's default is 1.0.
 		"  proxy_http_version 1.1;",
-		// Envoy's cluster connect timeout is 5 seconds when not written; nginx's default is 60.
-		"  proxy_connect_timeout 5s;",
-		"  grpc_connect_timeout 5s;",
-		// Envoy ends a request that nothing was read or written on for 5 minutes (stream_idle_timeout, not written by
-		// the Envoy output) and closes a client's connection after an hour with no request (idle_timeout); nginx's
-		// own limits are 60 s and 75 s. nginx counts its limits between two reads or writes, so they hold the same
-		// silences. A service's answer has its own limit, readTimeout.
+		// nginx's own limits are 60 s for each of these and 75 s for an idle client connection; timersOf gives the
+		// Envoy output's. A client's header block keeps Envoy's 5 minutes whatever timeouts.idle says, as Envoy's
+		// route idle timer starts only once a route is picked (measured: a block that paused 3 s under idle: 2s was
+		// served by both), and Envoy closes a client's connection after an hour with no request.
+		"  proxy_connect_timeout "+tm.connect+";",
+		"  grpc_connect_timeout "+tm.connect+";",
 		"  client_header_timeout 5m;",
-		"  client_body_timeout 5m;",
-		"  send_timeout 5m;",
-		"  proxy_read_timeout "+readTimeout(g.Timeouts.Request)+";",
-		"  proxy_send_timeout 5m;",
-		"  grpc_read_timeout "+readTimeout(g.Timeouts.Request)+";",
-		"  grpc_send_timeout 5m;",
+		"  client_body_timeout "+tm.idle+";",
+		"  send_timeout "+tm.idle+";",
+		"  proxy_read_timeout "+tm.read+";",
+		"  proxy_send_timeout "+tm.idle+";",
+		"  grpc_read_timeout "+tm.read+";",
+		"  grpc_send_timeout "+tm.idle+";",
 		"  keepalive_timeout 1h;",
 		// nginx tries the next backend after an error or a timeout by default; Envoy tries a request once unless the
 		// route writes retries, which this version does not write.
@@ -244,11 +408,18 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		"  grpc_pass_header Server;",
 	)
 	w.lines(hashSizes(in, routes)...)
+	writeLog(&w, g.Log, tm)
 	writeTLS(&w, &v, g.TLS)
 	w.lines(
 		"",
 		// An answer with no body is written "$pf_empty": return with an empty text answers nginx's own HTML page.
 		`  map "" $pf_empty { default ""; }`,
+		// A gRPC call is a request whose content-type is application/grpc or starts application/grpc+, as Envoy
+		// tells one, in that case alone (measured on Envoy 1.40.2: application/grpc;x=1, application/grpc-web and
+		// Application/GRPC are not). Each 502 nginx makes for one is answered in gRPC's form (grpcUnavailable), as the
+		// Envoy output answers each failure of its service: the error_page that names @pf_502$pf_grpc_call takes
+		// nginx's own 502s alone, as no location intercepts a service's answer.
+		`  map $http_content_type $pf_grpc_call { `+regexKey(`^application/grpc(?:\+|\z)`)+` -grpc; default ""; }`,
 	)
 	// $pf_request_id is sent to the service and on every answer.
 	writeForwardingMaps(&w, e)
@@ -269,7 +440,7 @@ func Generate(in generator.Input) ([]generator.File, error) {
 			regexKey(`^0:(?:.*,)?[ \t]*trailers[ \t]*(?:,|\z)`)+` trailers; default ""; }`,
 		"",
 	)
-	writeRequestChecks(&w)
+	writeRequestChecks(&w, e)
 	writeUpgradeMaps(&w)
 	writePathClasses(&w, slices.ContainsFunc(g.Routes, func(r model.Route) bool { return r.Match == model.Pattern }))
 	w.lines(
@@ -305,7 +476,7 @@ func Generate(in generator.Input) ([]generator.File, error) {
 	writeRouteChoice(&w, routes)
 	for _, service := range g.Services {
 		for _, port := range service.Ports {
-			writeUpstream(&w, &v, service, port)
+			writeUpstream(&w, &v, service, port, tm.upstream)
 		}
 	}
 	w.lines("")
@@ -316,27 +487,20 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		listen += " ssl"
 	}
 	if g.Admin != nil {
-		// Envoy's admin listens on 127.0.0.1 too. Of its pages nginx answers /ready alone, as Envoy answers it while
-		// the gateway is live.
+		// Envoy's admin listens on 127.0.0.1 too.
 		w.lines(
+			"  map $request_uri $pf_admin_query { "+regexKey(`\?`)+" 1; default 0; }",
 			"  server {",
 			"    listen 127.0.0.1:"+strconv.FormatInt(g.Admin.Number, 10)+";",
-			"    location = /ready {",
-			"      default_type text/plain;",
-			`      return 200 "LIVE\n";`,
-			"    }",
-			"    location / {",
-			`      return 404 "$pf_empty";`,
-			"    }",
-			"  }",
-			"",
 		)
+		w.lines(adminLines()...)
+		w.lines("  }", "")
 	}
 	// A Host that no environment names gets 404, as Envoy answers a request no virtual host takes, after the checks
 	// Envoy makes before it reads the host. Every server writes http2 on, so a gRPC client reaches the plain listener
 	// speaking HTTP/2 from its first byte.
 	w.lines("  server {", "    listen "+listen+" default_server;", "    http2 on;")
-	w.lines(requestChecks...)
+	w.lines(requestChecks(e)...)
 	w.lines(tlsServerLines(g.TLS, nil)...)
 	w.lines(
 		"    location / {",
@@ -375,7 +539,7 @@ func Generate(in generator.Input) ([]generator.File, error) {
 			"    add_header Vary Origin always;",
 		)
 		w.lines(server...)
-		w.lines(requestChecks...)
+		w.lines(requestChecks(e)...)
 		w.lines(
 			// nginx reads a host with a dot at its end as the host without it; Envoy compares the host as written,
 			// so such a host is on no virtual host and gets 404 (measured).
@@ -408,12 +572,14 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		w.lines(answerLocation("pf_r_preflight", preflight, `return 200 "$pf_empty";`)...)
 		w.lines(answerLocation("pf_r_no-route", own, `return 404 "$pf_empty";`)...)
 		w.WriteString(locations)
+		w.lines(tm.answer...)
 		w.lines(
 			"    location @pf_502 {",
 			`      return 502 "$pf_empty";`,
 			"    }",
-			"  }",
 		)
+		w.lines(grpcUnavailable(server)...)
+		w.lines("  }")
 	}
 	w.lines("}")
 	if refused := v.Err(); refused != nil {
@@ -426,24 +592,186 @@ func Generate(in generator.Input) ([]generator.File, error) {
 	return []generator.File{{Bytes: []byte(out)}, {Name: scriptName, Bytes: script()}}, nil
 }
 
+// requestLogFormat is the Envoy output's request log line, its keys sorted as Envoy writes them, with nginx's values:
+// no request line, path or query, which can carry a token. Status, sizes and times are numbers, as Envoy writes them;
+// time is $time_iso8601, the moment nginx writes the line in whole seconds, where Envoy writes the request's start in
+// milliseconds; bytes_out is $body_bytes_sent, which counts the chunk lines of an answer nginx sends chunked over
+// HTTP/1.1, where Envoy counts the body alone; bytes_in is the whole request, where Envoy counts its body; upstream_ms
+// counts from the opening of the service connection, where Envoy counts from the request's start; and nginx has no
+// response flags or details to write.
+const requestLogFormat = `'{"bytes_in":$request_length,"bytes_out":$body_bytes_sent,"duration_ms":$pf_log_duration,` +
+	`"host":"$pf_log_host","method":"$request_method","protocol":"$pf_log_protocol","request_id":"$pf_log_request_id",` +
+	`"route":"$pf_log_route","status":$pf_log_code,"time":"$time_iso8601","upstream":"$pf_log_upstream",` +
+	`"upstream_ms":$pf_log_upstream_ms}'`
+
+// writeLog writes the request log, a JSON line on standard output for each request the Envoy output would log, and
+// its second line for a service that failed. Without log every request is logged. With it, a request is logged when
+// its status is status_from or above, when split_clients draws it by a hash of its request id into the share, or when
+// the Envoy output would flag its response: a request no service answered (nginx's own answers, but the preflight's
+// 200 and the 403s, which Envoy answers with no flag), a client that left before the answer (499), and an answer its
+// service cut short of its content-length. nginx refuses a share of 0%, so sample: 0% writes no split_clients, and
+// 100% logs every request. Measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2, with each status and flag Envoy
+// logs below status_from; a chunked answer cut short is the one nginx records as whole (the support table's
+// less-strict list).
+func writeLog(w *writer, log *model.Log, tm timers) {
+	// A request id or Host holding a byte above 0x7F is logged empty, so every line stays UTF-8; nginx logs the
+	// requests it refuses too, Host and all.
+	aboveASCII := regexKey(`[\x80-\xFF]`) + ` "";`
+	w.lines(
+		"  map $pf_request_id $pf_log_request_id { "+aboveASCII+" default $pf_request_id; }",
+		"  map $pf_authority $pf_log_host { "+aboveASCII+" default $pf_authority; }",
+		"  map $server_protocol $pf_log_protocol { HTTP/2.0 HTTP/2; default $server_protocol; }",
+		milliseconds("$request_time", "$pf_log_duration", "pf_log_d", "0"),
+		milliseconds("$upstream_header_time", "$pf_log_upstream_ms", "pf_log_u", "null"),
+		// $status has three digits, so nginx writes 009 for an answer it reads with no status line, which Envoy logs
+		// as the status the service wrote (2000) or 502, and 000 for an HTTP/2 stream a client cut in its headers,
+		// which Envoy logs 0 (measured on Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8); a JSON number has no leading
+		// zero, so both lines write it without them, 9 and 0. Every $status is digits, so the key takes each.
+		"  map $status $pf_log_code { "+regexKey(`^0*(?<pf_log_c>[0-9]+)\z`)+" $pf_log_c; }",
+		"  log_format pf_request escape=json "+requestLogFormat+";",
+		// UPE for an answer whose body is shorter than its content-length, which nginx sends on as it came and ends
+		// as Envoy does; a HEAD, a 1xx, a 204 and a 304 carry no body whatever their content-length says.
+		`  map "$request_method:$upstream_status:$upstream_response_length:$upstream_http_content_length" $pf_log_cut { `+
+			regexKey(`^HEAD:`)+` ""; `+regexKey(`^[A-Z]+:(?:1[0-9][0-9]|204|304):`)+` ""; `+
+			regexKey(`^[A-Z]+:[0-9]+:(?<pf_log_got>[0-9]+):(?!\k<pf_log_got>\z)[0-9]+\z`)+` UPE; default ""; }`,
+	)
+	condition := ""
+	if log != nil && log.SamplePercent < 100 {
+		w.lines(
+			// 009 is an answer nginx read with no status line, which the Envoy output logs whatever status_from says: one
+			// whose status has four digits as its status, and one with no status line as the 502 it flags UPE.
+			"  map $status $pf_log_status { "+regexKey(`^(?:`+statusesFrom(log.StatusFrom)+`|009)\z`)+" 1; default 0; }",
+			`  map "$upstream_header_time:$status:$pf_log_cut" $pf_log_flagged { `+regexKey(`:UPE\z`)+" 1; "+
+				regexKey(`^[0-9][^:]*:(?!499:)`)+" 0; "+regexKey(`^:(?:200|403):`)+" 0; default 1; }",
+		)
+		reads := []string{"$pf_log_status", "$pf_log_flagged"}
+		if log.SamplePercent > 0 {
+			w.lines(fmt.Sprintf("  split_clients $pf_request_id $pf_log_sampled { %d%% 1; * 0; }", log.SamplePercent))
+			reads = slices.Insert(reads, 1, "$pf_log_sampled")
+		}
+		w.lines(fmt.Sprintf(`  map "%s" $pf_log { "%s" 0; default 1; }`, strings.Join(reads, ""), strings.Repeat("0", len(reads))))
+		condition = " if=$pf_log"
+	}
+	w.lines("  access_log /dev/stdout pf_request" + condition + ";")
+	// The Envoy output's second line, whatever log says, for a service that refused the connection or did not open it
+	// in the cluster's 5 s (UF), closed it before an answer (UC), said nothing for the route's 15 s (UT), or cut its
+	// answer short or sent one nginx could not read (UPE). nginx answers a connection it could not open in its connect
+	// time 504 and records no connect time for it, -, and an answer it waited for in vain 504 with a connect time and no
+	// header time. Its 502 after the connection opened is UC when the service sent no byte and UPE when it sent any: a
+	// head cut short, a status line cut in the middle and a header nginx refuses were each flagged UPE by Envoy, and a
+	// connection closed with nothing sent UC (measured on Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8).
+	failures := []string{regexKey(`:UPE:`) + " UPE;", regexKey(`^502:-:`) + " UF;", regexKey(`^502:[0-9][^:]*:-::0\z`) + " UC;",
+		regexKey(`^502:[0-9][^:]*:-:`) + " UPE;"}
+	if tm.connectFlag != "" {
+		failures = append(failures, regexKey(`^504:-:`)+" "+tm.connectFlag+";")
+	}
+	if tm.readFlag != "" {
+		failures = append(failures, regexKey(`^504:[0-9][^:]*:-:`)+" "+tm.readFlag+";")
+	}
+	w.lines(
+		`  log_format pf_upstream_failure escape=json '{"event":"gateway_upstream_failure","flags":"$pf_log_failure",`+
+			`"route":"$pf_log_route","status":$pf_log_code,"upstream":"$pf_log_upstream"}';`,
+		`  map "$upstream_status:$upstream_connect_time:$upstream_header_time:$pf_log_cut:$upstream_bytes_received" $pf_log_failure { `+
+			strings.Join(failures, " ")+` default ""; }`,
+		"  access_log /dev/stdout pf_upstream_failure if=$pf_log_failure;",
+	)
+}
+
+// milliseconds is the map that writes source, nginx's seconds with three decimals, as Envoy writes a time: whole
+// milliseconds with no leading zero. captures names the map's named captures, and none, the value of a source in
+// another form, - or empty when no service answered.
+func milliseconds(source, variable, captures, none string) string {
+	first, seconds, thousandths := captures+"1", captures+"2", captures+"3"
+	return "  map " + source + " " + variable + " { " + regexKey(`^0\.0*(?<`+first+`>[0-9]+)\z`) + " $" + first + "; " +
+		regexKey(`^(?<`+seconds+`>[0-9]+)\.(?<`+thousandths+`>[0-9]{3})\z`) + " $" + seconds + "$" + thousandths + "; default " + none + "; }"
+}
+
+// statusesFrom is a regular expression of every status of three digits from status to 999, as the Envoy output logs
+// every status at or above status_from: 404 is 40[4-9]|4[1-9][0-9]|[5-9][0-9][0-9].
+func statusesFrom(status int64) string {
+	from := func(digit, last int64) string {
+		if digit == last {
+			return strconv.FormatInt(digit, 10)
+		}
+		return fmt.Sprintf("[%d-%d]", digit, last)
+	}
+	hundreds, tens, ones := status/100, status/10%10, status%10
+	parts := []string{fmt.Sprintf("%d%d%s", hundreds, tens, from(ones, 9))}
+	if tens < 9 {
+		parts = append(parts, fmt.Sprintf("%d%s[0-9]", hundreds, from(tens+1, 9)))
+	}
+	if hundreds < 9 {
+		parts = append(parts, from(hundreds+1, 9)+"[0-9][0-9]")
+	}
+	return strings.Join(parts, "|")
+}
+
+// adminLines are the admin server's lines after its listen line. Of Envoy's admin pages nginx answers /ready as Envoy
+// answers it while the gateway is live, /stats with nginx's own seven counters (active connections, accepts, handled,
+// requests, reading, writing and waiting) and /server_info with its version, and every other path 404, where Envoy
+// answers 403; a query is answered 404 before a location reads the path, as Envoy refuses /ready?x=1 and
+// /stats?format=json. Envoy's admin answers each page to any method its parser knows and 400 to one it does not, such
+// as FOO, which nginx served: the server refuses the methods the public servers refuse ($pf_f_method), and /stats sends
+// stub_status's 405 to a method other than GET and HEAD back to /stats, which error_page asks for with GET. nginx itself
+// answers TRACE 405 before a location is chosen, where Envoy's admin answers it as GET, and the server's error_page
+// gives that 405 no body (measured on Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8 with GET, HEAD, POST, PUT, DELETE,
+// PATCH, OPTIONS, TRACE and FOO on each path). The server writes no request log line, as Envoy's admin writes none.
+func adminLines() []string {
+	return []string{
+		"    access_log off;",
+		"    error_page 405 = @pf_admin_405;",
+		"    if ($pf_f_method) {",
+		`      return 400 "$pf_empty";`,
+		"    }",
+		"    if ($pf_admin_query) {",
+		`      return 404 "$pf_empty";`,
+		"    }",
+		"    location = /ready {",
+		"      default_type text/plain;",
+		`      return 200 "LIVE\n";`,
+		"    }",
+		"    location = /stats {",
+		"      stub_status;",
+		"      error_page 405 = /stats;",
+		"    }",
+		"    location = /server_info {",
+		"      default_type application/json;",
+		`      return 200 '{"version":"$nginx_version"}\n';`,
+		"    }",
+		"    location / {",
+		`      return 404 "$pf_empty";`,
+		"    }",
+		"    location @pf_admin_405 {",
+		`      return 405 "$pf_empty";`,
+		"    }",
+	}
+}
+
 // requestChecks answer, in every server and before anything else, the requests Envoy answers before it reads the host:
 // what its HTTP parser and codecs refuse with 400 or a closed connection, and HTTP/1.0 and HTTP/1.2 to HTTP/1.9, 426
 // (measured on Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8). Envoy answers 426 to every other version but 1.1 too,
 // where nginx's own parser answers HTTP/0.0 to HTTP/0.9 with headers 400 and HTTP/2.0 to HTTP/9.9 505 before these
 // checks run; a request line with no version, which nginx reads as HTTP/0.9 with an empty $server_protocol, is
 // answered 400 here, and nginx sends that answer in HTTP/0.9's form, the body alone, so the client receives nothing.
-var requestChecks = []string{
-	"    if ($pf_f_request) {",
-	`      return 400 "$pf_empty";`,
-	"    }",
-	"    if ($pf_f_426) {",
-	`      return 426 "Upgrade Required";`,
-	"    }",
+// When the routes send the client's own X-Forwarded-Proto, an empty one is answered 404 next (writeRequestChecks).
+func requestChecks(e edge) []string {
+	checks := []string{
+		"    if ($pf_f_request) {",
+		`      return 400 "$pf_empty";`,
+		"    }",
+		"    if ($pf_f_426) {",
+		`      return 426 "Upgrade Required";`,
+		"    }",
+	}
+	if e.readsProto() {
+		checks = append(checks, "    if ($pf_f_proto) {", `      return 404 "$pf_empty";`, "    }")
+	}
+	return checks
 }
 
 // writeRequestChecks writes the flags requestChecks reads, each measured on Envoy 1.40.2 beside nginx 1.30.6 and
 // 1.31.8.
-func writeRequestChecks(w *writer) {
+func writeRequestChecks(w *writer, e edge) {
 	// counted is one element of a Connection list that Envoy counts against MostConnectionTokens: a token with the white
 	// space around it, or white space alone. The commas around the counted elements take the empty ones, which Envoy
 	// skips, so a list of ten counted elements matches no key however its empty elements fall.
@@ -490,8 +818,20 @@ func writeRequestChecks(w *writer) {
 		// and a request line with no version has an empty $server_protocol, which $pf_f_version flags.
 		`  map $server_protocol $pf_f_426 { `+regexKey(`^HTTP/(?:0\.9|1\.[02-9])\z`)+` 1; default 0; }`,
 		`  map $pf_authority $pf_f_host_dot { `+regexKey(`\.(?::[0-9]*)?\z`)+` 1; default 0; }`,
-		"",
 	)
+	if e.readsProto() {
+		// With client_address forwarded the Envoy output answers an X-Forwarded-Proto line that is present and empty
+		// 404, over HTTP/1.1 and HTTP/2, before it reads the host or the origin, and the name on a line with no colon
+		// 400. nginx's $http_x_forwarded_proto is the same empty text for an empty line as for none, so the service
+		// would receive the connection's scheme, and nginx stores a line with no colon as an empty value, which is
+		// refused with 404 here. The script's forwardedProto reads the line as Envoy does; only "0" passes, so a run of
+		// the script that failed is refused too.
+		w.lines(
+			"  js_set $pf_js_proto pf.forwardedProto;",
+			`  map $pf_js_proto $pf_f_proto { "0" 0; default 1; }`,
+		)
+	}
+	w.lines("")
 }
 
 // writeUpgradeMaps writes the upgrade rule. Envoy reads a request as an upgrade only when its Connection names upgrade:
@@ -566,13 +906,19 @@ func hashSizes(in generator.Input, routes []route) []string {
 	}
 	bucket := max(64, (16+(longest+2+7)/8*8+63)/64*64)
 	// Each route declares up to two variables and its share of the groups' (writeRouteChoice), fewer than three, and each
-	// environment up to five (writeOriginCheck, writeCORSMaps), beside the 57 or fewer the file declares once: its maps,
-	// its flag, the variables of the script and the named captures (54 with client_address connection).
-	variables := 3*len(routes) + 5*len(in.Origins.Environments) + 64
+	// environment up to five (writeOriginCheck, writeCORSMaps), beside the 81 or fewer the file declares once: its maps,
+	// its flag, the variables of the script, the request log's (writeLog) and the named captures (76 with client_address
+	// connection).
+	variables := 3*len(routes) + 5*len(in.Origins.Environments) + 85
+	// nginx builds the smallest table that holds the names and tries no size above the maximum (ngx_hash_init), so a
+	// larger maximum costs nothing. With the request log's maps a file of 5 routes needed 1,056 and one of 40 routes
+	// in 8 environments 1,280 (measured on nginx 1.30.6 and 1.31.8), over nginx's default 1,024, so the variables'
+	// maximum is never under 2,048, which held every file measured where 4 for each variable comes to less: up to 140
+	// routes in one environment, or 20 routes in 64 environments.
 	return []string{
 		fmt.Sprintf("  server_names_hash_bucket_size %d;", bucket),
 		fmt.Sprintf("  server_names_hash_max_size %d;", max(512, 4*hosts)),
-		fmt.Sprintf("  variables_hash_max_size %d;", max(1024, 4*variables)),
+		fmt.Sprintf("  variables_hash_max_size %d;", max(2048, 4*variables)),
 	}
 }
 
@@ -590,6 +936,8 @@ func routesOf(in generator.Input, v *values) ([]route, error) {
 					return nil, err
 				}
 				r.key = v.token("rpc.methods", method.Pos, regexKey("^"+regexp.QuoteMeta(method.Path())+`\z`))
+				// The model keeps no position of the name, so the refusal names the rpc entry's to.
+				r.name = v.token("routes[].rpc.to.<package pattern>.name", entry.RPC.ToPos, quoted(method.Name))
 				routes = append(routes, r)
 			}
 			continue
@@ -607,6 +955,7 @@ func routesOf(in generator.Input, v *values) ([]route, error) {
 			r.method = v.token("routes[].method", entry.Pos, regexKey(`^1:`+regexp.QuoteMeta(entry.Method)+`\z`))
 		}
 		r.rewrite = rewriteLine(v, entry)
+		r.name = v.token("routes[].name", entry.Name.Pos, quoted(entry.Name.Value))
 		routes = append(routes, r)
 	}
 	return routes, nil
@@ -635,7 +984,9 @@ func toService(v *values, service *model.Service, protocol model.Protocol, what 
 	if protocol == model.GRPC {
 		scheme = "grpc://"
 	}
-	return route{pass: v.token(serviceKey, service.Pos, scheme+service.Cluster(protocol)), grpc: protocol == model.GRPC, host: host}, nil
+	cluster := service.Cluster(protocol)
+	return route{pass: v.token(serviceKey, service.Pos, scheme+cluster), grpc: protocol == model.GRPC, host: host,
+		upstream: v.token(serviceKey, service.Pos, quoted(cluster))}, nil
 }
 
 // serviceKey and hostsKey are the keys of a service's name, which its upstreams are named by, and of an
@@ -667,9 +1018,11 @@ func match(r *model.Route) (string, error) {
 // choice answers 400 (writeRouteChoice). A worker serves no other request while PCRE2 runs, and under PCRE2's own
 // limit, ten million steps, a path of 44 bytes against ^/g/((a|aa)+c|a+b)$ held one for 213 to 227 ms before that 400,
 // where Envoy's RE2 served it in 2 ms (nginx 1.30.6 and 1.31.8, PCRE2 10.46, on an arm64 Mac). With 100,000 steps the
-// 400 comes in about 2 ms. Paths of 8,177 bytes, the longest nginx reads over HTTP/1.1, built against each pattern of
-// the battery's files and the examples were all decided as Envoy decides them; with 10,000 steps nginx gave up on 8,177
-// a that ^/give-up/(a|aa)+$ takes, so the limit is not lower.
+// 400 comes in about 2 ms. Paths of 61,323 bytes, the longest a GET holds without limits.request_headers (headerLines),
+// built to be taken and not taken against each pattern of the battery's files and the examples, were decided as Envoy
+// decides them, in 27 ms at most, but one: nginx gave up on 61,323 a that ^/give-up/(a|aa)+$ takes, which it takes at
+// 8,177. With 10,000 steps nginx gave up on twelve more of them, among them paths a pattern takes, so the limit is not
+// lower.
 const patternSteps = "(*LIMIT_MATCH=100000)"
 
 // keepPath sends the service the path nginx has normalised, escaped again, which is Envoy's path when the path needs
@@ -810,10 +1163,33 @@ func writeOriginCheck(w *writer, v *values, n int, environment origins.Environme
 	for _, host := range environment.Hosts {
 		keys += v.token(hostsKey, environment.Pos, regexKey(strings.TrimSuffix(origins.SameOriginRegex(host), "$")+`\z`)) + " 0; "
 	}
+	if long := longOriginKey(v, environment); long != "" {
+		keys += long + " 1; "
+	}
 	for _, key := range listKeys(v, environment) {
 		keys += key + " 0; "
 	}
 	w.lines(fmt.Sprintf(`  map %s $pf_o%d { "" 0; %sdefault 1; }`, mapSource(e.origin()), n, keys))
+}
+
+// longestMatchedOrigin is the longest Origin the origin patterns read. A pattern costs time in the Origin's length
+// (origins.PatternPCRE), the worker serves nothing else meanwhile, and the same request may hold the longest path
+// nginx reads, which the pattern routes read too, so the two costs add: against the conformance battery's file at a
+// size of 128 KiB, a path of 65,489 bytes beside an Origin of 16,384 bytes that the last of its 64 patterns takes was
+// answered in 51.58 to 58.09 ms at the median on nginx 1.30.6 and 1.31.8, so the bound is the largest power of two that
+// keeps such a request within 50 ms; docs/nginx.md gives what it takes at this bound. An Origin a browser sends is far
+// shorter.
+const longestMatchedOrigin = 8192
+
+// longOriginKey is the map key that takes an Origin longer than longestMatchedOrigin, which each map that runs the
+// environment's patterns tries before its lists and answers as an Origin no list takes, or "" for an environment with
+// no pattern, whose lists cost nothing in an Origin's length. It reads at most one byte past the bound, and (?s) counts
+// a line feed as any other byte.
+func longOriginKey(v *values, environment origins.Environment) string {
+	if len(environment.Patterns) == 0 {
+		return ""
+	}
+	return v.token("origins.<environment name>.patterns", environment.Pos, regexKey(fmt.Sprintf(`(?s)\A.{%d}`, longestMatchedOrigin+1)))
 }
 
 // listKeys are the map keys of the environment's lists: an exact origin compared ignoring case, as the Envoy output
@@ -835,8 +1211,9 @@ func listKeys(v *values, environment origins.Environment) []string {
 }
 
 // writeCORSMaps writes the CORS answer of the environment at place n when it has lists. $pf_c<n> is 1 when the
-// request's Origin is on a list and holds no comma; $pf_cors<n> is 1 when it is and the request also reached the
-// server's rules ($pf_reached, corsLines), passed the request flags and the host-dot check and reached a route or the
+// request's Origin is on a list, holds no comma and is not longer than the patterns read; $pf_cors<n> is 1 when it is
+// and the request also reached the server's rules ($pf_reached, corsLines), passed the request flags, the
+// X-Forwarded-Proto check when the server makes it, and the host-dot check, and reached a route or the
 // preflight answer, the requests the Envoy output's CORS filter answers; a refused request, a request no route takes,
 // an upgrade refused and a request nginx refuses while it reads it carry no Access-Control line of the gateway's.
 // $pf_acao<n> and $pf_aceh<n> are the gateway's lines then, and otherwise the service's own, which the server hides
@@ -848,13 +1225,20 @@ func writeCORSMaps(w *writer, v *values, n int, environment origins.Environment,
 	}
 	origin := mapSource(e.origin())
 	keys := ""
+	if long := longOriginKey(v, environment); long != "" {
+		keys += long + " 0; "
+	}
 	for _, key := range listKeys(v, environment) {
 		keys += key + " 1; "
 	}
+	flags, passed := "$pf_f_request$pf_f_426$pf_f_host_dot", "000"
+	if e.readsProto() {
+		flags, passed = flags+"$pf_f_proto", passed+"0"
+	}
 	w.lines(
 		fmt.Sprintf(`  map %s $pf_c%d { %s 0; %sdefault 0; }`, origin, n, regexKey(","), keys),
-		fmt.Sprintf(`  map "$pf_reached:$pf_f_request$pf_f_426$pf_f_host_dot:$pf_route:$pf_c%d" $pf_cors%d { %s 1; default 0; }`, n, n,
-			regexKey(`^1:000:(?:[0-9]+(?:-uri)?|preflight):1\z`)),
+		fmt.Sprintf(`  map "$pf_reached:%s:$pf_route:$pf_c%d" $pf_cors%d { %s 1; default 0; }`, flags, n, n,
+			regexKey(`^1:`+passed+`:(?:[0-9]+(?:-uri)?|preflight):1\z`)),
 		fmt.Sprintf(`  map $pf_cors%d $pf_acao%d { 1 %s; default $upstream_http_access_control_allow_origin; }`, n, n, origin),
 	)
 	if cors.ExposeHeaders != "" {
@@ -877,11 +1261,11 @@ func corsLines(v *values, n int, environment origins.Environment, cors origins.C
 	list, expose := environment.Listed(), cors.ExposeHeaders != ""
 	var answer []string
 	if list {
-		// nginx answers a request it cannot read, such as one with a NUL byte in a header or a header line over 8 KiB,
-		// before the server's rules run, and its answer still takes the server's add_header lines: $pf_cors<n> reads
-		// this flag, which only the server's rewrite phase sets, so such an answer carries no Access-Control line, as the
-		// Envoy output's refusals carry none (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2). It comes before
-		// the server's if lines, so a request one of them answers has set it too.
+		// nginx answers a request it cannot read, such as one with a NUL byte in a header or a head over its header
+		// buffers (headerLines), before the server's rules run, and its answer still takes the server's add_header
+		// lines: $pf_cors<n> reads this flag, which only the server's rewrite phase sets, so such an answer carries no
+		// Access-Control line, as the Envoy output's refusals carry none (measured on nginx 1.30.6 and 1.31.8 beside
+		// Envoy 1.40.2). It comes before the server's if lines, so a request one of them answers has set it too.
 		server = append(server, "    set $pf_reached 1;")
 		server = append(server, fmt.Sprintf("    add_header Access-Control-Allow-Origin $pf_acao%d always;", n))
 		answer = append(answer, fmt.Sprintf("      add_header Access-Control-Allow-Origin $pf_acao%d always;", n))
@@ -934,6 +1318,27 @@ func corsValue(v *values, key string, cors origins.CORS, value string) string {
 // lines headers, or the server's when headers is nil.
 func answerLocation(name string, headers []string, answer string) []string {
 	return slices.Concat([]string{"    location @" + name + " {"}, headers, []string{"      " + answer, "    }"})
+}
+
+// grpcUnavailable is the named location @pf_502-grpc of an environment server, whose Access-Control lines are cors
+// (corsLines' server), which answers a gRPC call nginx answers 502 itself as the Envoy output answers it: 200 with
+// grpc-status 14 in one header frame over HTTP/2, which nginx sends for an answer with no body and no trailers
+// (ngx_http_v2_filter_module.c), and no grpc-message, where Envoy writes one for a stream reset and for an HTTP/1.1
+// answer, which no nginx variable tells from the other failures (services.<service name>.grpc). Its own add_header
+// line drops the server's, so it repeats them. Measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2 with grpc-go
+// and raw HTTP/2, and over HTTP/1.1: a service that refuses the connection, one that takes none in 5 s, one that
+// resets the connection, closes it, resets the call's stream or answers in HTTP/1.1, on a gRPC route and on a plain
+// one; nginx sends content-length: 0 and its Server header besides, as it does on a service's own answer with no
+// message.
+func grpcUnavailable(cors []string) []string {
+	headers := slices.Clone(answerHeaders)
+	for _, line := range cors {
+		if strings.HasPrefix(line, "    add_header ") {
+			headers = append(headers, "  "+line)
+		}
+	}
+	return slices.Concat([]string{"    location @pf_502-grpc {", "      default_type application/grpc;"}, headers,
+		[]string{"      add_header grpc-status 14 always;", `      return 200 "$pf_empty";`, "    }"})
 }
 
 // tlsCiphers are the TLS 1.2 ciphers the Envoy output offers, Envoy's default list (measured on Envoy 1.40.2: with an
@@ -989,9 +1394,9 @@ func tlsServerLines(tls *model.TLS, headers []string) []string {
 
 // writeUpstream writes the upstream of one port of a service, named as the Envoy configuration names its cluster.
 // max_fails=0 keeps a backend in use after a failed attempt, where nginx's default takes it out for 10 seconds; Envoy
-// keeps every backend of a service with no health key. Each worker keeps up to 32 idle connections open for an hour,
-// Envoy's default upstream idle timeout; 32 is a number chosen, not measured under load.
-func writeUpstream(w *writer, v *values, service model.Service, port model.ServicePort) {
+// keeps every backend of a service with no health key. Each worker keeps up to 32 idle connections open for idle,
+// timeouts.upstream_idle or Envoy's hour (timersOf); 32 is a number chosen, not measured under load.
+func writeUpstream(w *writer, v *values, service model.Service, port model.ServicePort, idle string) {
 	w.lines("  upstream " + v.token(serviceKey, service.Pos, service.Cluster(port.Protocol)) + " {")
 	// addresses holds two addresses or more, so one is address's.
 	key := "services.<service name>.addresses"
@@ -1003,7 +1408,7 @@ func writeUpstream(w *writer, v *values, service model.Service, port model.Servi
 	}
 	w.lines(
 		"    keepalive 32;",
-		"    keepalive_timeout 1h;",
+		"    keepalive_timeout "+idle+";",
 		"  }",
 	)
 }
@@ -1029,10 +1434,18 @@ func routeLocations(routes []route, v *values, e edge) string {
 // sends the target as written when path is "". It writes every header it sends, because a location that writes one
 // proxy_set_header inherits none from the levels above it (the proxy module page), and sets each header Envoy removes
 // empty, which nginx then does not send, and each header remove_from_clients removes, but one the location sends
-// itself, whose value then reads no client copy (edge.read). A service that refuses the connection is answered 502 with
-// no body, through a named location: error_page to a URI would search the locations again.
+// itself, whose value then reads no client copy (edge.read). A service that fails is answered 502 with no body, or a
+// gRPC call in gRPC's form (grpcUnavailable), through a named location: error_page to a URI would search the
+// locations again; a service that times out is answered by @pf_504 (timeoutAnswer) the same way. The route and
+// upstream the request log writes are set first: set runs before the rewrite's break, and the values stay through an
+// error_page to @pf_502 or @pf_504 (measured on nginx 1.30.6 and 1.31.8), and a request no route location takes logs
+// them empty, where the Envoy output logs them null.
 func writeLocation(w *writer, v *values, name, path string, r route, e edge) {
-	w.lines("    location " + name + " {")
+	w.lines(
+		"    location "+name+" {",
+		"      set $pf_log_route "+r.name+";",
+		"      set $pf_log_upstream "+r.upstream+";",
+	)
 	if path != "" {
 		w.lines("      " + path)
 	}
@@ -1083,7 +1496,8 @@ func writeLocation(w *writer, v *values, name, path string, r route, e edge) {
 		w.lines("      proxy_pass " + r.pass + ";")
 	}
 	w.lines(
-		"      error_page 502 = @pf_502;",
+		"      error_page 502 = @pf_502$pf_grpc_call;",
+		"      error_page 504 = @pf_504;",
 		"    }",
 	)
 }

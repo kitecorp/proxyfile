@@ -1,10 +1,4 @@
-examples/portable/yaml/proxyfile.yaml:12:1: "limits" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/portable/yaml/proxyfile.yaml:13:3: "limits.connections" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/portable/yaml/proxyfile.yaml:14:3: "limits.request_headers" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/portable/yaml/proxyfile.yaml:14:21: "limits.request_headers.size" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/portable/yaml/proxyfile.yaml:14:34: "limits.request_headers.count" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/portable/yaml/proxyfile.yaml:17:3: "timeouts.idle" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/portable/yaml/proxyfile.yaml:18:3: "timeouts.upstream_idle" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/portable/yaml/proxyfile.yaml:13:3: "limits.connections" is refused by --target nginx: nginx counts its own listening sockets and every connection to a service against one limit, and closes a client's idle connection to take a new one, so no nginx setting holds client connections to a number; remove limits.connections, or render it for envoy
 examples/portable/yaml/proxyfile.yaml:24:5: "services.<service name>.balance" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/portable/yaml/proxyfile.yaml:26:25: "services.<service name>.address" a DNS name is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/portable/yaml/proxyfile.yaml:26:60: "services.<service name>.balance" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
@@ -36,6 +30,3 @@ examples/portable/yaml/proxyfile.yaml:65:99: "routes[].rate_limit.by" is refused
 examples/portable/yaml/proxyfile.yaml:69:63: "rpc.methods[].action" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/portable/yaml/proxyfile.yaml:71:63: "rpc.methods[].action" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/portable/yaml/proxyfile.yaml:71:76: "rpc.methods[].reports" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/portable/yaml/proxyfile.yaml:72:1: "log" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/portable/yaml/proxyfile.yaml:72:7: "log.status_from" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/portable/yaml/proxyfile.yaml:72:25: "log.sample" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

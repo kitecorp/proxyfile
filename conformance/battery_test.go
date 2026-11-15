@@ -6,10 +6,13 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -121,8 +124,13 @@ func runFile(t *testing.T, tg target, f file, config string, lock func(*testing.
 		t.Fatalf("render of %s for %s: exit %d with no committed %s.refused beside it; stderr:\n%s", f.proxyfile, tg.name, code,
 			tg.name, stderr.String())
 	}
-	w := startWorld(t, tg, mounted, !slices.Contains(written, "tls"))
-	// In order and never in parallel: a scenario's quiet and burst count on nothing else reaching the proxy.
+	source, err := os.ReadFile(f.proxyfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := startWorld(t, tg, mounted, !slices.Contains(written, "tls"), bytes.Contains(source, []byte(holdAddress)))
+	// In order and never in parallel, but for the rows that overlap: a scenario's quiet and burst count on nothing else
+	// reaching the proxy.
 	for _, s := range scenarios {
 		var rows []exchange
 		for _, e := range s.exchanges {
@@ -136,16 +144,47 @@ func runFile(t *testing.T, tg target, f file, config string, lock func(*testing.
 		}
 		t.Run(s.name, func(t *testing.T) {
 			time.Sleep(s.quiet)
+			// A row that overlaps sends its request here, at the start, and calls t.Parallel, so the testing package
+			// runs the rest of its subtest once this function has run the rows in sequence; the scenario's subtest ends
+			// after it, so no row of the next scenario runs beside it. Its connections are its own (world.apart).
 			for _, e := range rows {
+				if !e.overlap {
+					continue
+				}
+				if e.refusing != "" || e.flood != nil || e.holds != nil || e.repeat > 0 {
+					panic(fmt.Sprintf("exchange %q overlaps the rows in sequence with a refused backend, a flood, holds or a repeat", e.name))
+				}
+				t.Run(e.name, func(t *testing.T) {
+					apart, closeIdle := w.apart()
+					done := make(chan []string, 1)
+					go func() {
+						defer closeIdle()
+						done <- sendRepeated(apart, e, literalFor(e, tg.name, f.label))
+					}()
+					t.Parallel()
+					for _, difference := range <-done {
+						t.Error(difference)
+					}
+				})
+			}
+			for _, e := range rows {
+				if e.overlap {
+					continue
+				}
 				t.Run(e.name, func(t *testing.T) {
 					if e.refusing != "" {
-						w.refuse(t, e.refusing)
+						for _, role := range strings.Split(e.refusing, ",") {
+							w.refuse(t, role)
+						}
 					}
 					l := literalFor(e, tg.name, f.label)
 					var differences []string
-					if e.flood != nil {
+					switch {
+					case e.flood != nil:
 						differences = sendFlood(w, e, l, t.Logf)
-					} else {
+					case e.holds != nil:
+						differences = sendHolds(w, e, l, t.Logf)
+					default:
 						differences = sendRepeated(w, e, l)
 					}
 					for _, difference := range differences {
@@ -250,9 +289,118 @@ func sendFlood(w *world, e exchange, l literal, logf func(format string, args ..
 		return append(different, err.Error())
 	}
 	bound := f.fixed + f.perThread*int64(threads)
-	measured := fmt.Sprintf("the proxy's memory grew from %d MiB to %d MiB, by %d MiB, against a bound of %d MiB, %d MiB "+
-		"and %d MiB for each of %d threads; %d requests over %d connections took %s", before>>20, after>>20,
-		(after-before)>>20, bound>>20, f.fixed>>20, f.perThread>>20, threads, f.requests, f.connections, took)
+	// The memory can also fall over the flood, and the negative change shifted to MiB reads -1 for any fall under
+	// 1 MiB, so the line says which way it went.
+	change, by := "grew", after-before
+	if by < 0 {
+		change, by = "fell", -by
+	}
+	measured := fmt.Sprintf("the proxy's memory %s from %d MiB to %d MiB, by %d MiB, against a bound of %d MiB, %d MiB "+
+		"and %d MiB for each of %d threads; %d requests over %d connections took %s", change, before>>20, after>>20,
+		by>>20, bound>>20, f.fixed>>20, f.perThread>>20, threads, f.requests, f.connections, took)
+	logf("%s", measured)
+	if after-before >= bound {
+		different = append(different, "the memory grew by the bound or more: "+measured)
+	}
+	return different
+}
+
+// sendHolds keeps e's holds open and returns each way they differ from what holds asks: the connections that could not
+// be opened or send their head, and those closed or answered by the time the memory was read, with how many, and the proxy's
+// memory when it grew by its bound or more, or could not be read. It logs the memory it read with logf, so a passing
+// run shows how far under the bound it stayed. It opens 32 connections at a time and closes every one when it returns.
+func sendHolds(w *world, e exchange, l literal, logf func(format string, args ...any)) []string {
+	h := e.holds
+	if l.admitted > 0 || e.repeat > 0 || !e.send.raw || e.send.proto != "http/1.1" || !reflect.DeepEqual(l.want, answer{}) {
+		// A hold opens raw http/1.1 connections and compares no answer; anything else is a mistake in the scenario data.
+		panic(fmt.Sprintf("exchange %q holds with a repeat, an admitted count, an answer to compare, or a request other than a raw http/1.1 one", e.name))
+	}
+	before, err := w.memory()
+	if err != nil {
+		return []string{err.Error()}
+	}
+	conns := make([]net.Conn, h.connections)
+	failures := make([]error, h.connections)
+	var (
+		next atomic.Int64
+		wg   sync.WaitGroup
+	)
+	start := time.Now()
+	for range 32 {
+		wg.Go(func() {
+			for i := int(next.Add(1)) - 1; i < h.connections; i = int(next.Add(1)) - 1 {
+				conn, err := w.dialRaw(e.send.proto, serverNameFor(e.send))
+				if err == nil {
+					if _, err = io.WriteString(conn, h.head); err != nil {
+						conn.Close()
+						conn = nil
+					}
+				}
+				conns[i], failures[i] = conn, err
+			}
+		})
+	}
+	wg.Wait()
+	opened := time.Now()
+	defer func() {
+		for _, conn := range conns {
+			if conn != nil {
+				conn.Close()
+			}
+		}
+	}()
+	time.Sleep(h.settle)
+	after, memoryErr := w.memory()
+	// Each connection is read for at most 100 ms, all at once: one still open gives a timeout, one answered gives
+	// bytes, and one closed an end or an error. An answer or a close already sent is read at once.
+	states := make([]string, h.connections)
+	for i, conn := range conns {
+		if conn == nil {
+			continue
+		}
+		wg.Go(func() {
+			conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			n, err := conn.Read(make([]byte, 256))
+			switch {
+			case n > 0:
+				states[i] = "answered"
+			case errors.Is(err, os.ErrDeadlineExceeded):
+				states[i] = "open"
+			default:
+				states[i] = "closed"
+			}
+		})
+	}
+	wg.Wait()
+	var different []string
+	failed, firstFailure := 0, error(nil)
+	for _, err := range failures {
+		if err != nil {
+			if failed++; firstFailure == nil {
+				firstFailure = err
+			}
+		}
+	}
+	if failed > 0 {
+		different = append(different, fmt.Sprintf("%d of the %d connections could not be opened or send their head; the first: %v",
+			failed, h.connections, firstFailure))
+	}
+	ended := map[string]int{}
+	for _, state := range states {
+		ended[state]++
+	}
+	if ended["closed"]+ended["answered"] > 0 {
+		different = append(different, fmt.Sprintf("%d connections were closed and %d answered within %s of the last one "+
+			"opening, want each still open with no answer", ended["closed"], ended["answered"], h.settle))
+	}
+	if memoryErr != nil {
+		return append(different, memoryErr.Error())
+	}
+	bound := h.perConnection * int64(h.connections)
+	measured := fmt.Sprintf("the proxy's memory grew from %d MiB to %d MiB, by %d KiB, %.1f KiB for each of the %d "+
+		"connections, against a bound of %d MiB, %d KiB a connection; each sent %d bytes, and opening them took %s",
+		before>>20, after>>20, (after-before)>>10, float64(after-before)/1024/float64(h.connections), h.connections,
+		bound>>20, h.perConnection>>10, len(h.head), opened.Sub(start).Round(time.Millisecond))
 	logf("%s", measured)
 	if after-before >= bound {
 		different = append(different, "the memory grew by the bound or more: "+measured)

@@ -22,8 +22,20 @@ var once = {"x-forwarded-for": 1, "x-forwarded-proto": 1, "x-request-id": 1, "co
 // 1.40.2); nginx refuses 0x00 and a carriage return itself, and over HTTP/1.1 a line feed ends the line. r.rawHeadersIn
 // holds each name as the client sent it, which nginx keeps whole with ignore_invalid_headers off and
 // underscores_in_headers on. The loop is a plain for, which njs's own engine reads; it reads no for...of.
+//
+// Over HTTP/2 it is "1" too for a request with more fields than limits.request_headers.count ($pf_header_count) as
+// Envoy counts them: with the four pseudo-headers, and with each cookie field apart, which nginx joins into one cookie
+// line with "; ". max_headers counts neither, so 97 fields, or 97 cookie fields, beside the pseudo-headers reached the
+// service through nginx where Envoy reset the stream. nginx gives :authority, a host field or both one host line, so
+// the script cannot see a host field sent beside :authority, which Envoy counts as a field of its own, and counts
+// :authority whether or not the client sent it: never more fields than Envoy admits, and one fewer for a client that
+// sends :authority alone or a host field alone (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2). nginx keeps
+// no trace of where one cookie field ended, so a field holding several cookies counts once for each, where Envoy
+// counts it once.
 function headerNames(r) {
     var raw = r.rawHeadersIn;
+    var h2 = r.httpVersion == "2.0";
+    var fields = raw.length + 4;
     var seen = {};
     for (var i = 0; i < raw.length; i++) {
         var name = raw[i][0];
@@ -41,15 +53,45 @@ function headerNames(r) {
         if (name.indexOf("_") >= 0 && read[low.replace(/_/g, "-")] === 1) {
             return "1";
         }
+        if (h2 && low == "cookie") {
+            fields += raw[i][1].split("; ").length - 1;
+        }
+    }
+    if (h2 && fields > Number(r.variables.pf_header_count)) {
+        return "1";
+    }
+    return "0";
+}
+
+// asEnvoyReads is a header's value as Envoy reads it: over HTTP/1 without the spaces and tabs around it, as Envoy's
+// HTTP/1 parser reads it, where nginx keeps a tab; over HTTP/2 as sent, as Envoy's codec reads it (measured on Envoy
+// 1.40.2 beside nginx 1.30.6 and 1.31.8).
+function asEnvoyReads(r, value) {
+    if (r.httpVersion == "2.0") {
+        return value;
+    }
+    return value.replace(/^[ \t]+|[ \t]+$/g, "");
+}
+
+// forwardedProto is "1" when the request has an X-Forwarded-Proto line that is empty as Envoy reads it, and "0"
+// otherwise. Over HTTP/1 that is a line of spaces and tabs alone, or the name on a line with no colon, which nginx
+// stores as an empty value; over HTTP/2 an empty value, where a value of a space or a tab is sent on by both proxies.
+// nginx.conf answers "1", and the empty value of a run that failed, 404, as the Envoy output answers an empty line.
+// A second line is refused by headerNames first.
+function forwardedProto(r) {
+    var raw = r.rawHeadersIn;
+    for (var i = 0; i < raw.length; i++) {
+        if (raw[i][0].toLowerCase() == "x-forwarded-proto" && asEnvoyReads(r, raw[i][1]) == "") {
+            return "1";
+        }
     }
     return "0";
 }
 
 // origin is the request's Origin as the Envoy output reads it, which nginx's $http_origin cannot give: "n" when the
 // request has no Origin line; "e" when every line is empty; otherwise "o" and the lines that are not empty, joined with
-// a comma in the order sent. Over HTTP/1 each line is read without the spaces and tabs around it, as Envoy's HTTP/1
-// parser reads it, where nginx keeps a tab; over HTTP/2 each is read as sent, as Envoy's codec reads it (measured on
-// Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8). nginx.conf refuses "e", and the empty value of a run that failed.
+// a comma in the order sent, each line read as Envoy reads it (asEnvoyReads). nginx.conf refuses "e", and the empty
+// value of a run that failed.
 function origin(r) {
     var raw = r.rawHeadersIn;
     var present = false;
@@ -59,10 +101,7 @@ function origin(r) {
             continue;
         }
         present = true;
-        var value = raw[i][1];
-        if (r.httpVersion != "2.0") {
-            value = value.replace(/^[ \t]+|[ \t]+$/g, "");
-        }
+        var value = asEnvoyReads(r, raw[i][1]);
         if (value != "") {
             values.push(value);
         }
@@ -76,4 +115,4 @@ function origin(r) {
     return "o" + values.join(",");
 }
 
-export default {headerNames, origin};
+export default {headerNames, forwardedProto, origin};

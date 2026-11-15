@@ -3,7 +3,9 @@
 # a pattern route, so the battery runs both. It writes no tls and keeps client_address at forwarded, the default with
 # no tls, so the battery runs nginx's lines for a client in front of the proxy. It removes x-request-id from clients,
 # which nginx reads to keep a client's own request id under forwarded, so a row shows the removed name read as never
-# sent. Every entry runs it, Envoy's too, so its literals are Envoy's answers.
+# sent. Its hold service is the battery's backend that takes no connection, so a row shows the answer to a service
+# that does not take one within the 5 s a file with no timeouts gives it. Every entry runs it, Envoy's too, so its
+# literals are Envoy's answers.
 listen: 10000
 admin: 9901
 services:
@@ -13,6 +15,7 @@ services:
     addresses: ["10.0.1.11", "10.0.1.12"]
   accounts: {grpc: 7070, http: 7070, host_header: "127.0.0.1:7070"}
   catalog: {http: 8090, address: "10.0.2.21"}
+  hold: {http: 8095, address: "10.0.2.30"}
 remove_from_clients: [x-request-id]
 origins:
   live: {hosts: [api.example.com, api.example.org]}
@@ -26,6 +29,7 @@ routes:
   - {name: accounts-webhooks, path: /api/webhooks, method: POST, to: accounts, rewrite: /hooks/payments}
   - {name: catalog, prefix: /catalog/, to: catalog}
   - {name: hooks, prefix: /hooks/, to: accounts, rewrite: /in/}
+  - {name: hold, prefix: /hold/, to: hold}
   - {name: shop, prefix: /, to: shop}
 rpc:
   methods:

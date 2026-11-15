@@ -115,6 +115,91 @@ func TestDocLinksResolve(t *testing.T) {
 	}
 }
 
+// The table "The keys, by proxy" of docs/portability.md is written by hand, beside the support table the declarations
+// write. A row whose first cell is one core key alone and whose last cell says a proxy refuses it ("nginx refuses it",
+// "nginx and HAProxy refuse it") names a key that proxy declares Refused, and a key a proxy declares Refused has that
+// said in its row, so the hand-written row cannot keep a refusal after a generator starts to write the key, or miss
+// one it starts to make. A row of several keys, or of a key with a value or a form, is not read, and a key a
+// generator only does not write yet is left to the support table.
+func TestPortabilityRowsSayWhatEachProxyRefuses(t *testing.T) {
+	text := string(testsupport.ReadFile(t, filepath.Join("..", "..", "docs", "portability.md")))
+	_, section, found := strings.Cut(text, "\n## The keys, by proxy\n")
+	if !found {
+		t.Fatalf("docs/portability.md has no ## The keys, by proxy section")
+	}
+	section, _, _ = strings.Cut(section, "\n## ")
+	titles := make([]string, len(Targets))
+	for i, target := range Targets {
+		titles[i] = regexp.QuoteMeta(target.Title)
+	}
+	title := "(?:" + strings.Join(titles, "|") + ")"
+	refusing := regexp.MustCompile("(" + title + "(?:(?:, | and )" + title + ")*) refuses? it(?:$|[;,.])")
+	separator := regexp.MustCompile(", | and ")
+	saidBy := map[string][]string{} // a row's key: the proxies its last cell says refuse it
+	for _, line := range strings.Split(section, "\n") {
+		if !strings.HasPrefix(line, "| ") || !strings.HasSuffix(line, " |") {
+			continue
+		}
+		cells := strings.Split(strings.TrimSuffix(strings.TrimPrefix(line, "| "), " |"), " | ")
+		key := matrixRowOf(cells[0])
+		if key == "" {
+			continue
+		}
+		saidBy[key] = []string{}
+		for _, m := range refusing.FindAllStringSubmatch(cells[len(cells)-1], -1) {
+			saidBy[key] = append(saidBy[key], separator.Split(m[1], -1)...)
+		}
+	}
+	if len(saidBy) == 0 {
+		t.Fatalf("no row of The keys, by proxy names one core key alone, so nothing was compared")
+	}
+	var differ []string
+	for _, target := range Targets {
+		for _, key := range MatrixRows() {
+			said, hasRow := saidBy[key]
+			if !hasRow {
+				continue
+			}
+			// A key the generator does not write yet is declared Refused with a note that says so; the table names what
+			// each proxy offers, so the row of such a key says what the proxy has, not that the key is refused.
+			declared := target.Keys[key]
+			notYet := strings.HasPrefix(declared.Note, "not written by this version's ")
+			refused, says := declared.Level == Refused && !notYet, slices.Contains(said, target.Title)
+			if refused && !says {
+				differ = append(differ, fmt.Sprintf("%s: %s refuses it and its row does not say so", key, target.Title))
+			}
+			if says && !refused {
+				differ = append(differ, fmt.Sprintf("%s: its row says %s refuses it, which %s does not", key, target.Title, target.Title))
+			}
+		}
+	}
+	if !slices.Equal(differ, nil) {
+		t.Errorf("rows of The keys, by proxy that part from the declarations = %q, want none", differ)
+	}
+}
+
+// soleKey is a cell that is one key in code and nothing else: a path of names, [] and <placeholders>.
+var soleKey = regexp.MustCompile("^`([a-z_]+(?:\\[\\])?(?:\\.(?:[a-z_]+(?:\\[\\])?|<[a-z ]+>))*)`$")
+
+// matrixRowOf returns the row of MatrixRows that a cell names alone, or "" when it names no core key alone. The page
+// shortens a placeholder (<name> for <service name>), so a placeholder matches any placeholder in its place.
+func matrixRowOf(cell string) string {
+	m := soleKey.FindStringSubmatch(cell)
+	if m == nil {
+		return ""
+	}
+	parts := strings.Split(m[1], ".")
+	for _, row := range MatrixRows() {
+		rowParts := strings.Split(row, ".")
+		if slices.EqualFunc(parts, rowParts, func(a, b string) bool {
+			return a == b || strings.HasPrefix(a, "<") && strings.HasPrefix(b, "<")
+		}) {
+			return row
+		}
+	}
+	return ""
+}
+
 // documentation returns the README and the pages under docs/, the files whose key tables and links are checked.
 func documentation(t *testing.T) []string {
 	t.Helper()
