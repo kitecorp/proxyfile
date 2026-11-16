@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -96,7 +97,8 @@ var routing = scenario{name: "routing",
 		{name: "a newline inside a path a pattern of any character takes", keys: []string{"routes[].pattern"}, send: get("/admin/a%0Ab"),
 			want: answer{status: 200, service: "shop", path: "/admin/a%0Ab"},
 			on: map[string]literal{"nginx-file": {want: answer{status: 200, service: "accounts", path: "/admin/a%0Ab"}},
-				"haproxy-file": {want: answer{status: 200, service: "accounts", path: "/admin/a%0Ab"}}},
+				"haproxy-file": {want: answer{status: 200, service: "accounts", path: "/admin/a%0Ab"}},
+				"nginx-auth":   {want: answer{status: 200, service: "accounts", path: "/admin/a%0Ab"}}},
 			by: map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}}}},
 		{name: "an upgrade other than WebSocket is refused", send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1",
 			headers: map[string]string{"upgrade": "spdy/3.1", "connection": "upgrade"}}, want: answer{status: 403}},
@@ -108,7 +110,8 @@ var routing = scenario{name: "routing",
 			on: map[string]literal{"full": {want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}},
 				"portable":     {want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}},
 				"haproxy-file": {want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}},
-				"nginx-file":   {want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}}}},
+				"nginx-file":   {want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}},
+				"nginx-auth":   {want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}}}},
 		{name: "a client's own x-forwarded-proto is replaced by the connection's", keys: []string{"client_address", "tls.certificate"},
 			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", headers: map[string]string{"x-forwarded-proto": "http"}},
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}},
@@ -189,12 +192,16 @@ var routing = scenario{name: "routing",
 			path: "/products/1"}, want: answer{status: 404}},
 		{name: "a method Envoy's parser does not know is answered 400", send: request{proto: "http/1.1", method: "FOO", host: "localhost",
 			path: "/products/1"}, want: answer{status: 400}},
+		// QUERY is in Envoy 1.40.2's list of methods, and its parser still answers it 400 (measured); HAProxy sends it on.
+		{name: "QUERY over HTTP/1.1 is answered 400", send: request{proto: "http/1.1", method: "QUERY", host: "localhost",
+			path: "/products/1"}, want: answer{status: 400},
+			by: map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 200, service: "shop"}}}}},
 		{name: "a pattern's {,3} is text, as RE2 reads it", keys: []string{"routes[].pattern"}, send: get("/braces/xxx"),
 			want: answer{status: 200, service: "shop", path: "/braces/xxx"}},
 		{name: "a path PCRE2 gives up on as the pattern is written is matched as Go's parse writes it", keys: []string{"routes[].pattern"},
 			send: get("/backtrack/" + strings.Repeat("a", 40) + "b"), want: answer{status: 200, service: "shop"},
 			on: map[string]literal{"nginx-file": {want: answer{status: 200, service: "accounts"}},
-				"haproxy-file": {want: answer{status: 200, service: "accounts"}}}},
+				"haproxy-file": {want: answer{status: 200, service: "accounts"}}, "nginx-auth": {want: answer{status: 200, service: "accounts"}}}},
 		// nginx's answer comes within 50 ms, about ten times Envoy's slowest answer to a long path or a long Origin
 		// (5.8 ms): under the match limit the generator writes, 1.6 to 3.6 ms; under PCRE2's own, 112 to 227 ms (nginx
 		// 1.30.6 and 1.31.8 on an arm64 Mac), a worker serving no other request meanwhile.
@@ -447,13 +454,20 @@ var routing = scenario{name: "routing",
 		{name: "an HTTP 2 path of 7,000 bytes above 0x7F reaches the service", send: request{proto: "h2", method: "GET",
 			host: "localhost", path: "/products/" + strings.Repeat("\xe9", 7000), raw: true}, want: answer{status: 200, service: "shop"},
 			by: map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{refused: true}}},
-				"nginx": {difference: "routes[].pattern", files: []string{"nginx-file"}, literal: literal{want: answer{status: 400}}}}},
-		// A client that sends its request and closes its side of the connection never gets the service's answer: Envoy
-		// 1.40.2 closes the connection with no answer, and HAProxy 3.2.26 and 3.4.7 answer 400 or 403, or close with no
-		// answer, which run to run is not one answer, so the row wants a refusal, which reads each of them alike
-		// (measured, and HAProxy 3.2.26 without option abortonclose gave the client the service's 200).
-		{name: "a client that half-closes after its request gets no answer from a service", send: request{proto: "http/1.1",
-			method: "GET", host: "localhost", path: "/products/1", raw: true, halfClose: true}, want: answer{refused: true}},
+				"nginx": {difference: "routes[].pattern", files: []string{"nginx-file", "nginx-auth"}, literal: literal{want: answer{status: 400}}}}},
+		// A proxy gives a client that closes its side of the connection after its request no answer when it reads that
+		// FIN before the service answers, and the service's answer when the answer comes first: with a service that
+		// answers at once, a FIN sent with the request got no answer in 300 of 300 tries through Envoy 1.40.2 and nginx
+		// 1.30.6 and 1.31.8, and one sent 1 ms later got the service's 200 in 297 and 300 of 300 (measured from the
+		// host, and 200 µs later from inside the network, 300 of 300 each), so a service that answers at once makes
+		// the row a race, which failed once in a run on nginx 1.31.8 and once on HAProxy 3.4.7. The service here holds
+		// its answer, so the FIN always comes first. Envoy closes the connection with no answer, and HAProxy 3.2.26
+		// and 3.4.7 answer 400 or 403, or close with no answer, which run to run is not one answer, so the row wants a
+		// refusal, which reads each of them alike (HAProxy 3.2.26 without option abortonclose gave the client the
+		// service's 200).
+		{name: "a client that half-closes before the service answers gets no answer from it", send: request{proto: "http/1.1",
+			method: "GET", host: "localhost", path: "/products/1", raw: true, halfClose: true,
+			headers: map[string]string{"x-stub-delay": "500ms"}}, want: answer{refused: true}},
 		// An X-Forwarded-Proto line that is present and empty, sent by a client in front, is answered 404 by Envoy 1.40.2
 		// under client_address = forwarded, and by nginx and HAProxy alike; with connection every proxy writes the
 		// connection's scheme in its place and serves the request.
@@ -462,6 +476,7 @@ var routing = scenario{name: "routing",
 			on: map[string]literal{"full": {want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}},
 				"portable":     {want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}},
 				"nginx-file":   {want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}},
+				"nginx-auth":   {want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}},
 				"haproxy-file": {want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "https"}}}}},
 		// An X-Forwarded-Proto of spaces alone over HTTP/2 is served by Envoy 1.40.2 under client_address = forwarded,
 		// where HAProxy, whose decoder drops the spaces, answers 404 as to an empty one (client_address); with connection
@@ -493,6 +508,20 @@ var routing = scenario{name: "routing",
 			send: request{proto: "h2", method: "GET", host: "localhost", path: "/catalog/items",
 				headers: map[string]string{"x-stub-fail-first": "routing-close-reused-h2"}},
 			want: answer{status: 502}},
+		// The check location's own path, which nginx's files write to ask the check, written or with its dot escaped,
+		// reaches the routes as any other path does.
+		{name: "the check location's own path is routed as any other", send: get("/.proxyfile/check"),
+			want: answer{status: 200, service: "shop", path: "/.proxyfile/check"}},
+		{name: "the check location's own path with its dot escaped is routed as any other", send: get("/%2Eproxyfile/check"),
+			want: answer{status: 200, service: "shop", path: "/.proxyfile/check"}},
+		// No route makes a proxy write a redirect of its own: a prefix route's path without its slash is another path.
+		{name: "a prefix route's path without its slash is routed, not redirected", send: get("/catalog"),
+			want: answer{status: 200, service: "shop", path: "/catalog", headers: map[string]string{"location": ""}}},
+		// A client that sends a request nginx refuses itself and closes its side of the connection gets nginx's answer,
+		// where Envoy closes the connection with no answer (the request line row).
+		{name: "a client that half-closes after a dot segment with a ; parameter gets no answer", send: request{proto: "http/1.1",
+			method: "GET", host: "localhost", path: "/products/%2e%2e;/1", raw: true, halfClose: true}, want: answer{refused: true},
+			by: map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
 	}}
 
 // uuid4 is a version 4 UUID in lower case, the form of the request id Envoy makes (measured on Envoy 1.40.2).
@@ -607,7 +636,7 @@ var mutualTLS = scenario{name: "mutual TLS",
 		{name: "a TLS server name and a Host of one environment", keys: slices.Concat(serverKeys, hostKeys),
 			send: request{proto: "http/1.1", method: "GET", host: "api.example.org", path: "/products/1", serverName: "api.example.com"},
 			want: answer{status: 200, service: "shop", host: "api.example.org"},
-			by: map[string]own{"nginx": {difference: "tls.clients.ca", files: []string{"nginx-file"},
+			by: map[string]own{"nginx": {difference: "tls.clients.ca", files: []string{"nginx-file", "nginx-auth"},
 				literal: literal{want: answer{status: 421}}}}},
 		// measured on Envoy 1.40.2, which takes TLS 1.2 and 1.3 only, of TLS 1.2 the ECDHE suites with AES-GCM or
 		// ChaCha20 only, and the groups X25519, P-256 and X25519MLKEM768 only.
@@ -841,7 +870,8 @@ var cors = scenario{name: "CORS",
 				headers: map[string]string{"origin": "https://www.example.com", "access-control-request-method": "GET",
 					"authorization": "Bearer allow"}},
 			want: answer{status: 200, headers: map[string]string{"access-control-allow-origin": "https://www.example.com"}},
-			by:   map[string]own{"haproxy": {difference: dotRow, literal: literal{want: answer{status: 400}}}}},
+			by: map[string]own{"haproxy": {difference: dotRow, literal: literal{want: answer{status: 400}}},
+				"nginx": {difference: dotRow, literal: literal{want: answer{status: 400}}}}},
 		{name: "a denial of the check from a listed origin carries the CORS answer",
 			keys: []string{"auth.ask", "cors.expose_headers", "origins.<environment name>.origins"},
 			send: request{proto: "http/1.1", method: "GET", host: "api.example.com", path: "/products/1",
@@ -925,7 +955,7 @@ var auth = scenario{name: "auth",
 		{name: "the check answers 503 and when_unavailable is allow", keys: []string{"auth.ask", "auth.when_unavailable"}, send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1",
 			headers: map[string]string{"authorization": "Bearer status-503", "x-api-key": "key"}}, want: answer{status: 200, service: "shop", marked: "true"},
 			// two-checks is deny.
-			on: map[string]literal{"two-checks": {want: answer{status: 403}}}},
+			on: deniedUnderDeny},
 		{name: "a client's own unchecked mark is removed when the check allows", keys: []string{"auth.ask", "auth.when_unavailable"},
 			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", headers: map[string]string{"authorization": "Bearer allow"},
 				forgedMark: true}, want: answer{status: 200, service: "shop", unmarked: true}},
@@ -941,7 +971,9 @@ var auth = scenario{name: "auth",
 				absent: []string{"x-user-id", "x-gateway-action"}},
 			// two-checks accepts x-user-check alone, so a client's own x-user-id is the service's to judge there.
 			on: map[string]literal{"two-checks": {want: answer{status: 200, service: "shop",
-				received: map[string]string{"x-keep": "yes", "x-user-id": "forged"}, absent: []string{"x-gateway-action"}}}}},
+				received: map[string]string{"x-keep": "yes", "x-user-id": "forged"}, absent: []string{"x-gateway-action"}}},
+				"nginx-checks": {want: answer{status: 200, service: "shop",
+					received: map[string]string{"x-keep": "yes", "x-user-id": "forged"}, absent: []string{"x-gateway-action"}}}}},
 		{name: "a header remove_from_clients names a client may not send", keys: []string{"remove_from_clients"},
 			send: rawHeaders(map[string]string{"x-client-id": "forged\r\nX-CLIENT-ID: again", "x-keep": "yes"}),
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-keep": "yes"}, absent: []string{"x-client-id"}},
@@ -949,6 +981,8 @@ var auth = scenario{name: "auth",
 			on: map[string]literal{"nginx-plain": {want: answer{status: 200, service: "shop",
 				received: map[string]string{"x-keep": "yes", "x-client-id": "forged\nagain"}}},
 				"two-checks": {want: answer{status: 200, service: "shop",
+					received: map[string]string{"x-keep": "yes", "x-client-id": "forged\nagain"}}},
+				"nginx-checks": {want: answer{status: 200, service: "shop",
 					received: map[string]string{"x-keep": "yes", "x-client-id": "forged\nagain"}}}}},
 		{name: "a client's own x-request-id that remove_from_clients names is replaced", keys: []string{"remove_from_clients"},
 			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", headers: map[string]string{"x-request-id": "client-id-1"}},
@@ -966,6 +1000,10 @@ var auth = scenario{name: "auth",
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-keep": "yes"}, absent: []string{"x-subject", "x-roles"}}},
 		{name: "a check's 2xx other than 200 is answered 403", keys: []string{"auth.ask"}, send: token("status-201"),
 			want: answer{status: 403}},
+		// A denial the check sends with no body reaches the client with no content-type, as the Envoy output passes it
+		// on (measured on Envoy 1.40.2), where nginx would give it its default type.
+		{name: "a denial with no body carries no content-type", keys: []string{"auth.ask"}, send: token("deny-401-empty"),
+			want: answer{status: 401, headers: map[string]string{"content-type": ""}}},
 		{name: "a denial larger than HAProxy reads whole", keys: []string{"auth.ask"}, send: token("big-denial"),
 			want: answer{status: 401},
 			by:   map[string]own{"haproxy": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}}},
@@ -980,8 +1018,9 @@ var auth = scenario{name: "auth",
 		// x-user-check alone and where Envoy 1.40.2 serves the request without x-user-id.
 		{name: "an accepted header too large for the request", keys: []string{"auth.ask", "auth.accept"}, send: token("big-accept"),
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-id": strings.Repeat("u", 20000)}},
-			on:   map[string]literal{"two-checks": {want: answer{status: 200, service: "shop", absent: []string{"x-user-id"}}}},
-			by:   map[string]own{"haproxy": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}}},
+			on: map[string]literal{"two-checks": {want: answer{status: 200, service: "shop", absent: []string{"x-user-id"}}},
+				"nginx-checks": {want: answer{status: 200, service: "shop", absent: []string{"x-user-id"}}}},
+			by: map[string]own{"haproxy": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}}},
 		{name: "the check is told it is internal and its deadline, as Envoy tells it", keys: []string{"auth.ask", "auth.timeout", "auth.accept"},
 			send: token("report"), want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "internal=true expected=1500"}}},
 		{name: "a client's own x-forwarded-proto reaches the check under forwarded, and the connection's under connection",
@@ -993,15 +1032,19 @@ var auth = scenario{name: "auth",
 			keys: []string{"auth.ask", "auth.accept", "services.<service name>.host_header"}, send: token("report-forwarded"),
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "proto=https host=localhost"}},
 			on: map[string]literal{"two-checks": {want: answer{status: 200, service: "shop",
-				received: map[string]string{"x-user-check": "proto=http host=localhost"}}}}},
+				received: map[string]string{"x-user-check": "proto=http host=localhost"}}},
+				"nginx-checks": {want: answer{status: 200, service: "shop",
+					received: map[string]string{"x-user-check": "proto=http host=localhost"}}}}},
 		{name: "the only_with_header header sent twice, an empty line then a token, asks the check",
 			keys: []string{"auth.ask", "auth.only_with_header", "auth.accept", "auth.send_request"},
 			send: rawHeaders(map[string]string{"authorization": "\r\nauthorization: Bearer allow", "x-api-key": "key"}),
-			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country="}}},
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country="}},
+			by:   map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
 		{name: "the only_with_header header sent twice, a token then an empty line, asks the check",
 			keys: []string{"auth.ask", "auth.only_with_header", "auth.accept", "auth.send_request"},
 			send: rawHeaders(map[string]string{"authorization": "Bearer allow\r\nauthorization: ", "x-api-key": "key"}),
-			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country="}}},
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country="}},
+			by:   map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
 		// two-checks asks the check by x-api-key, a header the script passes on line by line, and the other files by
 		// authorization, which it joins into one line. Envoy reads the lines of a header it does not join as one value,
 		// joined by commas, so two empty lines are asked, and over HTTP/2 it asks a value of spaces, which HAProxy reads
@@ -1009,7 +1052,8 @@ var auth = scenario{name: "auth",
 		// (auth.only_with_header). A request the check is asked about here carries no token, so the check denies it.
 		{name: "the only_with_header header sent as two empty lines asks the check when the script does not join it",
 			keys: []string{"auth.ask", "auth.only_with_header"}, send: rawHeaders(map[string]string{"x-api-key": "\r\nx-api-key:"}),
-			want: answer{status: 200, service: "shop"}, on: map[string]literal{"two-checks": {want: answer{status: 401}}}},
+			want: answer{status: 200, service: "shop"}, on: map[string]literal{"two-checks": {want: answer{status: 401}},
+				"nginx-checks": {want: answer{status: 401}}}},
 		{name: "the only_with_header header of spaces alone over HTTP/2 asks the check", keys: []string{"auth.ask", "auth.only_with_header"},
 			send: request{proto: "h2", method: "GET", host: "localhost", path: "/products/1", headers: map[string]string{"authorization": "   ", "x-api-key": "   "}},
 			want: answer{status: 401}},
@@ -1028,11 +1072,11 @@ var auth = scenario{name: "auth",
 		{name: "a check backend that refuses connections fails the checks it gets, which no other backend answers",
 			keys: []string{"auth.ask"}, send: token("allow"), repeat: 24, refusing: "check-2",
 			want: answer{status: 200, service: "shop"},
-			on:   map[string]literal{"two-checks": {want: answer{status: 403}}}},
+			on:   deniedUnderDeny},
 		{name: "a denial whose body breaks off is an unanswered check", keys: unanswered, send: token("cut-body"),
-			want: answer{status: 200, service: "shop", marked: "true"}, on: deniedOnTwoChecks},
+			want: answer{status: 200, service: "shop", marked: "true"}, on: deniedUnderDeny},
 		{name: "a denial of 101 header lines is an unanswered check", keys: unanswered, send: token("many-headers"),
-			want: answer{status: 200, service: "shop", marked: "true"}, on: deniedOnTwoChecks},
+			want: answer{status: 200, service: "shop", marked: "true"}, on: deniedUnderDeny},
 		// Envoy 1.40.2 does not count a folded line among the 100 header lines it reads, in a 1xx head or the final one,
 		// and counts a name it keeps inline, such as date, once however many lines carry it, so it reads each of the
 		// next four answers; with set-cookie twice it counts 101 entries (measured).
@@ -1044,54 +1088,474 @@ var auth = scenario{name: "auth",
 			send: token("1xx-fold-after-100"), want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "1xx-fold-after-100"}}},
 		{name: "a denial of 101 header lines with date on two of them is passed on as the check's denial", keys: []string{"auth.ask"},
 			send: token("date-twice-in-101"), want: answer{status: 401},
-			by: map[string]own{"haproxy": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}}},
+			// HAProxy's script and nginx's relay refuse a head past 100 lines with a name on two of them.
+			by: map[string]own{"haproxy": {difference: "auth.ask", literal: literal{want: answer{status: 403}}},
+				"nginx": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}}},
 		{name: "a denial of 101 header lines with set-cookie on two of them is an unanswered check", keys: unanswered,
-			send: token("cookie-twice-in-101"), want: markedOnly, on: deniedOnTwoChecks, by: refusedUnderAllow},
+			send: token("cookie-twice-in-101"), want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
 		// Envoy 1.40.2 reads 81,920 bytes of each head of the check's answer, from the status line to the empty line,
 		// a 1xx head and folded lines included, and as many of a trailer section (measured to the byte).
 		{name: "a 200 whose head is within 81,920 bytes is read", keys: []string{"auth.ask", "auth.accept"}, send: token("head-within"),
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "head-within"}}},
 		{name: "a 200 whose head passes 81,920 bytes is an unanswered check", keys: unanswered, send: token("head-past"),
-			want: markedOnly, on: deniedOnTwoChecks, by: refusedUnderAllow},
+			want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
 		{name: "a 200 whose folded line takes its head past 81,920 bytes is an unanswered check", keys: unanswered,
-			send: token("fold-past"), want: markedOnly, on: deniedOnTwoChecks, by: refusedUnderAllow},
+			send: token("fold-past"), want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
 		{name: "a 200 after a 1xx whose head passes 81,920 bytes is an unanswered check", keys: unanswered,
-			send: token("1xx-past"), want: markedOnly, on: deniedOnTwoChecks, by: refusedUnderAllow},
+			send: token("1xx-past"), want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
 		{name: "a 200 whose trailer section is within 81,920 bytes is read", keys: []string{"auth.ask", "auth.accept"},
 			send: token("trailer-within"), want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "trailer-within"}}},
 		{name: "a 200 whose trailer section passes 81,920 bytes is an unanswered check", keys: unanswered,
-			send: token("trailer-past"), want: markedOnly, on: deniedOnTwoChecks, by: refusedUnderAllow},
+			send: token("trailer-past"), want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
 		{name: "a 200 whose Content-Length is not a number is an unanswered check", keys: unanswered, send: token("length-not-a-number"),
-			want: markedOnly, on: deniedOnTwoChecks, by: refusedUnderAllow},
+			want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
 		{name: "a 200 with two Content-Length lines is an unanswered check", keys: unanswered, send: token("two-lengths"),
-			want: markedOnly, on: deniedOnTwoChecks, by: refusedUnderAllow},
+			want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
 		{name: "a 200 whose header value holds a control byte is an unanswered check", keys: unanswered, send: token("control-byte"),
-			want: markedOnly, on: deniedOnTwoChecks, by: refusedUnderAllow},
+			want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
 		{name: "a 200 whose status is not three digits is an unanswered check", keys: unanswered, send: token("status-not-three-digits"),
-			want: markedOnly, on: deniedOnTwoChecks, by: refusedUnderAllow},
+			want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
 		{name: "a 200 with no space before its reason is an unanswered check", keys: unanswered, send: token("no-space-before-reason"),
-			want: markedOnly, on: deniedOnTwoChecks, by: refusedUnderAllow},
+			want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
 		{name: "a 200 whose header name holds a byte outside a token is an unanswered check", keys: unanswered,
-			send: token("name-not-a-token"), want: markedOnly, on: deniedOnTwoChecks, by: refusedUnderAllow},
+			send: token("name-not-a-token"), want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
 		{name: "a 200 with Content-Length beside Transfer-Encoding is an unanswered check", keys: unanswered,
-			send: token("length-and-chunked"), want: markedOnly, on: deniedOnTwoChecks, by: refusedUnderAllow},
+			send: token("length-and-chunked"), want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
 		{name: "a 200 whose chunk size is not hexadecimal is an unanswered check", keys: unanswered, send: token("chunk-not-hex"),
-			want: markedOnly, on: deniedOnTwoChecks, by: refusedUnderAllow},
+			want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
 		{name: "a 200 after a 1xx with a malformed header line is an unanswered check", keys: unanswered, send: token("bad-line-in-1xx"),
-			want: markedOnly, on: deniedOnTwoChecks, by: refusedUnderAllow},
+			want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
 		{name: "a 200 whose trailer line is malformed is an unanswered check", keys: unanswered, send: token("bad-trailer"),
-			want: markedOnly, on: deniedOnTwoChecks, by: refusedUnderAllow},
+			want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
 		{name: "a status of 600 is passed on as the check's own", keys: []string{"auth.ask"}, send: token("status-600"),
 			want: answer{status: 600},
-			by:   map[string]own{"haproxy": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}}},
+			by: map[string]own{"haproxy": {difference: "auth.ask", literal: literal{want: answer{status: 403}}},
+				"nginx": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}}},
+		// The forms each of nginx's own readers of an answer reads in a way of its own (stub/check.go), each sent once:
+		// a status Envoy passes on to the client, which the battery's client cannot read when it is not three digits, an
+		// answer Envoy reads as allowed or as the check's denial, and one Envoy reads as no answer, under allow and under
+		// deny. nginx answers 403 to each the relay cannot be sure it read as Envoy does (auth.ask, auth.when_unavailable).
+		{name: "a status of 2 0 0 is passed on as the check's own", keys: []string{"auth.ask"}, send: token("status-spaced"),
+			want: answer{refused: true}, by: map[string]own{"nginx": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}}},
+		{name: "a status of 200.1 is an unanswered check", keys: unanswered, send: token("status-fraction"),
+			want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
+		{name: "a status of 20 is passed on as the check's own", keys: []string{"auth.ask"}, send: token("status-two-digits"),
+			want: answer{refused: true}, by: map[string]own{"nginx": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}}},
+		{name: "a status of 000 is passed on as the check's own", keys: []string{"auth.ask"}, send: token("status-zero"),
+			want: answer{refused: true}, by: map[string]own{"nginx": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}}},
+		{name: "a 200 with a header line with no colon is an unanswered check", keys: unanswered, send: token("allow-line-no-colon"),
+			want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
+		{name: "a denial with a header line with no colon is an unanswered check", keys: unanswered, send: token("deny-line-no-colon"),
+			want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
+		{name: "a denial with a folded header line is passed on as the check's denial", keys: []string{"auth.ask"}, send: token("deny-folded"),
+			want: answer{status: 401}},
+		// Envoy 1.40.2 answers 500 with an empty body to a request that the check's accepted headers take past
+		// limits.request_headers: its size counts each header's name and value, with :method, :path, :authority and
+		// :scheme, and the x-request-id and x-forwarded-proto it adds; its count counts those fields too, so 95 lines
+		// from the client and one or two accepted headers pass 100.
+		{name: "a 200 whose accepted header takes the request past the header size is answered 500", keys: []string{"auth.accept"},
+			send: rawToken("accept-past-size", map[string]string{"x-pad": strings.Repeat("p", 30000)}), want: answer{status: 500},
+			by: map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 431}}}}},
+		{name: "a 200 whose accepted headers take the request past the header count is answered 500", keys: []string{"auth.accept"},
+			send: rawToken("allow", numbered(92)), want: answer{status: 500},
+			on: map[string]literal{"full": {want: answer{status: 200, service: "shop"}}, "portable": {want: answer{status: 200, service: "shop"}}},
+			by: map[string]own{"haproxy": {difference: "auth.accept", literal: literal{want: answer{status: 200, service: "shop"}}}}},
+		// Envoy counts an absolute target's host and port as :authority, whatever Host says, and nginx routes by the same.
+		// With a Host of one byte beside this target, the smallest pad Envoy answered 500 was 1,170 bytes, and a count of
+		// the Host line alone answered 500 from 1,193 (measured on Envoy 1.40.2 and nginx 1.30.6), so 1,181 tells them
+		// apart. examples/full and examples/portable write 96 KiB, so they serve it.
+		{name: "an absolute target with a port beside a short Host is counted by its host and port", keys: []string{"auth.accept", "limits.request_headers.size"},
+			send: request{proto: "http/1.1", method: "GET", host: "x", path: "http://api.test.example.com:10000/products/1", raw: true,
+				serverName: "api.test.example.com", headers: map[string]string{"authorization": "Bearer accept-60000", "x-api-key": "key",
+					"x-pad": strings.Repeat("p", 1181)}},
+			want: answer{status: 500},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}, "portable": {want: answer{status: 200, service: "shop"}}}},
+		{name: "a 200 whose accepted header is empty reaches the service empty", keys: []string{"auth.accept"}, send: token("accept-empty"),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": ""}, oneLine: []string{"x-user-check"}}},
+		// HAProxy's script joins a folded line by one space (auth.accept).
+		{name: "a 200 whose accepted header is folded with a tab reaches the service with the tab", keys: []string{"auth.ask", "auth.accept"},
+			send: token("folded-tab"), want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "a\tb"}},
+			by: map[string]own{"haproxy": {difference: "auth.accept", literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "a b"}}}}}},
+		{name: "a 200 whose accepted header is folded with spaces on both lines reaches the service with each space", keys: []string{"auth.ask", "auth.accept"},
+			send: token("folded-spaces"), want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "a   b"}},
+			by: map[string]own{"haproxy": {difference: "auth.accept", literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "a b"}}}}}},
+		{name: "a 200 whose accepted header is folded twice reaches the service with each fold's spaces and tabs", keys: []string{"auth.ask", "auth.accept"},
+			send: token("folded-twice"), want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "a b\t c"}},
+			by: map[string]own{"haproxy": {difference: "auth.accept", literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "a b c"}}}}}},
+		{name: "a 200 of HTTP/2.0 is read as allowed", keys: []string{"auth.ask", "auth.accept"}, send: token("version-2"),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "version-2"}},
+			by:   map[string]own{"nginx": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}, "haproxy": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}}},
+		{name: "a 200 with two spaces after its version is read as allowed", keys: []string{"auth.ask", "auth.accept"},
+			send: token("two-spaces-after-version"),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "two-spaces-after-version"}},
+			by: map[string]own{"nginx": {difference: "auth.ask", literal: literal{want: answer{status: 403}}},
+				"haproxy": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}}},
+		{name: "a 200 whose header value holds a vertical tab is an unanswered check", keys: unanswered, send: token("vertical-tab"),
+			want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
+		{name: "a 200 with Transfer-Encoding gzip, chunked is an unanswered check", keys: unanswered, send: token("gzip-chunked"),
+			want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
+		{name: "a 200 with Transfer-Encoding identity and a Content-Length is an unanswered check", keys: unanswered,
+			send: token("identity-length"), want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
+		{name: "a 200 whose chunk size has a space after it is read as allowed", keys: []string{"auth.ask", "auth.accept"},
+			send: token("chunk-size-space"),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "chunk-size-space"}},
+			by: map[string]own{"nginx": {difference: "auth.ask", literal: literal{want: answer{status: 403}}},
+				"haproxy": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}}},
+		{name: "a 200 whose chunk does not end its line is an unanswered check", keys: unanswered, send: token("bad-chunk-end"),
+			want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
+		// HAProxy's script reads a chunk-size line that ends in a bare LF (auth.when_unavailable).
+		{name: "a 200 whose chunk-size line ends in a bare LF is an unanswered check", keys: unanswered, send: token("chunk-size-lf"),
+			want: markedOnly, on: deniedUnderDeny, by: map[string]own{"nginx": refusedUnderAllow["nginx"],
+				"haproxy": {difference: "auth.when_unavailable", literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "chunk-size-lf"}}}}}},
+		{name: "a 200 whose last chunk's line ends in a bare LF is an unanswered check", keys: unanswered, send: token("last-chunk-lf"),
+			want: markedOnly, on: deniedUnderDeny, by: map[string]own{"nginx": refusedUnderAllow["nginx"],
+				"haproxy": {difference: "auth.when_unavailable", literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "last-chunk-lf"}}}}}},
+		{name: "a 200 whose chunk data, trailer line and final line end in a bare LF is read as allowed", keys: []string{"auth.ask", "auth.accept"},
+			send: token("chunk-other-lf"), want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "chunk-other-lf"}}},
+		{name: "a 200 whose Content-Length has spaces around it is read as allowed", keys: []string{"auth.ask", "auth.accept"},
+			send: token("length-spaced"),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "length-spaced"}}},
+		{name: "a 200 with a space before a header's colon is an unanswered check", keys: unanswered, send: token("space-before-colon"),
+			want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
+		{name: "a 200 whose header name holds a NUL is an unanswered check", keys: unanswered, send: token("nul-in-name"),
+			want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
+		{name: "a 200 whose header line ends in a lone CR before its CRLF is read as allowed", keys: []string{"auth.ask", "auth.accept"},
+			send: token("lone-cr"), want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "lone-cr"}},
+			by: map[string]own{"nginx": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}, "haproxy": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}}},
+		{name: "a 200 with a header name holding _ is read as allowed", keys: []string{"auth.ask", "auth.accept"},
+			send: token("underscore-name"), want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "underscore-name"}}},
+		{name: "a 200 whose header name holds the byte 0xE9 is an unanswered check", keys: unanswered, send: token("e9-in-name"),
+			want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
+		{name: "a 200 with bytes after its body is read as allowed", keys: []string{"auth.ask", "auth.accept"},
+			send: token("bytes-after-body"), want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "bytes-after-body"}}},
+		{name: "a 200 whose Content-Length is past what any reader holds is an unanswered check", keys: unanswered,
+			send: token("length-past-1mib"), want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
+		{name: "a status of 304 is passed on as the check's own", keys: []string{"auth.ask"}, send: token("status-304"),
+			want: answer{status: 304}},
+		{name: "a status of 500 from the check is an unanswered check", keys: unanswered, send: token("status-500"),
+			want: answer{status: 200, service: "shop", marked: "true"}, on: deniedUnderDeny},
+		{name: "a status of 503 with a body from the check is an unanswered check", keys: unanswered, send: token("status-503-body"),
+			want: answer{status: 200, service: "shop", marked: "true"}, on: deniedUnderDeny},
+		{name: "a status of 599 from the check is an unanswered check", keys: unanswered, send: token("status-599"),
+			want: answer{status: 200, service: "shop", marked: "true"}, on: deniedUnderDeny},
+		{name: "a status of 101 is passed on as the check's own", keys: []string{"auth.ask"}, send: token("status-101"),
+			want: answer{status: 101}, by: map[string]own{"nginx": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}, "haproxy": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}}},
+		{name: "a 200 with a body of 1 MiB is read as allowed", keys: []string{"auth.ask", "auth.accept"}, send: token("allow-1mib-body"),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "allow-1mib-body"}}},
+		{name: "a 200 holding the relay's own header name is read as allowed", keys: []string{"auth.ask", "auth.accept"},
+			send: token("allow-proxyfile-check"),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "allow-proxyfile-check"}}},
+		// A denial's body reaches the client whole up to the 1 MiB nginx reads of a check's answer; past it nginx answers
+		// 403 with no body, where Envoy passes the denial on (auth.ask).
+		{name: "a denial with a body of 1 MiB is passed on whole", keys: []string{"auth.ask"}, send: token("denial-1mib"),
+			want: answer{status: 401, headers: map[string]string{"content-length": "1048576"}}, by: map[string]own{"haproxy": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}}},
+		{name: "a denial with a body of 1 MiB and a byte is passed on", keys: []string{"auth.ask"}, send: token("denial-1mib-and-a-byte"),
+			want: answer{status: 401, headers: map[string]string{"content-length": "1048577"}},
+			by:   map[string]own{"nginx": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}, "haproxy": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}}},
+		{name: "a denial with a body of 1,100,000 bytes is passed on", keys: []string{"auth.ask"}, send: token("denial-1100000"),
+			want: answer{status: 401, headers: map[string]string{"content-length": "1100000"}},
+			by:   map[string]own{"nginx": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}, "haproxy": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}}},
+		{name: "a denial's header holding the byte 0xE9 reaches the client as the check wrote it", keys: []string{"auth.ask"},
+			send: token("deny-e9-header"), want: answer{status: 401, headers: map[string]string{"x-a": "caf\xe9"}}},
+		// A redirect read by hand, as the battery's other clients follow it.
+		{name: "a check's redirect with a Location that is a path reaches the client as the check sent it", keys: []string{"auth.ask"},
+			send: rawToken("redirect-relative", nil), want: answer{status: 302, headers: map[string]string{"location": "/login?next=%2Fx"}}},
+		{name: "the check location's own path, with a token the check denies, asks the check as any other path", keys: []string{"auth.ask"},
+			send: tokenTo("deny-401", "/.proxyfile/check"), want: answer{status: 401}},
+		// An upload the check refuses: Envoy answers 100 Continue as it reads the head, which the battery reads as the
+		// answer, and nginx sends it as it reads the body it refuses.
+		{name: "an upload sent with Expect: 100-continue that the check refuses gets 100 Continue first", keys: []string{"auth.ask"},
+			send: request{proto: "http/1.1", method: "POST", host: "localhost", path: "/products/1", raw: true, unframed: true, body: "abcd",
+				headers: map[string]string{"authorization": "Bearer deny-401", "x-api-key": "key", "content-length": "4", "expect": "100-continue"}},
+			want: answer{status: 100}},
+		{name: "a request with a body the check allows reaches the service with its body", keys: []string{"auth.ask", "auth.accept", "auth.send_request"},
+			send: request{proto: "http/1.1", method: "POST", host: "localhost", path: "/products/1", raw: true, body: "abcd",
+				headers: map[string]string{"authorization": "Bearer allow", "x-api-key": "key"}},
+			want: answer{status: 200, service: "shop", body: "abcd",
+				received: map[string]string{"x-user-check": "POST /products/1 action= reports= country="}}},
+		// The Envoy output tells the check a ! for each byte of a header it sends that is not part of well-formed UTF-8,
+		// and well-formed UTF-8 as the client sent it, as nginx's relay does.
+		{name: "a sent header holding the byte 0xE9 reaches the check with a ! for it", keys: []string{"auth.ask", "auth.send", "auth.accept", "auth.send_request"},
+			send: rawToken("allow", map[string]string{"x-country": "caf\xe9"}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=caf!"}},
+			// HAProxy's check receives the byte itself and answers it in x-user-check; the service's JSON echo writes
+			// U+FFFD for that byte (auth.send).
+			by: map[string]own{"haproxy": {difference: "auth.send",
+				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=caf\uFFFD"}}}}}},
+		{name: "a sent header holding well-formed UTF-8 reaches the check as sent", keys: []string{"auth.ask", "auth.send", "auth.accept", "auth.send_request"},
+			send: rawToken("allow", map[string]string{"x-country": "caf\xc3\xa9"}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=caf\u00e9"}}},
+		{name: "a sent header holding well-formed UTF-8 and then a byte that is not reaches the check with a ! for that byte",
+			keys: []string{"auth.ask", "auth.send", "auth.accept", "auth.send_request"},
+			send: rawToken("allow", map[string]string{"x-country": "\xc3\xa9\xe9z"}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=\u00e9!z"}},
+			by: map[string]own{"haproxy": {difference: "auth.send",
+				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=\u00e9\uFFFDz"}}}}}},
+		// Four forms RFC 3629 does not admit, one row each: an overlong form, a surrogate, a code point past U+10FFFF and a
+		// sequence cut at the value's end, each told as a ! for each of its bytes (measured on Envoy 1.40.2). HAProxy's
+		// check receives the bytes themselves and answers them in x-user-check; the service's JSON echo writes U+FFFD for
+		// each of them (auth.send).
+		{name: "a sent header holding an overlong form reaches the check with a ! for each of its bytes",
+			keys: []string{"auth.ask", "auth.send", "auth.accept", "auth.send_request"},
+			send: rawToken("allow", map[string]string{"x-country": "a\xc0\xafb"}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=a!!b"}},
+			by: map[string]own{"haproxy": {difference: "auth.send",
+				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=a\uFFFD\uFFFDb"}}}}}},
+		{name: "a sent header holding a surrogate reaches the check with a ! for each of its bytes",
+			keys: []string{"auth.ask", "auth.send", "auth.accept", "auth.send_request"},
+			send: rawToken("allow", map[string]string{"x-country": "a\xed\xa0\x80b"}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=a!!!b"}},
+			by: map[string]own{"haproxy": {difference: "auth.send",
+				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=a\uFFFD\uFFFD\uFFFDb"}}}}}},
+		{name: "a sent header holding a code point past U+10FFFF reaches the check with a ! for each of its bytes",
+			keys: []string{"auth.ask", "auth.send", "auth.accept", "auth.send_request"},
+			send: rawToken("allow", map[string]string{"x-country": "a\xf4\x90\x80\x80b"}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=a!!!!b"}},
+			by: map[string]own{"haproxy": {difference: "auth.send",
+				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=a\uFFFD\uFFFD\uFFFD\uFFFDb"}}}}}},
+		{name: "a sent header holding a sequence cut at the value's end reaches the check with a ! for each of its bytes",
+			keys: []string{"auth.ask", "auth.send", "auth.accept", "auth.send_request"},
+			send: rawToken("allow", map[string]string{"x-country": "ab\xe2\x82"}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=ab!!"}},
+			by: map[string]own{"haproxy": {difference: "auth.send",
+				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=ab\uFFFD\uFFFD"}}}}}},
+		{name: "a sent header on two lines of two characters outside ASCII reaches the check as sent, joined by a comma",
+			keys: []string{"auth.ask", "auth.send", "auth.accept", "auth.send_request"},
+			send: rawToken("allow", map[string]string{"x-country": "\xe8\xaf\xbb\r\nx-country: \xe5\x86\x99"}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=\u8bfb,\u5199"}}},
+		// Over HTTP/2 a path byte of 0x80 or more reaches the service escaped, and the Envoy output tells the check that
+		// path, whether the bytes are well-formed UTF-8 or not (measured on Envoy 1.40.2); nginx answers such a path 400
+		// in a file with a pattern route (routes[].pattern).
+		{name: "a path holding well-formed UTF-8 and a byte that is not, over HTTP/2, is told to the check escaped, as the service receives it",
+			keys: []string{"auth.ask", "auth.accept", "auth.send_request"},
+			send: request{proto: "h2", method: "GET", host: "localhost", path: "/products/caf\xc3\xa9\xe9", raw: true,
+				headers: map[string]string{"authorization": "Bearer allow", "x-api-key": "key"}},
+			want: answer{status: 200, service: "shop", path: "/products/caf%C3%A9%E9",
+				received: map[string]string{"x-user-check": "GET /products/caf%C3%A9%E9 action= reports= country="}},
+			by: map[string]own{"nginx": {difference: "routes[].pattern", files: []string{"nginx-auth"}, literal: literal{want: answer{status: 400}}}}},
+		{name: "the only_with_header header sent as a lone tab is not asked", keys: []string{"auth.ask", "auth.only_with_header"},
+			send: rawHeaders(map[string]string{"authorization": "\t", "x-api-key": "\t"}), want: answer{status: 200, service: "shop"},
+			by: map[string]own{"nginx": {difference: "auth.only_with_header", literal: literal{want: answer{status: 401}}}}},
+		{name: "100 checked streams at once on one HTTP/2 connection are each answered by their own check",
+			keys: []string{"auth.ask", "auth.accept", "auth.send_request"}, streams: 100,
+			send: request{proto: "h2", method: "GET", host: "localhost", path: "/products/1",
+				headers: map[string]string{"authorization": "Bearer allow", "x-api-key": "key"}},
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1?i={i} action= reports= country="}}},
+		// What a client could send past the check.
+		{name: "an absolute target's host is the host the check is told, whatever the Host header", keys: []string{"auth.ask", "auth.accept"},
+			send: request{proto: "http/1.1", host: "127.0.0.1", line: "GET http://localhost/products/1 HTTP/1.1", raw: true,
+				headers: map[string]string{"authorization": "Bearer report-forwarded", "x-api-key": "key"}},
+			want: answer{status: 200, service: "shop", host: "localhost", received: map[string]string{"x-user-check": "proto=http host=localhost"}},
+			by:   map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
+		{name: "a client's own user, question and unchecked mark do not reach the service when the check allows with none of them",
+			keys: []string{"auth.ask", "auth.accept"},
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", forgedMark: true,
+				headers: map[string]string{"authorization": "Bearer allow-empty", "x-api-key": "key", "x-user-id": "forged",
+					"x-gateway-action": "forged", "x-gateway-reports": "forged"}},
+			want: answer{status: 200, service: "shop", unmarked: true, absent: []string{"x-user-id", "x-gateway-action", "x-gateway-reports"}},
+			// two-checks and nginx-checks accept x-user-check alone, so a client's own x-user-id is the service's to judge there.
+			on: map[string]literal{
+				"two-checks": {want: answer{status: 200, service: "shop", unmarked: true, received: map[string]string{"x-user-id": "forged"},
+					absent: []string{"x-gateway-action", "x-gateway-reports"}}},
+				"nginx-checks": {want: answer{status: 200, service: "shop", unmarked: true, received: map[string]string{"x-user-id": "forged"},
+					absent: []string{"x-gateway-action", "x-gateway-reports"}}}}},
+		{name: "the check receives none of a client's own removed header, user and unchecked mark", keys: []string{"auth.ask", "auth.accept"},
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", forgedMark: true,
+				headers: map[string]string{"authorization": "Bearer report-removed", "x-api-key": "key", "x-client-id": "forged", "x-user-id": "forged"}},
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "client-id= user-id= mark="}}},
+		{name: "a dot segment with a ; parameter and a token the check denies asks the check first", keys: []string{"auth.ask"},
+			send: tokenTo("deny-401", "/products/..%3B/1"), want: answer{status: 401}},
+		{name: "a dot segment with a ; parameter and a token the check allows is answered 400", keys: []string{"auth.ask"},
+			send: tokenTo("allow", "/products/..%3B/1"), want: answer{status: 400}},
+		{name: "a denial of a request from a listed origin carries the CORS answer", keys: []string{"auth.ask", "cors.expose_headers", "origins.<environment name>.origins"},
+			send: fromListed(map[string]string{"authorization": "Bearer deny-401", "x-api-key": "key"}),
+			want: answer{status: 401, headers: map[string]string{"access-control-allow-origin": "https://www.example.com",
+				"access-control-expose-headers": "Content-Disposition,X-Request-Id"}}},
+		// As a WebSocket upgrade with no check, which the stub answers 200 as a service that does not switch (routing):
+		// Envoy passes the status with no body, and nginx with the echo (the request line row).
+		{name: "a WebSocket upgrade the check allows reaches the service", keys: []string{"auth.ask"},
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", raw: true,
+				headers: map[string]string{"connection": "Upgrade", "upgrade": "websocket", "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+					"sec-websocket-version": "13", "authorization": "Bearer allow", "x-api-key": "key"}},
+			want: answer{status: 200},
+			by: map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 200, service: "shop"}}},
+				"haproxy": {difference: lineRow, literal: literal{want: answer{status: 200, service: "shop"}}}}},
+		{name: "a WebSocket upgrade the check denies is answered with the denial", keys: []string{"auth.ask"},
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", raw: true,
+				headers: map[string]string{"connection": "Upgrade", "upgrade": "websocket", "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+					"sec-websocket-version": "13", "authorization": "Bearer deny-401", "x-api-key": "key"}},
+			want: answer{status: 401}},
+		// Two requests on one kept-alive connection of the battery's HTTP/1.1 client, which sends a row's request on the
+		// connection the row before left: what the check accepted for the first never reaches the service with the second.
+		{name: "a request the check allows with an accepted header, before another on its connection",
+			keys: []string{"auth.ask", "auth.accept", "auth.send_request"}, send: token("allow"),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country="}}},
+		{name: "the next request on that connection, which the check allows with no header, receives none of the first's",
+			keys: []string{"auth.ask", "auth.accept", "auth.send_request"}, send: token("allow-empty"),
+			want: answer{status: 200, service: "shop", unmarked: true, absent: []string{"x-user-id", "x-tier-level", "x-user-check"}}},
+		// A refusal leaves no timer of the check holding its connection: the next request on it is answered at once, far
+		// under the 1.5 s auth.timeout a timer left waiting would hold it for (1 s is the bound, for a loaded runner).
+		{name: "a check's 2xx other than 200 is answered at once on a kept-alive connection", keys: []string{"auth.ask"},
+			send: token("status-201"), want: answer{status: 403, below: time.Second}},
+		{name: "the next request on that connection is answered at once", keys: []string{"auth.ask"},
+			send: token("allow"), want: answer{status: 200, service: "shop", below: time.Second}},
+		// A refused request whose body holds a request, followed on its connection by the client's next request, in one
+		// write: the body is read as the body and the next request is answered as a request of its own. Envoy reads the
+		// body it has already received and keeps the connection (measured on Envoy 1.40.2); after the 400 of a dot
+		// segment with a ; parameter it closes it, which a row of path normalisation holds.
+		{name: "a request the check denies has its body read as a body, and the next request on its connection is answered",
+			keys: []string{"auth.ask"}, send: thenNext("/products/1", "deny-401"), want: answer{first: 401, status: 200, service: "shop", path: "/products/2"}},
+		{name: "a request whose check is unanswered has its body read as a body, and the next request on its connection is answered",
+			keys: unanswered, send: thenNext("/products/1", "status-503"), want: answer{first: 200, status: 200, service: "shop", path: "/products/2"},
+			on: map[string]literal{"two-checks": {want: answer{first: 403, status: 200, service: "shop", path: "/products/2"}},
+				"nginx-checks": {want: answer{first: 403, status: 200, service: "shop", path: "/products/2"}}}},
+		{name: "a request whose check's status is passed on has its body read as a body, and the next request on its connection is answered",
+			keys: []string{"auth.ask"}, send: thenNext("/products/1", "status-600"), want: answer{first: 600, status: 200, service: "shop", path: "/products/2"},
+			by: map[string]own{"haproxy": {difference: "auth.ask", literal: literal{want: answer{first: 403, status: 200, service: "shop", path: "/products/2"}}},
+				"nginx": {difference: "auth.ask", literal: literal{want: answer{first: 403, status: 200, service: "shop", path: "/products/2"}}}}},
+		// A redirect and a 304 are the two denials nginx's handler writes in parts, which leaves a body unread, so it
+		// writes them so only for a request whose head announces no body; these two hold that a body is read as a body.
+		{name: "a request the check redirects has its body read as a body, and the next request on its connection is answered",
+			keys: []string{"auth.ask"}, send: thenNext("/products/1", "redirect-relative"), want: answer{first: 302, status: 200, service: "shop", path: "/products/2"}},
+		// HAProxy closes the client's connection after a check's 304, so the next request gets no answer (auth.ask).
+		{name: "a request the check answers 304 has its body read as a body, and the next request on its connection is answered",
+			keys: []string{"auth.ask"}, send: thenNext("/products/1", "status-304"), want: answer{first: 304, status: 200, service: "shop", path: "/products/2"},
+			by: map[string]own{"haproxy": {difference: "auth.ask", literal: literal{want: answer{refused: true}}}}},
+		{name: "a client's own x-proxyfile-method and x-proxyfile-path do not change what the check is told",
+			keys: []string{"auth.ask", "auth.accept", "auth.send_request"},
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1",
+				headers: map[string]string{"authorization": "Bearer allow", "x-api-key": "key", "x-proxyfile-method": "DELETE", "x-proxyfile-path": "/admin"}},
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country="}}},
+		// The path the check is told with send_request: the one the route matched, normalised where Envoy normalises it,
+		// with the query as the client wrote it. nginx tells a character Envoy escapes as the client wrote it in a file
+		// with no pattern route, and answers 400 in one with a pattern route (auth.send_request, routes[].pattern).
+		{name: "a path with an escaped letter is told with the letter", keys: []string{"auth.ask", "auth.accept", "auth.send_request"},
+			send: tokenTo("allow", "/products/%41"),
+			want: answer{status: 200, service: "shop", path: "/products/A", received: map[string]string{"x-user-check": "GET /products/A action= reports= country="}}},
+		{name: "a path with a dot-dot segment and a query is told normalised, with its query as written",
+			keys: []string{"auth.ask", "auth.accept", "auth.send_request"}, send: tokenTo("allow", "/catalog/../products/1?q=%41"),
+			want: answer{status: 200, service: "shop", path: "/products/1?q=%41",
+				received: map[string]string{"x-user-check": "GET /products/1?q=%41 action= reports= country="}},
+			by: map[string]own{"haproxy": {difference: pathRow, literal: literal{want: answer{status: 200, service: "shop", path: "/products/1?q=A",
+				received: map[string]string{"x-user-check": "GET /products/1?q=A action= reports= country="}}}}}},
+		// HAProxy decodes the escape of an unreserved character in the query with no dot segment in the path too, and
+		// keeps the escapes of reserved characters as written, as Envoy does (measured on HAProxy 3.2.26 and 3.4.7).
+		{name: "a query's escape of an unreserved character reaches the service and the check as written",
+			keys: []string{"auth.ask", "auth.accept", "auth.send_request"}, send: tokenTo("allow", "/products/1?q=%7e"),
+			want: answer{status: 200, service: "shop", path: "/products/1?q=%7e",
+				received: map[string]string{"x-user-check": "GET /products/1?q=%7e action= reports= country="}},
+			by: map[string]own{"haproxy": {difference: pathRow, literal: literal{want: answer{status: 200, service: "shop", path: "/products/1?q=~",
+				received: map[string]string{"x-user-check": "GET /products/1?q=~ action= reports= country="}}}}}},
+		{name: "a query's escapes of reserved characters reach the service and the check as written",
+			keys: []string{"auth.ask", "auth.accept", "auth.send_request"}, send: tokenTo("allow", "/products/1?q=%2F%26%3d"),
+			want: answer{status: 200, service: "shop", path: "/products/1?q=%2F%26%3d",
+				received: map[string]string{"x-user-check": "GET /products/1?q=%2F%26%3d action= reports= country="}}},
+		{name: "a path holding a quote is told with the quote escaped", keys: []string{"auth.ask", "auth.accept", "auth.send_request"},
+			send: tokenTo("allow", `/products/"x`),
+			want: answer{status: 200, service: "shop", path: "/products/%22x",
+				received: map[string]string{"x-user-check": "GET /products/%22x action= reports= country="}},
+			by: map[string]own{"nginx": {difference: "auth.send_request", files: []string{"nginx-checks"},
+				literal: literal{want: answer{status: 200, service: "shop", path: "/products/%22x",
+					received: map[string]string{"x-user-check": `GET /products/"x action= reports= country=`}}},
+				other: &own{difference: "routes[].pattern", files: []string{"nginx-auth"}, literal: literal{want: answer{status: 400}}}}}},
+		// An HTTP/2 :scheme that differs from the connection's, which a client in front may send.
+		{name: "an HTTP/2 request with :scheme http", keys: []string{"auth.ask", "auth.accept", "auth.send_request"},
+			send: request{proto: "h2", method: "GET", host: "localhost", path: "/products/1", raw: true, scheme: "http",
+				headers: map[string]string{"authorization": "Bearer report-forwarded", "x-api-key": "key"}},
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "proto=http host=localhost"}},
+			by: map[string]own{"nginx": {difference: "auth.send_request", files: []string{"nginx-auth"},
+				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "proto=https host=localhost"}}}},
+				"haproxy": {difference: "auth.send_request", files: []string{"haproxy-file"},
+					literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "proto=https host=localhost"}}}}}},
+		{name: "an HTTP/2 request with :scheme https", keys: []string{"auth.ask", "auth.accept", "auth.send_request"},
+			send: request{proto: "h2", method: "GET", host: "localhost", path: "/products/1", raw: true, scheme: "https",
+				headers: map[string]string{"authorization": "Bearer report-forwarded", "x-api-key": "key"}},
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "proto=https host=localhost"}},
+			by: map[string]own{"nginx": {difference: "auth.send_request", files: []string{"nginx-checks"},
+				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "proto=http host=localhost"}}}},
+				"haproxy": {difference: "auth.send_request", files: []string{"two-checks"},
+					literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "proto=http host=localhost"}}}}}},
+		{name: "a client's HTTP2-Settings of an h2c upgrade does not reach the check", keys: []string{"auth.ask", "auth.accept"},
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1",
+				headers: map[string]string{"upgrade": "h2c", "connection": "Upgrade, HTTP2-Settings", "http2-settings": "AAMAAABkAAQAAP__",
+					"authorization": "Bearer report-settings", "x-api-key": "key"}},
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "http2-settings="}},
+			by:   map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
+		{name: "a client's HTTP2-Settings with no upgrade reaches the check when send covers it", keys: []string{"auth.ask", "auth.accept"},
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1",
+				headers: map[string]string{"http2-settings": "AAMAAABkAAQAAP__", "authorization": "Bearer report-settings", "x-api-key": "key"}},
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "http2-settings="}},
+			on: map[string]literal{"nginx-auth": {want: answer{status: 200, service: "shop",
+				received: map[string]string{"x-user-check": "http2-settings=AAMAAABkAAQAAP__"}}}}},
+		// The request log: authz_us, how long the check took, is a string of digits when a check ran and null when none
+		// ran; nginx's counts whole milliseconds (log), so the rows compare what both hold. A request the check could not
+		// answer that goes on with the mark writes a gateway_auth_unavailable line, and no other request does. The files
+		// these rows run on log a status of 400 or more and 1% of the rest, so each request they read is one of those, or
+		// one that writes gateway_auth_unavailable, which every one does.
+		{name: "a request the check denies logs how long the check took, and no unanswered check", keys: []string{"log", "auth.ask"},
+			send: token("deny-401"), want: answer{status: 401,
+				logged: map[string]map[string]*regexp.Regexp{"request": {"authz_us": logDigits}, "gateway_auth_unavailable": nil}}},
+		{name: "a request with no only_with_header header logs no check time", keys: []string{"log", "auth.ask", "auth.only_with_header"},
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", headers: map[string]string{"x-stub-status": "404"}},
+			want: answer{status: 404, service: "shop", logged: map[string]map[string]*regexp.Regexp{"request": {"authz_us": logNull}}}},
+		{name: "a request the check cannot answer, under allow, logs an unanswered check", keys: []string{"log", "auth.ask", "auth.when_unavailable"},
+			send: token("status-503"), want: answer{status: 200, service: "shop", marked: "true",
+				logged: map[string]map[string]*regexp.Regexp{"gateway_auth_unavailable": {"action": logText(""),
+					"failure_mode_allowed": logText("true"), "route": logText("shop"), "status": logNumber(200)}}}},
 	}}
 
 // token is a GET of the shop route on localhost whose authorization header carries the given token of the stub's
 // check, with x-api-key, the header two-checks asks the check by, so every file with a check asks it.
+// smuggled is a request a client writes as the body of another, and nextRequest the request it sends next on the same
+// connection; the check allows both.
+const (
+	smuggled    = "GET /products/smuggled HTTP/1.1\r\nHost: localhost\r\nauthorization: Bearer allow\r\nx-api-key: key\r\n\r\n"
+	nextRequest = "GET /products/2 HTTP/1.1\r\nHost: localhost\r\nauthorization: Bearer allow\r\nx-api-key: key\r\n\r\n"
+)
+
+// thenNext is a POST to path with the token, whose body is smuggled, followed in the same write by nextRequest.
+func thenNext(path, name string) request {
+	return request{proto: "http/1.1", method: "POST", host: "localhost", path: path, raw: true, unframed: true, body: smuggled,
+		headers: map[string]string{"authorization": "Bearer " + name, "x-api-key": "key", "content-length": strconv.Itoa(len(smuggled))},
+		then:    nextRequest}
+}
+
 func token(name string) request {
 	r := get("/products/1")
 	r.headers = map[string]string{"authorization": "Bearer " + name, "x-api-key": "key"}
 	return r
+}
+
+// tokenTo is token's request to path.
+func tokenTo(name, path string) request {
+	r := token(name)
+	r.path = path
+	return r
+}
+
+// rawToken is token's request sent by hand, with more headers beside its two, whose values may hold any byte.
+func rawToken(name string, more map[string]string) request {
+	r := token(name)
+	maps.Copy(r.headers, more)
+	r.raw = true
+	return r
+}
+
+// logDigits and logNull are the two forms of authz_us in the request log's line (answer.logged): a JSON string of
+// digits when a check ran, and null when none did.
+var (
+	logDigits = regexp.MustCompile(`^"[0-9]+"$`)
+	logNull   = regexp.MustCompile(`^null$`)
+)
+
+// logText is a field of a log line that holds the JSON string text.
+func logText(text string) *regexp.Regexp {
+	return regexp.MustCompile("^" + regexp.QuoteMeta(strconv.Quote(text)) + "$")
+}
+
+// logNumber is a field of a log line that holds the JSON number n.
+func logNumber(n int) *regexp.Regexp {
+	return regexp.MustCompile("^" + strconv.Itoa(n) + "$")
 }
 
 // unanswered are what the rows of an answer the check could not give depend on: the check, and what the proxy does
@@ -1102,13 +1566,22 @@ var unanswered = []string{"auth.ask", "auth.when_unavailable"}
 // allow: the service receives it with the unchecked mark and without the user the check's answer named.
 var markedOnly = answer{status: 200, service: "shop", marked: "true", absent: []string{"x-user-id"}}
 
-// deniedOnTwoChecks is the same request's answer on two-checks, whose when_unavailable is deny.
-var deniedOnTwoChecks = map[string]literal{"two-checks": {want: answer{status: 403}}}
+// deniedUnderDeny is the same request's answer on two-checks and nginx-checks, whose when_unavailable is deny.
+var deniedUnderDeny = map[string]literal{"two-checks": {want: answer{status: 403}}, "nginx-checks": {want: answer{status: 403}}}
 
-// refusedUnderAllow is HAProxy's 403 to an answer its script cannot read, which Envoy serves with the mark under allow
-// (auth.when_unavailable); on two-checks, under deny, both answer 403.
-var refusedUnderAllow = map[string]own{"haproxy": {difference: "auth.when_unavailable", files: []string{"haproxy-file"},
-	literal: literal{want: answer{status: 403}}}}
+// deniedLateUnderDeny is the answer under deny to a request whose check did not answer within auth.timeout, each bound 50 ms
+// from the time it tests, for the two clocks (timeout).
+var deniedLateUnderDeny = map[string]literal{
+	"two-checks":   {want: answer{status: 403, atLeast: 1450 * time.Millisecond, below: 2950 * time.Millisecond}},
+	"nginx-checks": {want: answer{status: 403, atLeast: 1450 * time.Millisecond, below: 2950 * time.Millisecond}},
+}
+
+// refusedUnderAllow is HAProxy's and nginx's 403 to an answer their scripts cannot read, which Envoy serves with the
+// mark under allow (auth.when_unavailable); on two-checks and nginx-checks, under deny, each answers 403.
+var refusedUnderAllow = map[string]own{
+	"haproxy": {difference: "auth.when_unavailable", files: []string{"haproxy-file"}, literal: literal{want: answer{status: 403}}},
+	"nginx":   {difference: "auth.when_unavailable", files: []string{"nginx-auth"}, literal: literal{want: answer{status: 403}}},
+}
 
 // timeout: measured on Envoy 1.40.2. The check holds the request for 3 s, past auth.timeout's 1500 ms, and
 // when_unavailable is allow, so the request goes on to the service when the timeout ends, with the unchecked mark, as a
@@ -1142,13 +1615,13 @@ var timeout = scenario{name: "timeout",
 		{name: "the check answers after auth.timeout", overlap: true, keys: []string{"auth.timeout", "auth.when_unavailable"}, send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1",
 			headers: map[string]string{"authorization": "Bearer hang", "x-api-key": "key"}},
 			want: answer{status: 200, service: "shop", marked: "true", atLeast: 1450 * time.Millisecond, below: 2950 * time.Millisecond},
-			on:   map[string]literal{"two-checks": {want: answer{status: 403, atLeast: 1450 * time.Millisecond, below: 2950 * time.Millisecond}}}},
+			on:   deniedLateUnderDeny},
 		{name: "a denial whose body stops coming, past auth.timeout, is an unanswered check", overlap: true, keys: []string{"auth.timeout", "auth.when_unavailable"},
 			send: token("trickle"), want: answer{status: 200, service: "shop", marked: "true", atLeast: 1450 * time.Millisecond, below: 2950 * time.Millisecond},
-			on: map[string]literal{"two-checks": {want: answer{status: 403, atLeast: 1450 * time.Millisecond, below: 2950 * time.Millisecond}}}},
+			on: deniedLateUnderDeny},
 		{name: "a 200 whose body stops coming, past auth.timeout, is an unanswered check", overlap: true, keys: []string{"auth.timeout", "auth.when_unavailable"},
 			send: token("trickle-200"), want: answer{status: 200, service: "shop", marked: "true", atLeast: 1450 * time.Millisecond, below: 2950 * time.Millisecond},
-			on: map[string]literal{"two-checks": {want: answer{status: 403, atLeast: 1450 * time.Millisecond, below: 2950 * time.Millisecond}}}},
+			on: deniedLateUnderDeny},
 		{name: "a service silent past the idle time", overlap: true, keys: []string{"timeouts.idle"},
 			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", headers: map[string]string{"x-stub-delay": "3s"}},
 			want: answer{status: 504, headers: map[string]string{"content-type": "text/plain"}, atLeast: 1950 * time.Millisecond,
@@ -1238,6 +1711,12 @@ var gRPC = scenario{name: "gRPC",
 		{name: "a gRPC call through a dot-dot segment reaches the method's path", keys: []string{"routes[].rpc", "rpc.methods"},
 			send: rpc("/x/../example.shop.v1.CartService/GetCart"),
 			want: answer{status: 200, grpcStatus: "0", service: "shop", path: "/example.shop.v1.CartService/GetCart"}},
+		// nginx sends a gRPC service no header the check sent empty, where Envoy sends it empty (auth.accept).
+		{name: "a gRPC call whose accepted header is empty reaches the service empty", keys: []string{"auth.accept"},
+			send: request{proto: "grpc", method: "POST", host: "localhost", path: "/example.shop.v1.CartService/AddItem",
+				headers: map[string]string{"authorization": "Bearer accept-empty", "x-api-key": "key"}},
+			want: answer{status: 200, grpcStatus: "0", service: "shop", received: map[string]string{"x-user-check": ""}, oneLine: []string{"x-user-check"}},
+			by:   map[string]own{"nginx": {difference: "auth.accept", literal: literal{want: answer{status: 200, grpcStatus: "0", service: "shop", absent: []string{"x-user-check"}}}}}},
 		{name: "the check is told the method's action and reports", keys: []string{"rpc.methods[].action", "rpc.methods[].reports", "auth.ask"},
 			send: request{proto: "grpc", method: "POST", host: "localhost", path: "/example.shop.v1.CartService/AddItem",
 				headers: map[string]string{"authorization": "Bearer allow", "x-gateway-action": "forged"}},
@@ -1256,6 +1735,28 @@ var gRPC = scenario{name: "gRPC",
 			send: request{proto: "grpc", method: "POST", host: "localhost", path: "/example.shop.v1.CartService/GetCart",
 				headers: map[string]string{"authorization": "Bearer deny-401-message"}},
 			want: answer{status: 200, grpcStatus: "16", headers: map[string]string{"grpc-message": "no entry: 100%25 sure %C3%A9%0Anext line"}}},
+		{name: "a gRPC call the check denies with 403 is answered in gRPC's form", keys: []string{"auth.ask", "routes[].rpc"},
+			send: request{proto: "grpc", method: "POST", host: "localhost", path: "/example.shop.v1.CartService/GetCart",
+				headers: map[string]string{"authorization": "Bearer deny-403", "x-api-key": "key"}},
+			want: answer{status: 200, grpcStatus: "7"}},
+		{name: "a gRPC call the check cannot answer goes on with the unchecked mark under allow", keys: []string{"auth.ask", "auth.when_unavailable", "routes[].rpc"},
+			send: request{proto: "grpc", method: "POST", host: "localhost", path: "/example.shop.v1.CartService/GetCart",
+				headers: map[string]string{"authorization": "Bearer status-503", "x-api-key": "key"}},
+			want: answer{status: 200, grpcStatus: "0", service: "shop", marked: "true"},
+			on:   map[string]literal{"two-checks": {want: answer{status: 200, grpcStatus: "7"}}, "nginx-checks": {want: answer{status: 200, grpcStatus: "7"}}}},
+		{name: "a gRPC call whose check's answer cannot be read is an unanswered check", keys: []string{"auth.ask", "auth.when_unavailable", "routes[].rpc"},
+			send: request{proto: "grpc", method: "POST", host: "localhost", path: "/example.shop.v1.CartService/GetCart",
+				headers: map[string]string{"authorization": "Bearer length-not-a-number", "x-api-key": "key"}},
+			want: answer{status: 200, grpcStatus: "0", service: "shop", marked: "true"},
+			on:   map[string]literal{"two-checks": {want: answer{status: 200, grpcStatus: "7"}}, "nginx-checks": {want: answer{status: 200, grpcStatus: "7"}}},
+			by: map[string]own{"nginx": {difference: "auth.when_unavailable", files: []string{"nginx-auth"}, literal: literal{want: answer{status: 200, grpcStatus: "7"}}},
+				"haproxy": {difference: "auth.when_unavailable", files: []string{"haproxy-file"}, literal: literal{want: answer{status: 200, grpcStatus: "7"}}}}},
+		{name: "a gRPC call the check cannot answer logs an unanswered check with the method's action", keys: []string{"log", "auth.ask", "auth.when_unavailable", "rpc.methods[].action"},
+			send: request{proto: "grpc", method: "POST", host: "localhost", path: "/example.shop.v1.CartService/GetCart",
+				headers: map[string]string{"authorization": "Bearer status-503"}},
+			want: answer{status: 200, grpcStatus: "0", service: "shop", marked: "true",
+				logged: map[string]map[string]*regexp.Regexp{"gateway_auth_unavailable": {"action": logText("browse"),
+					"failure_mode_allowed": logText("true"), "route": logText("shop"), "status": logNumber(200)}}}},
 	}}
 
 // paths: every value measured on Envoy 1.40.2; no key, because path normalisation is written for every file
@@ -1274,6 +1775,11 @@ var gRPC = scenario{name: "gRPC",
 // backslash, written or as %5C, to an invalid escape, to a path that needs normalising and keeps an escape, as
 // /catalog/.%3B/../products/1 does, and to an empty query after a path that needs normalising, where nginx would drop
 // the ? Envoy sends on.
+// examples/portable limits the catalog route to 20 requests a second with no burst, and examples/full to 20 with a
+// burst of 10. Envoy serves 21 of these rows on that route, which a fast runner sends inside one refill of 50 ms, so
+// the row of a ; parameter on a name waits one second first (refill): 10 rows the route serves come before it and 11
+// from it on, each well under the 20 portable's bucket holds. A row added that the catalog route serves keeps both
+// counts under 20, as asWritten's rows send shop's paths for the same bucket.
 var paths = scenario{name: "path normalisation",
 	exchanges: []exchange{
 		{name: "a dot-dot segment", send: get("/catalog/../products/1"), want: answer{status: 200, service: "shop", path: "/products/1"}},
@@ -1292,6 +1798,20 @@ var paths = scenario{name: "path normalisation",
 		{name: "a dot segment with a ; parameter written with a dot", send: get("/products/.;/1"), want: answer{status: 200, service: "shop", path: "/products/1"},
 			by: map[string]own{"nginx": {difference: dotRow, literal: literal{want: answer{status: 400}}},
 				"haproxy": {difference: dotRow, literal: literal{want: answer{status: 400}}}}},
+		// Envoy resolves a dot-dot segment before it merges repeated slashes, so the .. removes the empty segment, where
+		// nginx and HAProxy merge first; nginx answers an empty segment before a dot-dot segment 400, and HAProxy routes
+		// the merged path (pathRow). After the last dot-dot segment an empty segment gives one path all three ways.
+		{name: "an empty segment before a dot-dot one", send: get("/catalog//../products/1"), want: answer{status: 200, service: "catalog", path: "/catalog/products/1"},
+			by: map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}},
+				"haproxy": {difference: pathRow, literal: literal{want: answer{status: 200, service: "shop", path: "/products/1"}}}}},
+		{name: "an escaped slash before a dot-dot segment", send: get("/catalog/%2F../products/1"), want: answer{status: 200, service: "catalog", path: "/catalog/products/1"},
+			by: map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}},
+				"haproxy": {difference: pathRow, literal: literal{want: answer{status: 200, service: "shop", path: "/products/1"}}}}},
+		{name: "an empty segment before a dot-dot one over HTTP/2", send: request{proto: "h2", method: "GET", host: "localhost", path: "/catalog//../products/1"},
+			want: answer{status: 200, service: "catalog", path: "/catalog/products/1"},
+			by: map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}},
+				"haproxy": {difference: pathRow, literal: literal{want: answer{status: 200, service: "shop", path: "/products/1"}}}}},
+		{name: "an empty segment after a dot-dot one", send: get("/products/../catalog//items"), want: answer{status: 200, service: "catalog", path: "/catalog/items"}},
 		{name: "an invalid escape", send: get("/catalog/a%zz"), want: answer{status: 400, unreadable: true},
 			by: map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}}}},
 		{name: "an escaped plus", send: get("/catalog/x%2By"), want: answer{status: 200, service: "catalog", path: "/catalog/x%2By"}},
@@ -1305,6 +1825,11 @@ var paths = scenario{name: "path normalisation",
 		{name: "escaped dots with an escaped ; all in upper case hex", send: get("/catalog/%2E%2E%3B/products/1"), want: answer{status: 400}},
 		{name: "a dot and an escaped dot with an escaped ;", send: get("/catalog/.%2e%3B/products/1"), want: answer{status: 400}},
 		{name: "a dot segment with an escaped ;", send: get("/catalog/items/.%3B/x"), want: answer{status: 400}},
+		// Envoy closes the connection after that 400, at once with the check and after 1 s without it, and answers no
+		// request sent after it, and the refused request's body is read as a body (measured on Envoy 1.40.2).
+		{name: "after the 400 of a dot segment with an escaped ; the connection is closed", send: thenNext("/products/..%3B/1", "allow"),
+			want: answer{refused: true},
+			by:   map[string]own{"haproxy": {difference: dotRow, literal: literal{want: answer{first: 400, status: 200, service: "shop", path: "/products/2"}}}}},
 		{name: "an escaped dot segment with an escaped ;", send: get("/catalog/items/%2e%3b/x"), want: answer{status: 400}},
 		{name: "an escaped ; that carries a value", send: get("/catalog/..%3Bx=1/products/1"), want: answer{status: 400}},
 		{name: "two escaped ;", send: get("/catalog/..%3B%3B/products/1"), want: answer{status: 400}},
@@ -1314,7 +1839,7 @@ var paths = scenario{name: "path normalisation",
 		{name: "an escaped ; between backslashes written as %5C", send: get("/catalog%5C..%3b%5Cproducts%5C1"), want: answer{status: 400}},
 		{name: "an escaped ; before an escaped slash", send: get("/catalog/..%3B%2Fproducts/1"), want: answer{status: 400}},
 		{name: "a ; parameter on an ordinary segment", send: get("/a;v=1/b"), want: answer{status: 200, service: "shop", path: "/a;v=1/b"}},
-		{name: "a ; parameter on a name", send: get("/catalog/readme.txt;x=1"),
+		{name: "a ; parameter on a name", send: get("/catalog/readme.txt;x=1"), refill: time.Second,
 			want: answer{status: 200, service: "catalog", path: "/catalog/readme.txt;x=1"}},
 		{name: "a ; parameter on a name that starts with a dot", send: get("/catalog/.well-known;x/y"),
 			want: answer{status: 200, service: "catalog", path: "/catalog/.well-known;x/y"}},
@@ -1349,16 +1874,18 @@ var paths = scenario{name: "path normalisation",
 // rebuild Envoy's path for them, and so is an empty query, a ? with nothing after it, wherever nginx would rewrite the
 // path and drop the ?; each is declared. An empty query on a path sent as written reaches the service as Envoy sends
 // it. A # in the target is answered 400 by both. The rows send shop's paths, not catalog's: examples/portable limits
-// catalog to 20 requests a second with no burst, and the path normalisation rows just before spend most of that (one
-// run in eleven got 429).
+// catalog to 20 requests a second with no burst, and the path normalisation rows just before spend 11 of those 20
+// after their one-second wait (paths); when these rows sent catalog's paths, one run in eleven got 429.
 var asWritten = scenario{name: "the path as the client wrote it",
 	exchanges: []exchange{
 		{name: "a path with nothing to normalise", send: get("/xab"), want: answer{status: 200, service: "shop", path: "/xab"},
 			on: map[string]literal{"nginx-file": {want: answer{status: 200, service: "accounts", path: "/xab"}},
-				"haproxy-file": {want: answer{status: 200, service: "accounts", path: "/xab"}}}},
+				"haproxy-file": {want: answer{status: 200, service: "accounts", path: "/xab"}},
+				"nginx-auth":   {want: answer{status: 200, service: "accounts", path: "/xab"}}}},
 		{name: "an escaped space is matched as written", send: get("/api/a%20b/admin"), want: answer{status: 200, service: "shop", path: "/api/a%20b/admin"},
 			on: map[string]literal{"nginx-file": {want: answer{status: 200, service: "accounts", path: "/api/a%20b/admin"}},
-				"haproxy-file": {want: answer{status: 200, service: "accounts", path: "/api/a%20b/admin"}}}},
+				"haproxy-file": {want: answer{status: 200, service: "accounts", path: "/api/a%20b/admin"}},
+				"nginx-auth":   {want: answer{status: 200, service: "accounts", path: "/api/a%20b/admin"}}}},
 		{name: "an escaped ; reaches the service as written", send: get("/api/x%3Bv=1/admin"),
 			want: answer{status: 200, service: "shop", path: "/api/x%3Bv=1/admin"}},
 		{name: "an escaped @ is not the character", send: get("/u/%40bob"), want: answer{status: 200, service: "shop", path: "/u/%40bob"}},
@@ -1369,7 +1896,8 @@ var asWritten = scenario{name: "the path as the client wrote it",
 		{name: "a path that needs normalising and keeps no escape", send: get("/api/b/../a%41b/admin"),
 			want: answer{status: 200, service: "shop", path: "/api/aAb/admin"},
 			on: map[string]literal{"nginx-file": {want: answer{status: 200, service: "accounts", path: "/api/aAb/admin"}},
-				"haproxy-file": {want: answer{status: 200, service: "accounts", path: "/api/aAb/admin"}}}},
+				"haproxy-file": {want: answer{status: 200, service: "accounts", path: "/api/aAb/admin"}},
+				"nginx-auth":   {want: answer{status: 200, service: "accounts", path: "/api/aAb/admin"}}}},
 		{name: "a path that needs normalising and keeps an escape", send: get("/api/a%2fb%3bc"),
 			want: answer{status: 200, service: "shop", path: "/api/a/b%3bc"},
 			by:   map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}}}},
@@ -1377,29 +1905,36 @@ var asWritten = scenario{name: "the path as the client wrote it",
 			want: answer{status: 200, service: "shop", path: "/products/a%7Cb%3Bc"},
 			by:   map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}}}},
 		{name: "a byte Envoy escapes", send: get("/products/a|b"), want: answer{status: 200, service: "shop", path: "/products/a%7Cb"},
-			by: map[string]own{"nginx": {difference: "routes[].pattern", files: []string{"nginx-file"}, literal: literal{want: answer{status: 400}}}}},
+			by: map[string]own{"nginx": {difference: "routes[].pattern", files: []string{"nginx-file", "nginx-auth"}, literal: literal{want: answer{status: 400}}}}},
 		{name: "an escape on a route with a rewrite", send: get("/hooks/a%3Bb"), want: answer{status: 200, service: "shop", path: "/hooks/a%3Bb"},
 			on: map[string]literal{"nginx-file": {want: answer{status: 200, service: "accounts", path: "/in/a%3Bb"}},
 				"haproxy-file": {want: answer{status: 200, service: "accounts", path: "/in/a%3Bb"}},
 				"nginx-plain":  {want: answer{status: 200, service: "accounts", path: "/in/a%3Bb"}},
-				"two-checks":   {want: answer{status: 200, service: "accounts", path: "/in/a%3Bb"}}},
+				"two-checks":   {want: answer{status: 200, service: "accounts", path: "/in/a%3Bb"}},
+				"nginx-checks": {want: answer{status: 200, service: "accounts", path: "/in/a%3Bb"}},
+				"nginx-auth":   {want: answer{status: 200, service: "accounts", path: "/in/a%3Bb"}}},
 			by: map[string]own{"nginx": {difference: "routes[].rewrite", literal: literal{want: answer{status: 400}}}}},
 		{name: "a route with a rewrite and a path with nothing to normalise", send: get("/hooks/ab"), want: answer{status: 200, service: "shop", path: "/hooks/ab"},
 			on: map[string]literal{"nginx-file": {want: answer{status: 200, service: "accounts", path: "/in/ab"}},
 				"haproxy-file": {want: answer{status: 200, service: "accounts", path: "/in/ab"}},
 				"nginx-plain":  {want: answer{status: 200, service: "accounts", path: "/in/ab"}},
-				"two-checks":   {want: answer{status: 200, service: "accounts", path: "/in/ab"}}}},
+				"two-checks":   {want: answer{status: 200, service: "accounts", path: "/in/ab"}},
+				"nginx-checks": {want: answer{status: 200, service: "accounts", path: "/in/ab"}},
+				"nginx-auth":   {want: answer{status: 200, service: "accounts", path: "/in/ab"}}}},
 		{name: "an empty query on a route with a rewrite", send: get("/hooks/ab?"), want: answer{status: 200, service: "shop", path: "/hooks/ab?"},
 			on: map[string]literal{"nginx-file": {want: answer{status: 200, service: "accounts", path: "/in/ab?"}},
 				"haproxy-file": {want: answer{status: 200, service: "accounts", path: "/in/ab?"}},
 				"nginx-plain":  {want: answer{status: 200, service: "accounts", path: "/in/ab?"}},
-				"two-checks":   {want: answer{status: 200, service: "accounts", path: "/in/ab?"}}},
+				"two-checks":   {want: answer{status: 200, service: "accounts", path: "/in/ab?"}},
+				"nginx-checks": {want: answer{status: 200, service: "accounts", path: "/in/ab?"}},
+				"nginx-auth":   {want: answer{status: 200, service: "accounts", path: "/in/ab?"}}},
 			by: map[string]own{"nginx": {difference: "routes[].rewrite", literal: literal{want: answer{status: 400}}}}},
 		{name: "an empty query after a byte Envoy escapes", send: get("/products/a|b?"), want: answer{status: 200, service: "shop", path: "/products/a%7Cb?"},
 			by: map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}}}},
 		{name: "an empty query after a path with nothing to normalise", send: get("/xab?"), want: answer{status: 200, service: "shop", path: "/xab?"},
 			on: map[string]literal{"nginx-file": {want: answer{status: 200, service: "accounts", path: "/xab?"}},
-				"haproxy-file": {want: answer{status: 200, service: "accounts", path: "/xab?"}}}},
+				"haproxy-file": {want: answer{status: 200, service: "accounts", path: "/xab?"}},
+				"nginx-auth":   {want: answer{status: 200, service: "accounts", path: "/xab?"}}}},
 		{name: "a # in the path", send: get("/products/a#b"), want: answer{status: 400}},
 		// HAProxy's HTTP/2 parser resets the stream of a :path that holds a # (lineRow).
 		{name: "a # in the path over HTTP 2", send: request{proto: "h2", method: "GET", host: "localhost", path: "/products/a#b"}, want: answer{status: 400},
@@ -1407,7 +1942,7 @@ var asWritten = scenario{name: "the path as the client wrote it",
 		{name: "an escaped NUL in the path is answered 400", send: get("/products/a%00b"), want: answer{status: 400}},
 		{name: "a byte above 0x7F over HTTP 2 reaches the service escaped", send: request{proto: "h2", method: "GET", host: "localhost",
 			path: "/products/\xc3\xa9", raw: true}, want: answer{status: 200, service: "shop", path: "/products/%C3%A9"},
-			by: map[string]own{"nginx": {difference: "routes[].pattern", files: []string{"nginx-file"}, literal: literal{want: answer{status: 400}}}}},
+			by: map[string]own{"nginx": {difference: "routes[].pattern", files: []string{"nginx-file", "nginx-auth"}, literal: literal{want: answer{status: 400}}}}},
 	}}
 
 // offRoute: every value measured on Envoy 1.40.2. Its rows send paths under /public/, which examples/portable routes to
@@ -1438,8 +1973,9 @@ var offRoute = scenario{name: "an auth-off prefix route",
 		{name: "encoded dots leave the route", keys: offKeys, send: deny("/public/%2e%2e/products/1"), want: answer{status: 401}},
 		{name: "a dot-dot segment and an escaped slash leave the route", keys: offKeys, send: deny("/public/..%2fproducts/1"), want: answer{status: 401}},
 		{name: "a dot-dot segment and a backslash written as %5C leave the route", keys: offKeys, send: deny("/public/..%5Cproducts/1"),
-			want: answer{status: 401}},
-		{name: "a dot-dot segment and a backslash leave the route", keys: offKeys, send: deny("/public/..\\products/1"), want: answer{status: 401}},
+			want: answer{status: 401}, by: map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}}}},
+		{name: "a dot-dot segment and a backslash leave the route", keys: offKeys, send: deny("/public/..\\products/1"), want: answer{status: 401},
+			by: map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}}}},
 		{name: "a dot-dot segment leaves the route, and the check is told the path the service receives", keys: toldKeys,
 			send: allowed("/public/../products/1"), want: toldProducts},
 		{name: "encoded dots leave the route, and the check is told the path the service receives", keys: toldKeys,
@@ -1447,9 +1983,9 @@ var offRoute = scenario{name: "an auth-off prefix route",
 		{name: "a dot-dot segment and an escaped slash leave the route, and the check is told the path the service receives", keys: toldKeys,
 			send: allowed("/public/..%2fproducts/1"), want: toldProducts},
 		{name: "a dot-dot segment and a backslash written as %5C leave the route, and the check is told the path the service receives",
-			keys: toldKeys, send: allowed("/public/..%5Cproducts/1"), want: toldProducts},
+			keys: toldKeys, send: allowed("/public/..%5Cproducts/1"), want: toldProducts, by: map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}}}},
 		{name: "a dot-dot segment and a backslash leave the route, and the check is told the path the service receives", keys: toldKeys,
-			send: allowed("/public/..\\products/1"), want: toldProducts},
+			send: allowed("/public/..\\products/1"), want: toldProducts, by: map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}}}},
 		{name: "a dot-dot segment with a written ; leaves the route", keys: offKeys, send: deny("/public/..;/products/1"), want: answer{status: 401}},
 		{name: "a dot segment that keeps a ; parameter", keys: offKeys, send: get("/public/%2e%2e;/products/1"), want: answer{status: 400}},
 		{name: "a dot segment that keeps a ; parameter and a token the check allows", keys: offKeys, send: allowed("/public/%2e%2e;/products/1"),
@@ -1457,6 +1993,15 @@ var offRoute = scenario{name: "an auth-off prefix route",
 		{name: "a dot segment with an escaped ; and no token", keys: offKeys, send: get("/public/..%3B/products/1"), want: answer{status: 400}},
 		{name: "a dot segment with an escaped ; and a token the check allows", keys: offKeys, send: allowed("/public/..%3B/products/1"),
 			want: answer{status: 400}},
+		{name: "a client's own user, question and unchecked mark do not reach the service on the auth-off route", keys: slices.Concat(offKeys, []string{"auth.accept"}),
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/public/readme", forgedMark: true,
+				headers: map[string]string{"x-user-id": "forged", "x-gateway-action": "forged", "x-gateway-reports": "forged"}},
+			want: answer{status: 200, service: "shop", path: "/public/readme", unmarked: true, absent: []string{"x-user-id", "x-gateway-action", "x-gateway-reports"}}},
+		{name: "the auth-off route logs no check time", keys: slices.Concat(offKeys, []string{"log"}),
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/public/readme",
+				headers: map[string]string{"authorization": "Bearer deny-401", "x-stub-status": "404"}},
+			want: answer{status: 404, service: "shop", logged: map[string]map[string]*regexp.Regexp{"request": {"authz_us": logNull}}},
+			on:   map[string]literal{"full": {want: answer{status: 401, logged: map[string]map[string]*regexp.Regexp{"request": {"authz_us": logDigits}}}}}},
 	}}
 
 // offKeys are what every row of the auth-off prefix route depends on: the prefix route with auth = off, and the check

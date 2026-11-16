@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -129,6 +130,7 @@ func runFile(t *testing.T, tg target, f file, config string, lock func(*testing.
 		t.Fatal(err)
 	}
 	w := startWorld(t, tg, mounted, !slices.Contains(written, "tls"), bytes.Contains(source, []byte(holdAddress)))
+	limited := slices.Contains(written, "routes[].rate_limit")
 	// In order and never in parallel, but for the rows that overlap: a scenario's quiet and burst count on nothing else
 	// reaching the proxy.
 	for _, s := range scenarios {
@@ -151,8 +153,8 @@ func runFile(t *testing.T, tg target, f file, config string, lock func(*testing.
 				if !e.overlap {
 					continue
 				}
-				if e.refusing != "" || e.flood != nil || e.holds != nil || e.repeat > 0 {
-					panic(fmt.Sprintf("exchange %q overlaps the rows in sequence with a refused backend, a flood, holds or a repeat", e.name))
+				if e.refusing != "" || e.flood != nil || e.holds != nil || e.repeat > 0 || e.streams > 0 || e.refill > 0 {
+					panic(fmt.Sprintf("exchange %q overlaps the rows in sequence with a refused backend, a flood, holds, a repeat, streams or a refill", e.name))
 				}
 				t.Run(e.name, func(t *testing.T) {
 					apart, closeIdle := w.apart()
@@ -172,6 +174,9 @@ func runFile(t *testing.T, tg target, f file, config string, lock func(*testing.
 					continue
 				}
 				t.Run(e.name, func(t *testing.T) {
+					if limited {
+						time.Sleep(e.refill)
+					}
 					if e.refusing != "" {
 						for _, role := range strings.Split(e.refusing, ",") {
 							w.refuse(t, role)
@@ -184,6 +189,8 @@ func runFile(t *testing.T, tg target, f file, config string, lock func(*testing.
 						differences = sendFlood(w, e, l, t.Logf)
 					case e.holds != nil:
 						differences = sendHolds(w, e, l, t.Logf)
+					case e.streams > 0:
+						differences = sendStreams(w, e, l)
 					default:
 						differences = sendRepeated(w, e, l)
 					}
@@ -210,8 +217,20 @@ func sendRepeated(w *world, e exchange, l literal) []string {
 	var differences, last []string
 	matched := false
 	start := time.Now()
+	// A row that wants no line of an event waits for the request log's line, written with it (logLines).
+	var wait []string
+	for event, fields := range l.want.logged {
+		if fields != nil {
+			wait = append(wait, event)
+		} else if l.want.logged["request"] == nil {
+			panic(fmt.Sprintf("exchange %q wants no %s line and no request log line, so it cannot tell when the proxy has written its lines", e.name, event))
+		}
+	}
 	for i := 1; i <= count; i++ {
 		got := w.send(e.send)
+		if l.want.logged != nil {
+			got.logs = w.logLines(got.header.Get("x-request-id"), wait)
+		}
 		switch {
 		case i <= l.admitted && got.err != nil:
 			differences = append(differences, fmt.Sprintf("answer %d: error: %v", i, got.err))
@@ -231,6 +250,57 @@ func sendRepeated(w *world, e exchange, l literal) []string {
 		differences = append(differences, fmt.Sprintf("the %d requests took %s", count, time.Since(start).Round(time.Millisecond)))
 	}
 	return differences
+}
+
+// sendStreams sends e's request e.streams times at once over HTTP/2, request i with i=<i> as its query, on a client of
+// its own whose one connection the same request with i=0 opens first: Go's HTTP/2 client sends the requests to one host
+// on one connection while the proxy's limit of streams allows, 128 on nginx and more on Envoy. It returns the first three
+// answers that differ from l.want with i in place of each {i} in its received values, with how many did, so each stream
+// must be answered by its own check, whose x-user-check reports the path it was told.
+func sendStreams(w *world, e exchange, l literal) []string {
+	if l.admitted > 0 || e.repeat > 0 || e.send.raw || e.send.proto != "h2" || strings.Contains(e.send.path, "?") {
+		// Streams are sent as they are, over h2 through net/http, to a path with no query; anything else is a mistake in
+		// the scenario data.
+		panic(fmt.Sprintf("exchange %q sends streams with a repeat, an admitted count, a raw request, a query or %q", e.name, e.send.proto))
+	}
+	transport := w.http2.Transport.(*http.Transport).Clone()
+	client := &http.Client{Transport: transport, Timeout: w.http2.Timeout}
+	defer transport.CloseIdleConnections()
+	send := func(i int) []string {
+		want := l.want
+		want.received = map[string]string{}
+		for name, value := range l.want.received {
+			want.received[name] = strings.ReplaceAll(value, "{i}", strconv.Itoa(i))
+		}
+		r := e.send
+		r.path += "?i=" + strconv.Itoa(i)
+		return compare(want, w.sendOn(client, r), w.mark)
+	}
+	if differences := send(0); differences != nil {
+		return append([]string{"the request that opens the connection:"}, differences...)
+	}
+	var (
+		mu        sync.Mutex
+		different []string
+		count     int
+		wg        sync.WaitGroup
+	)
+	for i := 1; i <= e.streams; i++ {
+		wg.Go(func() {
+			if differences := send(i); differences != nil {
+				mu.Lock()
+				if count++; count <= 3 {
+					different = append(different, fmt.Sprintf("answer %d: %s", i, strings.Join(differences, "; ")))
+				}
+				mu.Unlock()
+			}
+		})
+	}
+	wg.Wait()
+	if count > 0 {
+		different = append(different, fmt.Sprintf("%d of the %d answers differ", count, e.streams))
+	}
+	return different
 }
 
 // sendFlood sends e's flood and returns each way it differs from l: the first three answers that differ from l.want,

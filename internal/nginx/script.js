@@ -35,7 +35,7 @@ var once = {"x-forwarded-for": 1, "x-forwarded-proto": 1, "x-request-id": 1, "co
 function headerNames(r) {
     var raw = r.rawHeadersIn;
     var h2 = r.httpVersion == "2.0";
-    var fields = raw.length + 4;
+    var fields = fieldCount(r) + 4;
     var seen = {};
     for (var i = 0; i < raw.length; i++) {
         var name = raw[i][0];
@@ -53,14 +53,23 @@ function headerNames(r) {
         if (name.indexOf("_") >= 0 && read[low.replace(/_/g, "-")] === 1) {
             return "1";
         }
-        if (h2 && low == "cookie") {
-            fields += raw[i][1].split("; ").length - 1;
-        }
     }
     if (h2 && fields > Number(r.variables.pf_header_count)) {
         return "1";
     }
     return "0";
+}
+
+// fieldCount is the number of the client's fields as Envoy counts them, its pseudo-headers aside: each header line,
+// and over HTTP/2 each cookie field apart, which nginx joins into one cookie line with "; ".
+function fieldCount(r) {
+    var raw = r.rawHeadersIn, fields = raw.length;
+    for (var i = 0; i < raw.length; i++) {
+        if (r.httpVersion == "2.0" && raw[i][0].toLowerCase() == "cookie") {
+            fields += raw[i][1].split("; ").length - 1;
+        }
+    }
+    return fields;
 }
 
 // asEnvoyReads is a header's value as Envoy reads it: over HTTP/1 without the spaces and tabs around it, as Envoy's
@@ -115,4 +124,1073 @@ function origin(r) {
     return "o" + values.join(",");
 }
 
-export default {headerNames, forwardedProto, origin};
+// The auth check (auth.ask). check, the access handler of every location a checked route writes, asks with a
+// subrequest to checkLocation, which nginx.conf proxies to a stream server whose filter is relay. The relay writes the
+// question to the check from the head nginx sends it, reads the answer of the check, and answers nginx with an answer of
+// its own whose parts are framed by lengths the relay writes (frame): nginx parses no byte the check wrote, and no byte
+// the check can send ends or splits a part. Both read over Buffers, and no value a client or the check wrote passes
+// through a JavaScript string on its way to the check, the service or the client: a string holds each byte that is not
+// UTF-8 as U+FFFD, where r.headersOut, r.variables and r.send take a Buffer and send its bytes as they are (measured on
+// nginx 1.30.6 and 1.31.8). A name is compared byte for byte, A to Z read as a to z. framing, hop, grpcStatus,
+// checkLocation, methodHeader, pathHeader and answerHeader are written above from the generator (script.go).
+
+// The bounds of an answer of the check. Envoy 1.40.2 reads 81,920 bytes of a head, from the status line to the empty
+// line with each line end counted and a bare LF as two, each 1xx head on its own, as many of a trailer section, and 100
+// header lines, a folded line not counted (measured to the byte). 1 MiB of a body, and 1,024 bytes of a chunk-size line
+// with its line end, are bounds of nginx alone, stricter than Envoy's.
+var mostHead = 81920, mostLines = 100, mostBody = 1048576, mostSizeLine = 1024;
+
+// delimiters are the printable bytes RFC 9110 keeps out of a token.
+var delimiters = "\"(),/:;<=>?@[\\]{}";
+
+// isToken is true when the bytes of b from from to to are one or more of RFC 9110's token characters.
+function isToken(b, from, to) {
+    if (to <= from) {
+        return false;
+    }
+    for (var i = from; i < to; i++) {
+        var c = b[i];
+        if (c <= 0x20 || c >= 0x7F || delimiters.indexOf(String.fromCharCode(c)) >= 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// badValue is true when the bytes of b from from to to hold a control byte other than a tab, or DEL.
+function badValue(b, from, to) {
+    for (var i = from; i < to; i++) {
+        var c = b[i];
+        if ((c < 0x20 && c != 0x09) || c == 0x7F) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// trim is [from, to] without the spaces and tabs at either end of the bytes of b between them.
+function trim(b, from, to) {
+    while (from < to && (b[from] == 0x20 || b[from] == 0x09)) {
+        from++;
+    }
+    while (to > from && (b[to - 1] == 0x20 || b[to - 1] == 0x09)) {
+        to--;
+    }
+    return [from, to];
+}
+
+// same is true when b holds the bytes of text from from on, compared byte for byte.
+function same(b, from, text) {
+    if (from + text.length > b.length) {
+        return false;
+    }
+    for (var i = 0; i < text.length; i++) {
+        if (b[from + i] != text.charCodeAt(i)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// is is true when the bytes of b from from to to are name, which is in lower case, compared byte for byte with A to Z
+// read as a to z.
+function is(b, from, to, name) {
+    if (to - from != name.length) {
+        return false;
+    }
+    for (var i = 0; i < name.length; i++) {
+        var c = b[from + i];
+        if (c >= 0x41 && c <= 0x5A) {
+            c += 0x20;
+        }
+        if (c != name.charCodeAt(i)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// listed is true when the bytes of b from from to to are one of names, as is compares them.
+function listed(b, from, to, names) {
+    for (var i = 0; i < names.length; i++) {
+        if (is(b, from, to, names[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// covered is true when one of entries covers the name in the bytes of b from from to to, as the file reads auth.send:
+// the same name, or a prefix written with * at its end that the name starts with.
+function covered(b, from, to, entries) {
+    for (var i = 0; i < entries.length; i++) {
+        var entry = entries[i];
+        if (entry.charAt(entry.length - 1) != "*") {
+            if (is(b, from, to, entry)) {
+                return true;
+            }
+        } else if (to - from >= entry.length - 1 && is(b, from, from + entry.length - 1, entry.slice(0, -1))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// lower is a new Buffer of the bytes of b from from to to, with A to Z written a to z.
+function lower(b, from, to) {
+    var out = Buffer.alloc(to - from);
+    for (var i = from; i < to; i++) {
+        var c = b[i];
+        out[i - from] = c >= 0x41 && c <= 0x5A ? c + 0x20 : c;
+    }
+    return out;
+}
+
+// indexOfName is the place in names, a list of Buffers, of the one that holds the bytes of name, or -1.
+function indexOfName(names, name) {
+    for (var i = 0; i < names.length; i++) {
+        if (names[i].equals(name)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// plain is true when b holds one byte or more, each printable ASCII other than a space, as a request line part is,
+// or with high a byte of 0x80 or more too: Envoy sends the check the ask path as written in the file, its characters
+// outside ASCII as their UTF-8 bytes (measured on Envoy 1.40.2 with ask: checks /auth/é/ü?x=ß).
+function plain(b, high) {
+    if (b.length == 0) {
+        return false;
+    }
+    for (var i = 0; i < b.length; i++) {
+        if (b[i] <= 0x20 || b[i] == 0x7F || (b[i] > 0x7F && !high)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// utf8 is the length of the well-formed UTF-8 sequence of 2 to 4 bytes that starts at b[i], as RFC 3629 writes one (no
+// overlong form, no surrogate, nothing above U+10FFFF), or 0 when none starts there.
+function utf8(b, i) {
+    var c = b[i], n = 0, low = 0x80, high = 0xBF;
+    if (c >= 0xC2 && c <= 0xDF) {
+        n = 2;
+    } else if (c >= 0xE0 && c <= 0xEF) {
+        n = 3;
+        low = c == 0xE0 ? 0xA0 : 0x80;
+        high = c == 0xED ? 0x9F : 0xBF;
+    } else if (c >= 0xF0 && c <= 0xF4) {
+        n = 4;
+        low = c == 0xF0 ? 0x90 : 0x80;
+        high = c == 0xF4 ? 0x8F : 0xBF;
+    }
+    if (n == 0 || i + n > b.length || b[i + 1] < low || b[i + 1] > high) {
+        return 0;
+    }
+    for (var k = 2; k < n; k++) {
+        if (b[i + k] < 0x80 || b[i + k] > 0xBF) {
+            return 0;
+        }
+    }
+    return n;
+}
+
+// asEnvoySends is a new Buffer of value as Envoy writes a header it sends its check: each well-formed UTF-8 sequence as
+// it is, and ! (0x21) for every other byte of 0x80 or more, one for each byte (measured on Envoy 1.40.2: caf\xc3\xa9
+// reached the check as sent, \xc3\xa9\xe9z as \xc3\xa9!z, and a truncated, overlong or surrogate sequence, or one past
+// U+10FFFF, as a ! for each of its bytes).
+function asEnvoySends(value) {
+    var out = Buffer.alloc(value.length);
+    for (var i = 0; i < value.length;) {
+        var n = value[i] < 0x80 ? 1 : utf8(value, i);
+        if (n == 0) {
+            out[i++] = 0x21;
+            continue;
+        }
+        for (var k = 0; k < n; k++, i++) {
+            out[i] = value[i];
+        }
+    }
+    return out;
+}
+
+var hexDigits = "0123456789ABCDEF";
+
+// asEnvoyTells is a new Buffer of the path the check is told in $pf_check_uri, as Envoy tells it: each byte of 0x80
+// or more before the query as % and two hexadecimal digits in capitals, as the service receives the path, and the
+// query as the client wrote it (measured on Envoy 1.40.2 over HTTP/2: /products/caf\xc3\xa9\xe9 was told as
+// /products/caf%C3%A9%E9, and ?q=caf\xe9 as written). Over HTTP/1.1 nginx, as Envoy, answers such a byte 400 itself.
+function asEnvoyTells(value) {
+    var parts = [], from = 0;
+    for (var i = 0; i < value.length && value[i] != 0x3F; i++) {
+        if (value[i] >= 0x80) {
+            parts.push(value.subarray(from, i), Buffer.from("%" + hexDigits.charAt(value[i] >> 4) +
+                hexDigits.charAt(value[i] & 15)));
+            from = i + 1;
+        }
+    }
+    parts.push(value.subarray(from));
+    return Buffer.concat(parts);
+}
+
+// words is the entries of a list the configuration writes with one space between them.
+function words(text) {
+    var out = [], all = (text || "").split(" ");
+    for (var i = 0; i < all.length; i++) {
+        if (all[i] != "") {
+            out.push(all[i]);
+        }
+    }
+    return out;
+}
+
+// millis is auth.timeout in milliseconds as the configuration writes it ($pf_check_ms), and throws unless it is whole
+// digits: setTimeout reads a deadline it cannot read as 0, which would find every check unanswered at once, and allow
+// passes an unanswered check.
+function millis(text) {
+    if (!/^[1-9][0-9]*$/.test(text || "")) {
+        throw "unreadable";
+    }
+    return Number(text);
+}
+
+// question is the request the relay sends the check, read from the head nginx sends the relay up to its empty line, as
+// the Envoy output asks its check: the client's method (methodHeader) and the path of auth.ask (pathHeader) on the
+// request line; host, the authority nginx routed the request by, which the check location sets; each header that
+// $pf_check_send covers and that is not a framing header, each name once in lower case with the values of its lines
+// joined by a comma; then content-length 0 and connection close. Each value is written as Envoy sends it
+// (asEnvoySends), and the path the check is told with send_request ($pf_check_uri names its header) as Envoy tells it
+// (asEnvoyTells). nginx ends each line with CR LF and sends one host and one of each of the two names; any other head
+// throws. head is true for a HEAD, whose answer has no body.
+function question(s, head) {
+    var send = words(s.variables.pf_check_send), told = s.variables.pf_check_uri || "";
+    var method = null, path = null, host = null, names = [], values = [];
+    var p = head.indexOf(10) + 1;
+    if (p <= 0) {
+        throw "unreadable";
+    }
+    for (;;) {
+        var end = head.indexOf(10, p);
+        if (end <= p || head[end - 1] != 13) {
+            throw "unreadable";
+        }
+        if (end - 1 == p) {
+            break;
+        }
+        var colon = head.indexOf(0x3A, p);
+        if (colon < 0 || colon > end - 1 || !isToken(head, p, colon)) {
+            throw "unreadable";
+        }
+        var v = trim(head, colon + 1, end - 1);
+        var value = head.subarray(v[0], v[1]);
+        if (is(head, p, colon, methodHeader)) {
+            if (method !== null) {
+                throw "unreadable";
+            }
+            method = value;
+        } else if (is(head, p, colon, pathHeader)) {
+            if (path !== null) {
+                throw "unreadable";
+            }
+            path = value;
+        } else if (is(head, p, colon, "host")) {
+            if (host !== null) {
+                throw "unreadable";
+            }
+            host = value;
+        } else if (!listed(head, p, colon, framing) && covered(head, p, colon, send)) {
+            var name = lower(head, p, colon);
+            var n = indexOfName(names, name);
+            if (n < 0) {
+                names.push(name);
+                values.push([value]);
+            } else {
+                values[n].push(value);
+            }
+        }
+        p = end + 1;
+    }
+    if (method === null || path === null || host === null || !plain(method) || !plain(path, true)) {
+        throw "unreadable";
+    }
+    var parts = [method, Buffer.from(" "), path, Buffer.from(" HTTP/1.1\r\nhost: "), asEnvoySends(host),
+        Buffer.from("\r\n")];
+    for (var i = 0; i < names.length; i++) {
+        var write = told && is(names[i], 0, names[i].length, told) ? asEnvoyTells : asEnvoySends;
+        parts.push(names[i], Buffer.from(": "));
+        for (var j = 0; j < values[i].length; j++) {
+            if (j > 0) {
+                parts.push(Buffer.from(","));
+            }
+            parts.push(write(values[i][j]));
+        }
+        parts.push(Buffer.from("\r\n"));
+    }
+    parts.push(Buffer.from("content-length: 0\r\nconnection: close\r\n\r\n"));
+    return {bytes: Buffer.concat(parts), head: method.equals(Buffer.from("HEAD"))};
+}
+
+// answer is what the relay answers nginx: 200, answerHeader with the verdict (answered, unanswered or unreadable), and
+// for answered the answer of the check, framed (frame).
+function answer(verdict, framed) {
+    var body = framed || Buffer.alloc(0);
+    return Buffer.concat([Buffer.from("HTTP/1.1 200 OK\r\n" + answerHeader + ": " + verdict + "\r\ncontent-length: " +
+        body.length + "\r\n\r\n"), body]);
+}
+
+// frame is the answer of the check as the relay hands it to check, each part after its length in decimal digits and a
+// space: the status, a space and the count of header lines kept, a space; for each line the length of its name, a
+// space, the name, the length of its value, a space and the value; and last the length of the body, a space and the
+// body.
+function frame(status, headers, body) {
+    var parts = [Buffer.from(status + " " + headers.length + " ")];
+    for (var i = 0; i < headers.length; i++) {
+        parts.push(Buffer.from(headers[i][0].length + " "), headers[i][0], Buffer.from(headers[i][1].length + " "),
+            headers[i][1]);
+    }
+    parts.push(Buffer.from(body.length + " "), body);
+    return Buffer.concat(parts);
+}
+
+// relay is the filter of the stream server between nginx and the check. Toward the check it writes the question
+// (question) and drops the request nginx sent; toward nginx it reads the answer of the check strictly and answers once
+// (decide): answered for an answer read whole, with its status, the header lines it keeps (every one but hop) and, for
+// a denial, its body; unanswered for each class Envoy reads as a check that did not answer (nothing before the
+// deadline, a close before the answer is whole, a status of 500 or more, decided at the status line, a 101st header
+// line when no name came on two lines, an answer whole only after the deadline), which goes on with the mark under
+// allow; and unreadable for every other answer, which both modes refuse: a 101, a status outside 100 to 599, a line
+// that is not RFC 9112's, framing that is not one Content-Length of digits or one Transfer-Encoding chunked, a line
+// past a bound, and a 101st header line when a name came on two lines. Each other 1xx head is read and dropped. The
+// body of a 200 is read and dropped, never held. After its answer the relay keeps its handlers and drops every later
+// byte: removing the downstream handler let the later bytes of the check through to nginx (measured: 38,527 and 39,196
+// warnings of nginx 1.30.6 and 1.31.8, upstream sent more data than specified in Content-Length).
+function relay(s) {
+    var started = Date.now();
+    var up = Buffer.alloc(0), asked = false, headRequest = false, decided = false;
+    var buf = Buffer.alloc(0), pos = 0, state = "head", head = 0, lines = 0, names = [], repeated = false;
+    var status = 0, headers = [], body = [], bodyLength = 0, left = 0, trailer = 0;
+
+    // decide sends nginx the answer of the relay once. It counts the answer as written only once it is sent, so the
+    // catch of a handler whose answer failed to build or to send still writes unreadable.
+    function decide(verdict, framed) {
+        if (decided) {
+            return;
+        }
+        s.sendDownstream(answer(verdict, framed), {last: true});
+        decided = true;
+    }
+
+    // line is the next line of the answer from pos, [from, to, length, bare], to before the CR that ends it, length
+    // counting the line end as two bytes, and bare true when the line ends in a bare LF; or null when no LF has come
+    // yet. A line in a bare LF so counts a byte more than Envoy 1.40.2 counts it: a head of exactly 81,920 bytes with
+    // one is unreadable, where Envoy reads it (measured on nginx 1.30.6 and 1.31.8; the auth.ask note names it). A CR
+    // inside a line throws, where Envoy 1.40.2 reads one.
+    function line() {
+        var end = buf.indexOf(10, pos);
+        if (end < 0) {
+            return null;
+        }
+        var from = pos, to = end, length = end - pos + 1, bare = false;
+        pos = end + 1;
+        if (to > from && buf[to - 1] == 13) {
+            to--;
+        } else {
+            length++;
+            bare = true;
+        }
+        if (buf.subarray(from, to).indexOf(13) >= 0) {
+            throw "unreadable";
+        }
+        return [from, to, length, bare];
+    }
+
+    // digits is the number the bytes of b write in decimal, at most mostBody + 1, or -1 when they are not one or more
+    // digits.
+    function digits(b) {
+        if (b.length == 0) {
+            return -1;
+        }
+        var n = 0;
+        for (var i = 0; i < b.length; i++) {
+            if (b[i] < 0x30 || b[i] > 0x39) {
+                return -1;
+            }
+            n = Math.min(n * 10 + b[i] - 0x30, mostBody + 1);
+        }
+        return n;
+    }
+
+    // statusLine reads the status line between from and to: HTTP/1.0 or HTTP/1.1, one space, three digits, and a
+    // reason after one space or none.
+    function statusLine(from, to) {
+        if (to - from < 12 || !same(buf, from, "HTTP/1.") || (buf[from + 7] != 0x30 && buf[from + 7] != 0x31) ||
+            buf[from + 8] != 0x20) {
+            throw "unreadable";
+        }
+        for (var i = from + 9; i < from + 12; i++) {
+            if (buf[i] < 0x30 || buf[i] > 0x39) {
+                throw "unreadable";
+            }
+        }
+        if (to > from + 12 && (buf[from + 12] != 0x20 || badValue(buf, from + 13, to))) {
+            throw "unreadable";
+        }
+        status = (buf[from + 9] - 0x30) * 100 + (buf[from + 10] - 0x30) * 10 + buf[from + 11] - 0x30;
+        if (status < 100 || status > 599) {
+            throw "unreadable";
+        }
+    }
+
+    // endHead reads the head that just ended: another head after a 1xx, or the body its framing says.
+    function endHead() {
+        if (status < 200) {
+            if (status == 101) {
+                throw "unreadable";
+            }
+            state = "head";
+            head = 0;
+            lines = 0;
+            names = [];
+            repeated = false;
+            status = 0;
+            headers = [];
+            return;
+        }
+        var length = 0, lengths = 0, encodings = 0;
+        for (var i = 0; i < headers.length; i++) {
+            var name = headers[i][0], value = headers[i][1];
+            if (is(name, 0, name.length, "content-length")) {
+                lengths++;
+                length = digits(value);
+                if (length < 0) {
+                    throw "unreadable";
+                }
+            } else if (is(name, 0, name.length, "transfer-encoding")) {
+                encodings++;
+                if (!is(value, 0, value.length, "chunked")) {
+                    throw "unreadable";
+                }
+            }
+        }
+        if (lengths > 1 || encodings > 1 || (lengths && encodings)) {
+            throw "unreadable";
+        }
+        var kept = [];
+        for (var k = 0; k < headers.length; k++) {
+            if (!listed(headers[k][0], 0, headers[k][0].length, hop)) {
+                kept.push(headers[k]);
+            }
+        }
+        headers = kept;
+        if (status == 204 || status == 304 || headRequest) {
+            state = "done";
+        } else if (encodings) {
+            state = "size";
+        } else if (lengths) {
+            if (length > mostBody) {
+                throw "unreadable";
+            }
+            left = length;
+            state = left ? "data" : "done";
+        } else {
+            state = "close";
+        }
+    }
+
+    // keep reads the bytes of the body between from and to, and holds them for a denial alone.
+    function keep(from, to) {
+        if (status != 200) {
+            body.push(Buffer.from(buf.subarray(from, to)));
+        }
+        bodyLength += to - from;
+    }
+
+    // advance reads as much of the answer as has come.
+    function advance() {
+        for (;;) {
+            if (state == "head" || state == "trailer") {
+                var l = line();
+                if (l === null) {
+                    if ((state == "head" ? head : trailer) + (buf.length - pos) > mostHead) {
+                        throw "unreadable";
+                    }
+                    return;
+                }
+                var from = l[0], to = l[1];
+                if (state == "trailer") {
+                    trailer += l[2];
+                    if (trailer > mostHead) {
+                        throw "unreadable";
+                    }
+                    if (to == from) {
+                        state = "done";
+                        continue;
+                    }
+                    var tc = buf.indexOf(0x3A, from);
+                    if (tc < 0 || tc >= to || !isToken(buf, from, tc) || badValue(buf, tc + 1, to)) {
+                        throw "unreadable";
+                    }
+                    continue;
+                }
+                head += l[2];
+                if (head > mostHead) {
+                    throw "unreadable";
+                }
+                if (status == 0) {
+                    statusLine(from, to);
+                    if (status >= 500) {
+                        decide("unanswered");
+                        return;
+                    }
+                    continue;
+                }
+                if (to == from) {
+                    endHead();
+                    continue;
+                }
+                if (buf[from] == 0x20 || buf[from] == 0x09) {
+                    // A folded line goes on the value before it with all its spaces and tabs, and those the line
+                    // before ended in, its line end dropped, as Envoy 1.40.2 joins one (a CR LF tab b reaches the
+                    // service as a tab b, a space CR LF space b as a, two spaces and b); the value's own ends are
+                    // trimmed. It is not counted as a line.
+                    if (!headers.length || badValue(buf, from, to)) {
+                        throw "unreadable";
+                    }
+                    var last = headers[headers.length - 1];
+                    var joined = Buffer.concat([last[1], last[2], buf.subarray(from, to)]), m = trim(joined, 0, joined.length);
+                    last[1] = Buffer.from(joined.subarray(m[0], m[1]));
+                    last[2] = Buffer.from(joined.subarray(m[1]));
+                    continue;
+                }
+                var colon = buf.indexOf(0x3A, from);
+                if (colon < 0 || colon >= to || !isToken(buf, from, colon)) {
+                    throw "unreadable";
+                }
+                var v = trim(buf, colon + 1, to);
+                if (badValue(buf, v[0], v[1])) {
+                    throw "unreadable";
+                }
+                // Envoy reads at most 100 header lines in a head, a folded line not counted, and treats one with more
+                // as unanswered. It counts the entries of its header map, in which a name it keeps inline, such as
+                // date, via or cache-control, takes one entry however many lines carry it, and set-cookie an entry a
+                // line (measured on Envoy 1.40.2): with a name on two lines Envoy may read the answer, so a line past
+                // the 100th is then unreadable, as HAProxy's script reads it. The line's own name is tested before the
+                // line is counted, so a 101st line that repeats a name is unreadable too.
+                var name = lower(buf, from, colon);
+                if (indexOfName(names, name) >= 0) {
+                    repeated = true;
+                } else {
+                    names.push(name);
+                }
+                lines++;
+                if (lines > mostLines) {
+                    if (repeated) {
+                        throw "unreadable";
+                    }
+                    decide("unanswered");
+                    return;
+                }
+                // The spaces and tabs the value ends in are kept beside it for a folded line that may follow.
+                headers.push([name, Buffer.from(buf.subarray(v[0], v[1])), Buffer.from(buf.subarray(v[1], to))]);
+                continue;
+            }
+            if (state == "size") {
+                var sl = line();
+                if (sl === null) {
+                    if (buf.length - pos >= mostSizeLine) {
+                        throw "unreadable";
+                    }
+                    return;
+                }
+                // Envoy 1.40.2 reads a bare LF at the end of every other line of an answer, and none at the end of a
+                // chunk-size line, the last chunk's included (measured).
+                var semi = buf.indexOf(0x3B, sl[0]);
+                var end = semi < 0 || semi >= sl[1] ? sl[1] : semi;
+                if (sl[3] || sl[2] > mostSizeLine || end == sl[0] || end - sl[0] > 8 || badValue(buf, end, sl[1])) {
+                    throw "unreadable";
+                }
+                left = 0;
+                for (var i = sl[0]; i < end; i++) {
+                    var c = buf[i], d = c >= 0x30 && c <= 0x39 ? c - 0x30 : c >= 0x41 && c <= 0x46 ? c - 0x37 :
+                        c >= 0x61 && c <= 0x66 ? c - 0x57 : -1;
+                    if (d < 0) {
+                        throw "unreadable";
+                    }
+                    left = left * 16 + d;
+                }
+                if (left == 0) {
+                    state = "trailer";
+                    continue;
+                }
+                if (bodyLength + left > mostBody) {
+                    throw "unreadable";
+                }
+                state = "chunk";
+                continue;
+            }
+            if (state == "chunk" || state == "data") {
+                var have = buf.length - pos;
+                if (!have) {
+                    return;
+                }
+                var take = Math.min(have, left);
+                keep(pos, pos + take);
+                pos += take;
+                left -= take;
+                if (left) {
+                    return;
+                }
+                state = state == "chunk" ? "crlf" : "done";
+                continue;
+            }
+            if (state == "crlf") {
+                var cl = line();
+                if (cl === null) {
+                    if (buf.length - pos > 2) {
+                        throw "unreadable";
+                    }
+                    return;
+                }
+                if (cl[1] != cl[0]) {
+                    throw "unreadable";
+                }
+                state = "size";
+                continue;
+            }
+            if (state == "close") {
+                var rest = buf.length - pos;
+                if (bodyLength + rest > mostBody) {
+                    throw "unreadable";
+                }
+                keep(pos, buf.length);
+                pos = buf.length;
+                return;
+            }
+            if (state == "done") {
+                decide("answered", frame(status, headers, Buffer.concat(body)));
+                return;
+            }
+            throw "unreadable";
+        }
+    }
+
+    s.on("upstream", function (data, flags) {
+        try {
+            if (asked || decided) {
+                return;
+            }
+            up = Buffer.concat([up, data]);
+            var end = up.indexOf("\r\n\r\n");
+            if (end < 0) {
+                return;
+            }
+            asked = true;
+            var q = question(s, up.subarray(0, end + 4));
+            headRequest = q.head;
+            s.sendUpstream(q.bytes);
+        } catch (e) {
+            decide("unreadable");
+        }
+    });
+    s.on("downstream", function (data, flags) {
+        try {
+            if (decided) {
+                return;
+            }
+            // The deadline is read here, against the start of the session, on each piece of the answer, and the
+            // server's proxy_timeout, auth.timeout, ends a check that sends nothing. The relay sets no timer: njs 1.0.2
+            // logs a stream-filter timer still waiting when the session ends, at error level, for every check, and
+            // clearTimeout does not prevent it (measured on nginx 1.30.6 and 1.31.8).
+            if (Date.now() - started >= millis(s.variables.pf_check_ms)) {
+                decide("unanswered");
+                return;
+            }
+            buf = pos ? Buffer.concat([buf.subarray(pos), data]) : Buffer.concat([buf, data]);
+            pos = 0;
+            advance();
+            if (flags.last && !decided) {
+                // The check closed: a body read to the close is whole, and any other answer is not.
+                if (state == "close") {
+                    decide("answered", frame(status, headers, Buffer.concat(body)));
+                } else {
+                    decide("unanswered");
+                }
+            }
+        } catch (e) {
+            decide("unreadable");
+        }
+    });
+}
+
+// asked is true when the check is asked: always without only_with_header ($pf_only_with empty), and otherwise when a
+// line of that header holds a byte as nginx passes it on, over HTTP/1.1 a tab that Envoy reads as empty included, or
+// the header comes on two lines or more. It asks for a few forms Envoy does not, and leaves unasked none that Envoy
+// asks (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2, over HTTP/1.1 and HTTP/2). A name reaches it as token
+// characters alone, as headerNames refuses any other before a route.
+function asked(r) {
+    var name = r.variables.pf_only_with;
+    if (!name) {
+        return true;
+    }
+    var count = 0, full = false, raw = r.rawHeadersIn;
+    for (var i = 0; i < raw.length; i++) {
+        if (raw[i][0].toLowerCase() == name) {
+            count++;
+            if (raw[i][1].length) {
+                full = true;
+            }
+        }
+    }
+    return full || count > 1;
+}
+
+// relayVerdict is what the relay answered check: answered, unanswered or unreadable. reply is null at the deadline, an
+// unanswered check. A subrequest the relay did not answer 200 is unanswered only when nginx reached the relay and the
+// relay wrote no byte, as when the check refused its connection or sent nothing before proxy_timeout, which
+// $pf_check_failed holds as b=0 with a connect time. A connection to the relay that nginx never made holds the connect
+// time "-": under a burst the relay's listen queue filled and the connect failed at once (11: Resource temporarily
+// unavailable), so a healthy check was never asked, and allow served the request with the mark (measured on nginx
+// 1.30.6 and 1.31.8). That is a failure of nginx's own parts, which both modes refuse, as any other answer is.
+function relayVerdict(r, reply) {
+    if (reply === null) {
+        return "unanswered";
+    }
+    if (reply.status != 200) {
+        return /^s=50[24] b=0 c=[0-9]+\.[0-9]+ $/.test(r.variables.pf_check_failed || "") ? "unanswered" : "unreadable";
+    }
+    var verdict = reply.headersOut[answerHeader];
+    var body = reply.responseBuffer;
+    if (verdict == "answered" || (verdict == "unanswered" && (!body || body.length == 0))) {
+        return verdict;
+    }
+    return "unreadable";
+}
+
+// unframe reads the answer of the check as frame writes it, each part by its length alone: {status, headers, body},
+// where each header is [name, value]. It throws when a length is not digits followed by a space, a part does not fit,
+// a name is not token characters, the status is not one the relay answers, or the lengths do not add up to the size.
+function unframe(b) {
+    if (!b) {
+        throw "unreadable";
+    }
+    var at = 0;
+    function number() {
+        var from = at, n = 0;
+        while (at < b.length && at - from < 7 && b[at] >= 0x30 && b[at] <= 0x39) {
+            n = n * 10 + b[at] - 0x30;
+            at++;
+        }
+        if (at == from || at >= b.length || b[at] != 0x20) {
+            throw "unreadable";
+        }
+        at++;
+        return n;
+    }
+    function bytes(n) {
+        if (n > b.length - at) {
+            throw "unreadable";
+        }
+        at += n;
+        return b.subarray(at - n, at);
+    }
+    var status = number();
+    var count = number();
+    if (status < 200 || status > 499 || count > mostLines) {
+        throw "unreadable";
+    }
+    var headers = [];
+    for (var i = 0; i < count; i++) {
+        var name = bytes(number());
+        if (!isToken(name, 0, name.length)) {
+            throw "unreadable";
+        }
+        headers.push([name, bytes(number())]);
+    }
+    var body = bytes(number());
+    if (at != b.length) {
+        throw "unreadable";
+    }
+    return {status: status, headers: headers, body: body};
+}
+
+// accept sets $pf_accept_<n> to the value of each line of an allowed answer whose name is the nth of $pf_accept, as
+// its bytes; a later line of a name sets it again. An empty value is set as one space, which nginx sends, where it
+// sends no header whose value is empty, and which the service reads as the empty value Envoy sends, the space being
+// RFC 9110's optional whitespace. It returns the bytes and the count of the headers it set, each name with its last
+// value, as Envoy counts them.
+function accept(r, headers) {
+    var names = words(r.variables.pf_accept), last = [];
+    for (var i = 0; i < headers.length; i++) {
+        var name = headers[i][0];
+        for (var n = 0; n < names.length; n++) {
+            if (is(name, 0, name.length, names[n])) {
+                r.variables["pf_accept_" + n] = headers[i][1].length ? headers[i][1] : " ";
+                last[n] = name.length + headers[i][1].length;
+            }
+        }
+    }
+    var set = {size: 0, fields: 0};
+    for (var k = 0; k < last.length; k++) {
+        if (last[k] !== undefined) {
+            set.size += last[k];
+            set.fields++;
+        }
+    }
+    return set;
+}
+
+// kept is true for a byte Envoy keeps as it is in :path; it writes every other byte as its escape of three bytes.
+function kept(c) {
+    return (c >= 0x61 && c <= 0x7A) || (c >= 0x41 && c <= 0x5A) || (c >= 0x30 && c <= 0x39) ||
+        "-._~!$&'()*+,;=:@/?#[]%".indexOf(String.fromCharCode(c)) >= 0;
+}
+
+// passable is true when the request, with the headers the check's answer sets, is within limits.request_headers as
+// Envoy counts the request it passes on; Envoy answers 500 with an empty body to one past either bound. Envoy's size
+// is the bytes of each field's name and value: :method, :path, :authority and :scheme, the client's fields but its
+// Host, which :authority replaces, and its Connection, the x-request-id and x-forwarded-proto it sets, with
+// client_address connection the x-forwarded-for it sets or appends a comma and the address to and the
+// x-envoy-external-address it sets ($pf_counted_address), and each accepted header; its count is the number of those
+// fields (measured on Envoy 1.40.2, to the byte and to the field, at 60 KiB and 100 with no limits written and at 8 KiB
+// and 30 written, with client_address connection and forwarded, with and without a client's X-Forwarded-For). Envoy's
+// :authority is an absolute target's host and port, whatever the Host line says, and nginx routes by the same
+// ($pf_authority), so the script counts that or the Host line's value, the longer: counting the Host line alone, a Host
+// of one byte beside http://api.test.example.com:10000/ was answered 500 23 bytes later than by Envoy (measured on
+// nginx 1.30.6 beside Envoy 1.40.2). The script counts each of the client's header lines, Connection among them, and
+// each byte of the path Envoy escapes as three, so it never counts less than Envoy: more by the client's Connection
+// line and its own copies of the headers the proxy sets, which Envoy replaces or joins.
+function passable(r, set) {
+    var raw = r.rawHeadersIn, scheme = r.variables.scheme.length, size = set.size, host = -1;
+    var fields = fieldCount(r) + 3 + 2 + set.fields;
+    for (var i = 0; i < raw.length; i++) {
+        size += Buffer.byteLength(raw[i][0]) + Buffer.byteLength(raw[i][1]);
+        if (raw[i][0].toLowerCase() == "host") {
+            host = Buffer.byteLength(raw[i][1]);
+        }
+    }
+    var routed = r.rawVariables.pf_authority, authority = routed ? routed.length : 0;
+    if (host >= 0) {
+        // The Host line's value is counted already, as :authority's.
+        size += ":authority".length - "host".length + Math.max(0, authority - host);
+    } else {
+        var named = Buffer.byteLength(r.variables.http_host || r.variables.host || "");
+        size += ":authority".length + Math.max(authority, named);
+        fields++;
+    }
+    var address = r.variables.pf_counted_address;
+    if (address) {
+        size += "x-forwarded-for".length + 1 + address.length + "x-envoy-external-address".length + address.length;
+        fields += 2;
+    }
+    var path = r.rawVariables.request_uri;
+    for (var j = 0; j < path.length; j++) {
+        size += kept(path[j]) ? 1 : 3;
+    }
+    size += ":method".length + r.method.length + ":path".length + ":scheme".length + scheme +
+        "x-forwarded-proto".length + scheme + "x-request-id".length + 36;
+    return size <= Number(r.variables.pf_header_size) && fields <= Number(r.variables.pf_header_count);
+}
+
+// grpcCode is the grpc-status Envoy answers a gRPC call it refuses with status with: grpcStatus, and 2 for any other.
+function grpcCode(status) {
+    var code = grpcStatus[status];
+    return code === undefined ? 2 : code;
+}
+
+// grpcMessage is a new Buffer of body as Envoy writes it in grpc-message: each byte that is not printable ASCII, and %,
+// as % and two hexadecimal digits in capitals (measured on Envoy 1.40.2).
+function grpcMessage(body) {
+    var size = 0;
+    for (var i = 0; i < body.length; i++) {
+        size += body[i] >= 0x20 && body[i] < 0x7F && body[i] != 0x25 ? 1 : 3;
+    }
+    var out = Buffer.alloc(size), at = 0;
+    for (var j = 0; j < body.length; j++) {
+        var c = body[j];
+        if (c >= 0x20 && c < 0x7F && c != 0x25) {
+            out[at++] = c;
+        } else {
+            out[at++] = 0x25;
+            out[at++] = hexDigits.charCodeAt(c >> 4);
+            out[at++] = hexDigits.charCodeAt(c & 15);
+        }
+    }
+    return out;
+}
+
+// refuse answers the request with the check's denial as the Envoy output passes one on: the check's status, or 403
+// for a 2xx other than 200; its header lines, those of a name joined in one list in the order sent, and two lines of
+// content-type or location in one line, joined with a comma; and its body, with content-type text/plain when the
+// check sent a body and no type, and no content-type when it sent no body (handlerLines). Envoy answers a 403 of the check to a request that
+// carries an Origin ($pf_has_origin) with the body Invalid CORS request and content-type text/plain in place of the
+// check's, an admitted origin too, where a 401 keeps its own (measured on Envoy 1.40.2). The first local reply mapper
+// of the Envoy output that matches wins, and its Origin mapper comes before the one that makes a 2xx 403, so a 2xx
+// answered 403 keeps the check's body. A gRPC call ($pf_grpc_call) is answered 200 in gRPC's form: content-type
+// application/grpc, the grpc-status of the status (grpcCode) and the body as grpc-message, in place of the check's own
+// three (measured on Envoy 1.40.2). A name is token characters alone (unframe), which a string holds as they are.
+//
+// Each answer goes through r.return, which discards the request's body. An answer written in parts leaves the body
+// unread, and over HTTP/1.1 nginx then read the body as the next request on the connection (measured on nginx 1.30.6
+// and 1.31.8: a refused request whose body held a request reached the service as one, where Envoy reads the body as
+// the body). r.return reads its text for a 301, 302, 303, 307 or 308 as the Location and writes nginx's own page as the
+// body, and gives a 304 content-length: 0, so those two are written in parts when no byte of a body can be read as a
+// request: over HTTP/2, whose body comes in DATA frames, and over HTTP/1.x when the head announces no body (hasBody).
+function refuse(r, status, headers, body) {
+    var grpc = r.variables.pf_grpc_call == "-grpc";
+    var cors = status == 403 && r.variables.pf_has_origin == "1";
+    if (cors) {
+        body = Buffer.from("Invalid CORS request");
+    }
+    var answered = status < 300 ? 403 : status;
+    var names = [], values = [], typed = false, location = [];
+    for (var i = 0; i < headers.length; i++) {
+        var name = headers[i][0];
+        if (is(name, 0, name.length, "content-type")) {
+            typed = true;
+            if (grpc || cors) {
+                continue;
+            }
+        }
+        if (grpc && (is(name, 0, name.length, "grpc-status") || is(name, 0, name.length, "grpc-message"))) {
+            continue;
+        }
+        if (is(name, 0, name.length, "location")) {
+            location.push(location.length ? Buffer.from(",") : Buffer.alloc(0), headers[i][1]);
+        }
+        var text = name.toString();
+        var n = names.indexOf(text);
+        if (n < 0) {
+            names.push(text);
+            values.push([headers[i][1]]);
+        } else {
+            values[n].push(headers[i][1]);
+        }
+    }
+    for (var k = 0; k < names.length; k++) {
+        var lines = values[k], lower = names[k].toLowerCase();
+        if (lines.length > 1 && (lower == "content-type" || lower == "location")) {
+            // nginx sends one line of these two, the last, where Envoy joins the lines with a comma (measured on
+            // Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8), so the handler joins them.
+            var joined = [];
+            for (var m = 0; m < lines.length; m++) {
+                joined.push(m ? Buffer.from(",") : Buffer.alloc(0), lines[m]);
+            }
+            lines = [Buffer.concat(joined)];
+        }
+        r.headersOut[names[k]] = lines.length == 1 ? lines[0] : lines;
+    }
+    if (grpc) {
+        r.headersOut["content-type"] = "application/grpc";
+        r.headersOut["grpc-status"] = String(grpcCode(answered));
+        if (body.length) {
+            r.headersOut["grpc-message"] = grpcMessage(body);
+        }
+        r.return(200);
+        return;
+    }
+    if (cors || (body.length && !typed)) {
+        r.headersOut["content-type"] = "text/plain";
+    }
+    var moved = answered == 301 || answered == 302 || answered == 303 || answered == 307 || answered == 308;
+    if (!moved && answered != 304) {
+        r.return(answered, body);
+        return;
+    }
+    if (r.httpVersion != "2.0" && hasBody(r)) {
+        r.return(answered, Buffer.concat(location));
+        return;
+    }
+    r.status = answered;
+    if (answered != 304) {
+        r.headersOut["Content-Length"] = String(body.length);
+    }
+    r.sendHeader();
+    if (body.length && r.method != "HEAD") {
+        r.send(body);
+    }
+    r.finish();
+}
+
+// hasBody is true when the request's head announces a body, as nginx reads it over HTTP/1.x: a Transfer-Encoding, or a
+// Content-Length other than 0. nginx answers a head with both, or with a Content-Length that is not digits, 400 itself.
+function hasBody(r) {
+    var length = r.headersIn["Content-Length"];
+    return r.headersIn["Transfer-Encoding"] !== undefined || (length !== undefined && !/^0+$/.test(length));
+}
+
+// unavailable answers as the Envoy output answers an unanswered check under deny: 403 with no body, Invalid CORS
+// request with an Origin, and a gRPC call 200 with grpc-status 7 (refuse).
+function unavailable(r) {
+    refuse(r, 403, [], Buffer.alloc(0));
+}
+
+// pass lets the request go on, unless the route location is the one of a dot segment with a parameter ($pf_then is
+// refused), which the Envoy output answers 400 with no body from its first route once its check lets the request
+// through, and then closes the connection: @pf_r_refused answers it, and closes the connection after its answer.
+function pass(r) {
+    if (r.variables.pf_then == "refused") {
+        r.internalRedirect("@pf_r_refused");
+    }
+}
+
+// check is the access handler of every location a checked route writes. It asks the check through the relay, and lets
+// the request go on (pass) with the accepted headers of an allowed answer ($pf_accept_<n>), or with the mark
+// ($pf_unchecked) for an unanswered check under allow; or it answers the request, a denial as the check wrote it
+// (refuse), and an unanswered check under deny or an answer it cannot read 403 (unavailable). It runs in the access
+// phase, before nginx reads the body of the request, so a refused upload is answered at once (measured: 0.00 s, where a
+// content handler, which reads the whole body first, answered after 3.00 s). The deadline is a timer of auth.timeout
+// raced against the subrequest. $pf_authz_us is the whole microseconds from the question to the answer of the relay or
+// the deadline, which the request log writes, in steps of 1,000, as Date.now() counts milliseconds; it stays empty
+// when no check is asked. The body is one try: an exception the handler did not catch left the request to nginx, which
+// answered 500 once the deadline timer fired (measured on nginx 1.30.6 and 1.31.8). The catch answers 403 in both
+// modes and logs nothing, as the Envoy output writes no line for a refused check, and every path clears the timer,
+// which held the request open until it fired.
+async function check(r) {
+    try {
+        var timer = null;
+        if (!asked(r)) {
+            pass(r);
+            return;
+        }
+        var ms = millis(r.variables.pf_check_ms);
+        var late = new Promise(function (resolve) {
+            timer = setTimeout(function () {
+                resolve(null);
+            }, ms);
+        });
+        r.variables.pf_checking = "1";
+        var start = Date.now();
+        var reply = await Promise.race([r.subrequest(checkLocation, {method: "GET"}), late]);
+        r.variables.pf_authz_us = String(Math.max(0, Date.now() - start) * 1000);
+        var verdict = relayVerdict(r, reply);
+        if (verdict == "unanswered" && r.variables.pf_when_unavailable == "allow") {
+            r.variables.pf_unchecked = "true";
+            pass(r);
+            return;
+        }
+        if (verdict != "answered") {
+            unavailable(r);
+            return;
+        }
+        var a = unframe(reply.responseBuffer);
+        if (a.status != 200) {
+            refuse(r, a.status, a.headers, a.body);
+            return;
+        }
+        if (!passable(r, accept(r, a.headers))) {
+            r.return(500, "");
+            return;
+        }
+        pass(r);
+    } catch (e) {
+        unavailable(r);
+    } finally {
+        if (timer !== null) {
+            clearTimeout(timer);
+        }
+    }
+}
+
+export default {headerNames, forwardedProto, origin, relay, check};

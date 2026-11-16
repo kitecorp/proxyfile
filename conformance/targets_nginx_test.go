@@ -10,8 +10,9 @@ import (
 // versions, so a row one of them answers differently fails in that entry alone. The validator reads the same file, so
 // an nginx upgrade changes one line for both, and scripts/pinned-images.sh, which the validator reads it with, holds
 // the rule pinnedImages holds, so the file the two read is refused by both or by neither. Each entry runs the
-// battery's two files for nginx, one with pattern routes and one with none, then examples/full, whose committed
-// nginx.refused is checked by its render alone.
+// battery's two files for nginx, one with pattern routes and one with none, then its two files with the auth check,
+// one asked under deny at two check addresses and one under allow beside every other key the generator writes, then
+// examples/full, whose committed nginx.refused is checked by its render alone.
 // The admin listener answers /ready on 127.0.0.1 only, as Envoy's does.
 func nginxEntries(t testing.TB) []target {
 	nginx, _ := render.TargetNamed("nginx")
@@ -23,6 +24,8 @@ func nginxEntries(t testing.TB) []target {
 			files: []file{
 				{label: "nginx-file", proxyfile: "testdata/nginx.yaml"},
 				{label: "nginx-plain", proxyfile: "testdata/nginx-plain.yaml"},
+				{label: "nginx-checks", proxyfile: "testdata/nginx-checks.yaml"},
+				{label: "nginx-auth", proxyfile: "testdata/nginx-auth.yaml"},
 				{label: "full", proxyfile: "../examples/full/hocon/Proxyfile"},
 			},
 			image: p.image,

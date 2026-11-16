@@ -4,6 +4,7 @@ import (
 	"maps"
 	"net"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -165,6 +166,8 @@ func TestRefusals(t *testing.T) {
 		rewriteWords    = "holding a character nginx escapes again is refused by --target nginx: nginx escapes the new path before it sends it, so the service would receive that character escaped, where the Envoy output sends it as written; write the rewrite without it, or render it for envoy"
 		dollarWords     = "nginx reads a $ in a certificate's or a key's path as the start of a variable, and a path written to keep the $ is read at each handshake, which nginx -t does not check; put the file at a path without $, or render it for envoy"
 		hostDotWords    = "holding a host that starts or ends with . is refused by --target nginx: nginx reads a dot at a host's start as every name under it and drops one at its end; write the host without it, or render it for envoy"
+		onlyWithWords   = "naming a header that remove_from_clients, auth.accept or the proxy itself removes from clients is refused by --target nginx: the Envoy output removes that header before it reads it and never asks the check, where nginx asks it; name a header the proxy passes on"
+		acceptWritten   = "naming a header nginx frames or routes a request by is refused by --target nginx: nginx writes this header itself on the request it passes on, to frame or route it or to keep a client's copy from the service, x-forwarded-for, x-envoy-external-address and the five x-envoy- names Envoy removes from clients only with client_address: connection, and a check service must never change how nginx frames or routes that request; each is refused with either client_address, so a list stays valid when it changes; remove the name from auth.accept"
 	)
 	type refusalCase struct {
 		name   string
@@ -294,13 +297,41 @@ func TestRefusals(t *testing.T) {
 			document: m.Inserted(7, "remove_from_clients: [x-client-id, x-host]"), want: nil},
 		{name: "health", spec: Proxyfile, target: nginxTarget, document: m.Replaced(3, 3, "  app: {http: 3000, health: {path: /health}}"),
 			want: []string{`g.yaml:3:21: "services.<service name>.health" ` + healthWords, `g.yaml:3:30: "services.<service name>.health.path" ` + healthWords}},
-		// auth.jwt as examples/jwt writes it: a line for each key under it, and the not-written line of auth itself.
+		// auth.jwt as examples/jwt writes it: a line for each key under it, and none for auth itself, which nginx writes.
 		{name: "a token verified at the proxy", spec: Proxyfile, target: nginxTarget,
 			document: m.Inserted(7, "auth:\n  jwt:\n    issuer: https://login.example.com\n    audiences: [api.example.com]\n"+
 				"    keys: /etc/gateway/jwt/jwks.json\n    claims:\n      x-user-id: sub\n      x-user-roles: realm.roles"),
-			want: []string{`g.yaml:7:1: "auth" ` + notWrittenWords, `g.yaml:8:3: "auth.jwt" ` + jwtWords, `g.yaml:9:5: "auth.jwt.issuer" ` + jwtWords,
+			want: []string{`g.yaml:8:3: "auth.jwt" ` + jwtWords, `g.yaml:9:5: "auth.jwt.issuer" ` + jwtWords,
 				`g.yaml:10:5: "auth.jwt.audiences" ` + jwtWords, `g.yaml:11:5: "auth.jwt.keys" ` + jwtWords, `g.yaml:12:5: "auth.jwt.claims" ` + jwtWords,
 				`g.yaml:13:7: "auth.jwt.claims.<header name>" ` + jwtWords, `g.yaml:14:7: "auth.jwt.claims.<header name>" ` + jwtWords}},
+		// Every key of the auth check, a route that turns it off and a method that tells the check its action and reports.
+		{name: "the auth check nginx writes", spec: Proxyfile, target: nginxTarget,
+			document: m.Inserted(7, "  - {name: open, prefix: /public/, to: app, auth: off}\n"+
+				"auth: {ask: app /check, timeout: 1500ms, enabled: true, when_unavailable: allow, only_with_header: x-api-key, "+
+				"send: [authorization, x-country, x-client-*], accept: [x-user-id], send_request: true}\n"+
+				"rpc: {methods: [{service: shop.v1.CartService, method: AddItem, action: write, reports: [export]}]}"),
+			want: nil},
+		// The Envoy output never asks the check with only_with_header naming a header a list removes, where nginx asks.
+		{name: "only_with_header naming a removed header", spec: Proxyfile, target: nginxTarget,
+			document: m.Inserted(7, "auth: {ask: app /check, enabled: true, only_with_header: x-api-key}\nremove_from_clients: [x-api-key]"),
+			want:     []string{`g.yaml:7:40: "auth.only_with_header" ` + onlyWithWords}},
+		{name: "only_with_header naming an accepted header", spec: Proxyfile, target: nginxTarget,
+			document: m.Inserted(7, "auth: {ask: app /check, enabled: true, only_with_header: x-api-key, accept: [x-api-key]}"),
+			want:     []string{`g.yaml:7:40: "auth.only_with_header" ` + onlyWithWords}},
+		{name: "only_with_header naming a header a removed prefix covers", spec: Proxyfile, target: nginxTarget,
+			document: m.Inserted(7, "auth: {ask: app /check, enabled: true, only_with_header: x-api-key}\nremove_from_clients: [x-api-*]"),
+			want: []string{`g.yaml:7:40: "auth.only_with_header" ` + onlyWithWords,
+				`g.yaml:8:1: "remove_from_clients" holding a name with a * prefix is refused by --target nginx: nginx takes each header by name; write each name in full`}},
+		{name: "only_with_header naming a header neither list names", spec: Proxyfile, target: nginxTarget,
+			document: m.Inserted(7, "auth: {ask: app /check, enabled: true, only_with_header: x-api-key, accept: [x-user-id]}\nremove_from_clients: [x-client-id]"),
+			want:     nil},
+		// nginx sets each accepted header by a name nginx.conf writes, so it has no form for a prefix.
+		{name: "an accept name with a * prefix", spec: Proxyfile, target: nginxTarget,
+			document: m.Inserted(7, "auth: {ask: app /check, enabled: true, accept: [x-tier-*]}"),
+			want:     []string{`g.yaml:7:40: "auth.accept" holding a name with a * prefix is refused by --target nginx: nginx sets a request header only by a name its configuration writes; write each name in full`}},
+		// Neither refusal fires on a name that only holds one nginx writes itself inside it.
+		{name: "accept names in full that nginx does not write itself", spec: Proxyfile, target: nginxTarget,
+			document: m.Inserted(7, "auth: {ask: app /check, enabled: true, accept: [x-host, x-te, x-request-ids]}"), want: nil},
 		{name: "an X-Ray tracer", spec: Proxyfile, target: nginxTarget, document: m.Inserted(7, "tracing: {provider: {xray: {segment: s}}}"),
 			want: []string{`g.yaml:7:1: "tracing" ` + notWrittenWords, `g.yaml:7:11: "tracing.provider" ` + notWrittenWords,
 				`g.yaml:7:22: "tracing.provider.xray" ` + xrayWords, `g.yaml:7:29: "tracing.provider.xray.segment" ` + xrayWords}},
@@ -343,6 +374,49 @@ func TestRefusals(t *testing.T) {
 			document: m.Inserted(7, "remove_from_clients: ["+name+"]"),
 			want:     []string{`g.yaml:7:1: "remove_from_clients" holding host, content-length, transfer-encoding, connection, upgrade, te, keep-alive or http2-settings is refused by --target nginx: nginx reads these headers itself to frame and route the request; remove the name from remove_from_clients`}})
 	}
+	// An accept name nginx writes itself on the request it passes on, one row each: the route location's own names, the
+	// unchecked mark and the two question headers, and the two nginx frames a body by.
+	for _, name := range []string{"connection", "content-length", "host", "http2-settings", "origin", "proxy-connection", "te",
+		"transfer-encoding", "upgrade", "x-envoy-auth-failure-mode-allowed", "x-envoy-decorator-operation",
+		"x-envoy-downstream-service-cluster", "x-envoy-downstream-service-node", "x-envoy-expected-rq-timeout-ms",
+		"x-envoy-external-address", "x-envoy-force-trace", "x-envoy-hedge-on-per-try-timeout", "x-envoy-internal",
+		"x-envoy-ip-tags", "x-envoy-max-retries", "x-envoy-original-host", "x-envoy-original-path", "x-envoy-original-url",
+		"x-envoy-retriable-header-names", "x-envoy-retriable-status-codes", "x-envoy-retry-grpc-on", "x-envoy-retry-on",
+		"x-envoy-upstream-alt-stat-name", "x-envoy-upstream-rq-per-try-timeout-ms", "x-envoy-upstream-rq-timeout-alt-response",
+		"x-envoy-upstream-rq-timeout-ms", "x-envoy-upstream-stream-duration-ms", "x-forwarded-client-cert", "x-forwarded-for",
+		"x-forwarded-proto", "x-gateway-action", "x-gateway-reports", "x-request-id"} {
+		cases = append(cases, refusalCase{name: "an accept name nginx writes itself: " + name, spec: Proxyfile, target: nginxTarget,
+			document: m.Inserted(7, "auth: {ask: app /check, enabled: true, accept: ["+name+"]}"),
+			want:     []string{`g.yaml:7:40: "auth.accept" ` + acceptWritten}})
+	}
+	// An only_with_header name nginx removes from every client's request itself, which the Envoy output removes before
+	// its check's condition reads the request, one row each: the headers Envoy removes, the unchecked mark and the two
+	// question headers, with either client_address.
+	for _, name := range []string{"proxy-connection", "x-envoy-auth-failure-mode-allowed", "x-envoy-expected-rq-timeout-ms",
+		"x-envoy-force-trace", "x-envoy-hedge-on-per-try-timeout", "x-envoy-internal", "x-envoy-ip-tags", "x-envoy-max-retries",
+		"x-envoy-original-url", "x-envoy-retriable-header-names", "x-envoy-retriable-status-codes", "x-envoy-retry-grpc-on",
+		"x-envoy-retry-on", "x-envoy-upstream-alt-stat-name", "x-envoy-upstream-rq-per-try-timeout-ms",
+		"x-envoy-upstream-rq-timeout-alt-response", "x-envoy-upstream-rq-timeout-ms", "x-envoy-upstream-stream-duration-ms",
+		"x-forwarded-client-cert", "x-gateway-action", "x-gateway-reports"} {
+		cases = append(cases, refusalCase{name: "an only_with_header name nginx removes itself: " + name, spec: Proxyfile, target: nginxTarget,
+			document: m.Inserted(7, "auth: {ask: app /check, enabled: true, only_with_header: "+name+"}"),
+			want:     []string{`g.yaml:7:40: "auth.only_with_header" ` + onlyWithWords}})
+	}
+	// The five names both outputs remove from clients with client_address connection alone: refused there, its default
+	// with tls included, and left with forwarded, where both pass them on and ask by them.
+	for _, name := range []string{"x-envoy-decorator-operation", "x-envoy-downstream-service-cluster",
+		"x-envoy-downstream-service-node", "x-envoy-original-host", "x-envoy-original-path"} {
+		cases = append(cases,
+			refusalCase{name: "an only_with_header name nginx removes with connection: " + name, spec: Proxyfile, target: nginxTarget,
+				document: m.Inserted(7, "client_address: connection\nauth: {ask: app /check, enabled: true, only_with_header: "+name+"}"),
+				want:     []string{`g.yaml:8:40: "auth.only_with_header" ` + onlyWithWords}},
+			refusalCase{name: "an only_with_header name nginx removes with tls: " + name, spec: Proxyfile, target: nginxTarget,
+				document: m.Inserted(7, "tls: {certificate: /etc/c.pem, key: /etc/k.pem}\nauth: {ask: app /check, enabled: true, only_with_header: "+name+"}"),
+				want:     []string{`g.yaml:8:40: "auth.only_with_header" ` + onlyWithWords}},
+			refusalCase{name: "an only_with_header name nginx passes on with forwarded: " + name, spec: Proxyfile, target: nginxTarget,
+				document: m.Inserted(7, "client_address: forwarded\nauth: {ask: app /check, enabled: true, only_with_header: "+name+"}"),
+				want:     nil})
+	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			path, data := "g.yaml", []byte(c.document)
@@ -370,12 +444,34 @@ func TestRefusals(t *testing.T) {
 	}
 }
 
+// The nginx generator writes the header names of auth.send, auth.accept and auth.only_with_header into nginx.conf as
+// they are, bare or inside a quoted value, and escapes none of them: nginx would read a $ in a name as the start of a
+// variable, and a " or a \ would end or escape the quoted text around it. Both patterns a header name is read by
+// refuse all three.
+func TestHeaderNamesNeedNoEscaping(t *testing.T) {
+	for _, c := range []struct {
+		pattern, name string
+		want          bool
+	}{
+		{headerPattern, "x-$a", false},
+		{headerPattern, `x-"a`, false},
+		{headerPattern, `x-\a`, false},
+		{lowerHeaderPattern, "x-$a", false},
+		{lowerHeaderPattern, `x-"a`, false},
+		{lowerHeaderPattern, `x-\a`, false},
+	} {
+		if got := regexp.MustCompile(c.pattern).MatchString(c.name); got != c.want {
+			t.Errorf("%s matches %q = %v, want %v", c.pattern, c.name, got, c.want)
+		}
+	}
+}
+
 // Render counts the ways a target is less strict than the Envoy output after it writes, and names the page and the
 // heading that list them; the Envoy output is the measure of the others, so it has none and render prints nothing.
 func TestLessStrictWarning(t *testing.T) {
 	for _, c := range []struct{ target, want string }{
 		{"envoy", ""},
-		{"nginx", `this nginx configuration is less strict than the Envoy output in 9 ways; docs/nginx.md lists them under "Where nginx is less strict than the Envoy output"`},
+		{"nginx", `this nginx configuration is less strict than the Envoy output in 12 ways; docs/nginx.md lists them under "Where nginx is less strict than the Envoy output"`},
 		{"haproxy", `this HAProxy configuration is less strict than the Envoy output in 10 ways; docs/haproxy.md lists them under "Where HAProxy is less strict than the Envoy output"`},
 	} {
 		target, _ := TargetNamed(c.target)
@@ -424,6 +520,9 @@ func TestLessStrictWays(t *testing.T) {
 			{line, "a service's answer with a malformed header line or a malformed status line reaches the client"},
 			{line, "over HTTP/2, empty frames in a row are served"},
 			{"timeouts.request", "without timeouts.request, an answer that keeps arriving runs past 15 s"},
+			{"auth.when_unavailable", "with allow, a check service that does not close its connection right after its answer leaves requests unchecked past about 470 checks a second"},
+			{"auth.when_unavailable", "with allow, a worker with none of its 8192 connections left serves requests unchecked"},
+			{"auth.ask", "a request whose client closes its connection during the check can still reach the service"},
 			{"log", "a chunked answer its service cuts short writes no upstream-failure line"},
 		}},
 	} {
@@ -489,19 +588,21 @@ func TestHAProxyWrites(t *testing.T) {
 			refuses: "holding a zoned IPv6 address: HAProxy 3.2 and 3.4 load no zone in a server's address; give the service an address without one"},
 		{key: "auth", level: Supported},
 		{key: "auth.ask", level: Partial,
-			note: "an answer of the check HAProxy cannot read whole is answered 403, where Envoy passes it on: a denial whose header lines and body pass 15,100 bytes, each line counted as its name, its value and 8 bytes, a header line of 16,383 bytes or more, a 200 whose body passes 1 MiB, a head of more than 100 header lines, folded lines not counted, with a name on two of them, where Envoy counts a name it keeps inline, such as date, once, and a status of 101, which a gRPC call gets as grpc-status 7, where Envoy gives 2; an answer in HTTP/1.2, a chunk extension, a tab after the version, a lone CR in a header value, a status line of 16,383 bytes or more, or a line whose CR falls at a multiple of 16,384 bytes into the answer (measured at 16,384 and 81,920), which HAProxy's socket hands to the script with the CR kept, is answered 403, where Envoy reads it; each head of the answer and its trailer section are read to 81,920 bytes, Envoy's bound, each line counted with a CR and an LF, so lines that end in LF alone reach it sooner; a status outside 100 to 599 or a status line in HTTP/2.0 is answered 403, where Envoy passes the check's status on; the check is sent connection: close on a connection of its own, where Envoy sends no Connection header and keeps its connections to the check open"},
+			note: "an answer of the check HAProxy cannot read whole is answered 403, where Envoy passes it on: a denial whose header lines and body pass 15,100 bytes, each line counted as its name, its value and 8 bytes, a header line of 16,383 bytes or more, a 200 whose body passes 1 MiB, a head of more than 100 header lines, folded lines not counted, with a name on two of them, where Envoy counts a name it keeps inline, such as date, once, and a status of 101, which a gRPC call gets as grpc-status 7, where Envoy gives 2; an answer in HTTP/1.2, a chunk extension or a space after a chunk size, two spaces or a tab after the version, a lone CR in a header value, a status line of 16,383 bytes or more, or a line whose CR falls at a multiple of 16,384 bytes into the answer (measured at 16,384 and 81,920), which HAProxy's socket hands to the script with the CR kept, is answered 403, where Envoy reads it; each head of the answer and its trailer section are read to 81,920 bytes, Envoy's bound, each line counted with a CR and an LF, so lines that end in LF alone reach it sooner; a status outside 100 to 599 or a status line in HTTP/2.0 is answered 403, where Envoy passes the check's status on; the check is sent connection: close on a connection of its own, where Envoy sends no Connection header and keeps its connections to the check open; after a check's 304 HAProxy closes the client's connection, so a request the client sends next on it gets no answer, where Envoy answers it"},
 		{key: "auth.timeout", level: Supported},
 		{key: "auth.enabled", level: Supported},
 		{key: "auth.when_unavailable", level: Partial,
-			note: "with allow, an answer that breaks off inside its header lines, by a close or by passing auth.timeout, a 200 or a denial whose body never ends, an answer whose head or trailer section passes 81,920 bytes, a head of more than 100 header lines with a name on two of them, such as set-cookie, and an answer HAProxy cannot read as RFC 9112 writes one (a Content-Length that is not one line of digits, a control byte in a header value, a status line that does not end) are answered 403, where Envoy serves the request with the unchecked mark, x-envoy-auth-failure-mode-allowed: true"},
+			note: "with allow, an answer that breaks off inside its header lines, by a close or by passing auth.timeout, a 200 or a denial whose body never ends, an answer whose head or trailer section passes 81,920 bytes, a head of more than 100 header lines with a name on two of them, such as set-cookie, and an answer HAProxy cannot read as RFC 9112 writes one (a Content-Length that is not one line of digits, a control byte in a header value, a status line that does not end) are answered 403, where Envoy serves the request with the unchecked mark, x-envoy-auth-failure-mode-allowed: true; a 200 whose chunk-size line ends in a bare LF, the last chunk's included, is read as allowed, where Envoy reads it as no answer, and answers 403 with deny and serves the request with the unchecked mark with allow"},
 		{key: "auth.only_with_header", level: Partial,
 			note: "over HTTP/2 a request that carries the header with every value empty is asked, where Envoy does not ask it: HAProxy reads an HTTP/2 value of spaces alone as empty, and Envoy asks one, so HAProxy asks both"},
-		{key: "auth.send", level: Supported},
+		{key: "auth.send", level: Partial,
+			note: "the check receives each byte of 0x80 or more that is not part of well-formed UTF-8 in a header it is sent as the client sent it, where Envoy writes a ! for each such byte"},
 		{key: "auth.accept", level: Partial,
-			note: "an accepted header that does not fit beside the request's own header lines in HAProxy's request buffer is answered 403, where Envoy sets it on the request (measured up to 50,000 bytes; it answered 500 at 70,000): beside a request of 118 bytes, one of 8,000 or 15,000 bytes is set by both versions and one of 15,843 bytes or more (3.4.7: 15,851) is answered 403, a bound the request's own header lines lower by as many bytes as they hold; an accepted header whose line reaches 16,383 bytes is answered 403 by auth.ask's line bound first; a * prefix never sets transfer-encoding, host or te from the check's answer, where Envoy sets each",
+			note: "an accepted header that does not fit beside the request's own header lines in HAProxy's request buffer is answered 403, where Envoy sets it on the request (measured up to 50,000 bytes; it answered 500 at 70,000): beside a request of 118 bytes, one of 8,000 or 15,000 bytes is set by both versions and one of 15,843 bytes or more (3.4.7: 15,851) is answered 403, a bound the request's own header lines lower by as many bytes as they hold; an accepted header whose line reaches 16,383 bytes is answered 403 by auth.ask's line bound first; a * prefix never sets transfer-encoding, host or te from the check's answer, where Envoy sets each; a folded header line of the check's answer reaches the service joined to the value before it by one space, where Envoy keeps the spaces and tabs of both lines and drops the line end; a request the accepted headers take past 100 header fields, as Envoy counts them with its pseudo-headers and the x-request-id and x-forwarded-proto it sets, reaches the service, where Envoy answers 500",
 			refuses: "naming content-length, transfer-encoding, host, te, connection or upgrade in full: HAProxy frames or routes a request by these headers, so the check's answer never sets them; remove the name from auth.accept" + "; " +
 				"holding a * prefix that covers content-length, connection or upgrade: the Envoy output sends the body chunked once Content-Length is removed, and leaves a WebSocket upgrade unanswered once Connection or Upgrade is removed, which HAProxy cannot write; write the other names in full, or a longer prefix, or render it for envoy"},
-		{key: "auth.send_request", level: Supported},
+		{key: "auth.send_request", level: Partial,
+			note: "over HTTP/2 a request whose :scheme differs from its connection's scheme is told in x-forwarded-proto the connection's, where Envoy tells it the :scheme"},
 		{key: "remove_from_clients", level: Partial, note: "names and * prefixes that cover none of content-length, connection and upgrade",
 			refuses: "holding content-length, connection or upgrade, in full or under a * prefix: the Envoy output sends the body chunked once Content-Length is removed, and leaves a WebSocket upgrade unanswered once Connection or Upgrade is removed, which HAProxy cannot write; write the other names in full, or a longer prefix, or render it for envoy"},
 		{key: "cors", level: Supported},
@@ -540,11 +641,12 @@ func TestHAProxyWrites(t *testing.T) {
 		{key: "rpc.proto", level: Supported},
 		{key: "rpc.proto.roots", level: Supported},
 		{key: "rpc.proto.option", level: Supported},
-		{key: "the request's path normalised before a route is picked", level: Supported},
+		{key: "the request's path normalised before a route is picked", level: Partial,
+			note: "an escape of an unreserved character in the query, such as ?q=%41 or ?q=%7e, reaches the service and the check decoded, as ?q=A and ?q=~, with or without a dot segment in the path, where Envoy passes the query as the client wrote it; an escape of a reserved character, such as %2F, %26 or %3d, reaches both as written, as through Envoy; a path that holds an empty segment before a dot-dot segment, such as /catalog//../products/1, with / written or escaped, over HTTP/1.1 and HTTP/2, takes the route of the path with its slashes merged first, /products/1, where Envoy resolves the dot-dot segment first and routes /catalog/products/1"},
 		{key: "a dot segment with a ; parameter answered 400", level: Partial,
-			note: "a dot segment whose ; parameter is written with dots, such as /a/..;/b, is answered 400, and a gRPC call 200 with grpc-status 13, where Envoy 1.40 drops the parameter and resolves the segment; with the auth check, such a request is asked about whatever route its resolved path takes, and gets the check's denial or, once the check lets it through, 400, where Envoy asks only when that route is checked and, with send_request, sends the check the resolved path"},
+			note: "a dot segment whose ; parameter is written with dots, such as /a/..;/b, is answered 400, and a gRPC call 200 with grpc-status 13, where Envoy 1.40 drops the parameter and resolves the segment; with the auth check, such a request is asked about whatever route its resolved path takes, and gets the check's denial or, once the check lets it through, 400, where Envoy asks only when that route is checked and, with send_request, sends the check the resolved path; after the 400 of such a segment with the ; written %3B, which both answer, HAProxy keeps the connection open, where Envoy closes it"},
 		{key: "the request line and header names read before a route is picked", level: Partial,
-			note: "over HTTP/1.1 an absolute target is answered 400, where Envoy routes it by its host and sends the path alone with that host as Host, or answers 404 when no environment has the host, and OPTIONS * and CONNECT are answered 400, where Envoy answers 404; a request line with no version, HTTP/0.9's form, is answered 400, where Envoy answers 426; a Connection token other than close, keep-alive, upgrade, HTTP2-Settings and te is answered 400, where Envoy removes the header the token names and serves the request; ten Connection elements or more, an empty one counted but for an empty last one, are answered 400, where Envoy counts no empty element and serves a token with ten; an h2c upgrade is answered 400, where Envoy serves it as a plain request; a header line folded onto the next, and a header value that holds three spaces or tabs in a row, are answered 400, where Envoy serves them; over HTTP/2 a cookie field that starts with two spaces or tabs, as one of spaces alone does, or ends with three is answered 400 too, where Envoy serves it, as HAProxy keeps the spaces around a cookie field's value and drops them around any other field's; a WebSocket upgrade with no Sec-WebSocket-Key is answered 400, where Envoy passes it on, or answers 403 to an origin it does not admit; more than 100 header lines are answered 431 or, from 102, 400, where Envoy answers 431, and 101 lines or more of a header Envoy joins into one line are answered 400, where Envoy serves them; two Host lines of different hosts, and a Host that holds a comma, are answered 400, where Envoy answers 404; Transfer-Encoding: chunked on two lines is answered 400, and Transfer-Encoding: gzip, chunked 422, where Envoy answers 501; a request line and header lines of more than 15,277 bytes together, counted as sent with their line ends, Host alone beside the line and 4 bytes fewer for each further header line (3.4.7: 8 bytes more), are answered 431, and a request line of 16,319 bytes or more (3.4.7: 16,327) 414, where Envoy serves both up to its default limit of 60 KiB; over HTTP/2 a request with 97 header fields or more is answered 400, where Envoy resets its stream, and so is one with fewer whose cookies, counted one a field, reach 97, and one with 97 fields or more of a header Envoy joins, which Envoy serves, is answered 400 or, with 120, its stream reset; a WebSocket, an extended CONNECT, is answered 400, where Envoy closes the connection; a path whose escaped form outgrows HAProxy's buffer, such as one of 7000 bytes above 0x7F, is answered 400 by HAProxy 3.4.7 and 500 by 3.2.26, where Envoy serves it; a header or trailer name outside RFC 9110's token characters resets the stream, where Envoy closes the connection; a # in :path resets the stream, where Envoy answers 400; and a request with neither :authority nor host is answered 404, where Envoy closes the connection; over HTTP/1.1 a request trailer whose name is outside those characters ends the connection with no answer when the body comes after the headers, where Envoy answers 400"},
+			note: "over HTTP/1.1 an absolute target is answered 400, where Envoy routes it by its host and sends the path alone with that host as Host, or answers 404 when no environment has the host, and OPTIONS * and CONNECT are answered 400, where Envoy answers 404; a request line with no version, HTTP/0.9's form, is answered 400, where Envoy answers 426; a Connection token other than close, keep-alive, upgrade, HTTP2-Settings and te is answered 400, where Envoy removes the header the token names and serves the request; ten Connection elements or more, an empty one counted but for an empty last one, are answered 400, where Envoy counts no empty element and serves a token with ten; an h2c upgrade is answered 400, where Envoy serves it as a plain request; a header line folded onto the next, and a header value that holds three spaces or tabs in a row, are answered 400, where Envoy serves them; over HTTP/2 a cookie field that starts with two spaces or tabs, as one of spaces alone does, or ends with three is answered 400 too, where Envoy serves it, as HAProxy keeps the spaces around a cookie field's value and drops them around any other field's; a WebSocket upgrade with no Sec-WebSocket-Key is answered 400, where Envoy passes it on, or answers 403 to an origin it does not admit; more than 100 header lines are answered 431 or, from 102, 400, where Envoy answers 431, and 101 lines or more of a header Envoy joins into one line are answered 400, where Envoy serves them; two Host lines of different hosts, and a Host that holds a comma, are answered 400, where Envoy answers 404; Transfer-Encoding: chunked on two lines is answered 400, and Transfer-Encoding: gzip, chunked 422, where Envoy answers 501; a request line and header lines of more than 15,277 bytes together, counted as sent with their line ends, Host alone beside the line and 4 bytes fewer for each further header line (3.4.7: 8 bytes more), are answered 431, and a request line of 16,319 bytes or more (3.4.7: 16,327) 414, where Envoy serves both up to its default limit of 60 KiB; over HTTP/2 a request with 97 header fields or more is answered 400, where Envoy resets its stream, and so is one with fewer whose cookies, counted one a field, reach 97, and one with 97 fields or more of a header Envoy joins, which Envoy serves, is answered 400 or, with 120, its stream reset; a WebSocket, an extended CONNECT, is answered 400, where Envoy closes the connection; a path whose escaped form outgrows HAProxy's buffer, such as one of 7000 bytes above 0x7F, is answered 400 by HAProxy 3.4.7 and 500 by 3.2.26, where Envoy serves it; a header or trailer name outside RFC 9110's token characters resets the stream, where Envoy closes the connection; a # in :path resets the stream, where Envoy answers 400; and a request with neither :authority nor host is answered 404, where Envoy closes the connection; over HTTP/1.1 a request trailer whose name is outside those characters ends the connection with no answer when the body comes after the headers, where Envoy answers 400; QUERY over HTTP/1.1 is sent on, where Envoy answers 400"},
 	}
 	wantRefused := map[string][]string{
 		"not written by this version's HAProxy generator; render it for envoy": {

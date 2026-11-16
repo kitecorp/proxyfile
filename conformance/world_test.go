@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -296,6 +297,40 @@ func (w *world) memory() (int64, error) {
 		inactive = stats.Memory.Stats["inactive_file"]
 	}
 	return stats.Memory.Usage - inactive, nil
+}
+
+// logLines returns the lines of the proxy's log whose request_id is id, by the event each names, "request" for the
+// request log's own line, which names none, each line the JSON text of each field's value by its name. It reads the log
+// every 100 ms until a line of each event of wait is there, for 5 s at most: the battery's Envoy writes its log every
+// 100 ms (targets), its request log and gateway_auth_unavailable lines of a request together, and nginx writes each
+// line as the request ends, so a row that wants no line of an event waits for the request log's line (want.logged). A
+// line that is not a JSON object, such as one of the proxy's own messages, is skipped.
+func (w *world) logLines(id string, wait []string) map[string][]map[string]string {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		found := map[string][]map[string]string{}
+		out, _ := docker("logs", proxy)
+		for _, text := range strings.Split(out, "\n") {
+			var fields map[string]json.RawMessage
+			if json.Unmarshal([]byte(text), &fields) != nil || id == "" || string(fields["request_id"]) != strconv.Quote(id) {
+				continue
+			}
+			event := "request"
+			if raw, ok := fields["event"]; ok && json.Unmarshal(raw, &event) != nil {
+				event = string(raw)
+			}
+			line := map[string]string{}
+			for name, value := range fields {
+				line[name] = string(value)
+			}
+			found[event] = append(found[event], line)
+		}
+		missing := slices.ContainsFunc(wait, func(event string) bool { return found[event] == nil })
+		if !missing || time.Now().After(deadline) {
+			return found
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // dockerAPI is a client of the Docker daemon on the unix socket the docker command's current context names.

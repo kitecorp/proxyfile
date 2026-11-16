@@ -45,7 +45,8 @@ var (
 func TestScriptCheck(t *testing.T) {
 	minimal := script(t, string(testsupport.ReadFile(t, "../../examples/minimal/yaml/proxyfile.yaml")))
 	if battery := script(t, string(testsupport.ReadFile(t, batteryFile))); battery != minimal {
-		t.Errorf("the battery file's script differs from the minimal example's: %s", firstDifference(battery, minimal))
+		t.Errorf("the battery file's script differs from the minimal example's: %s",
+			testsupport.FirstDifferenceMessage(battery, minimal))
 	}
 	cases := []struct {
 		name   string
@@ -290,7 +291,7 @@ func TestScriptCheck(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if block := missing(minimal, c.blocks); block != "" {
+			if block := testsupport.FirstMissingBlock(minimal, c.blocks); block != "" {
 				t.Errorf("the script does not hold, in its place:\n%s", block)
 			}
 		})

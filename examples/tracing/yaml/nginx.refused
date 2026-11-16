@@ -1,9 +1,3 @@
-examples/tracing/yaml/proxyfile.yaml:8:1: "auth" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/tracing/yaml/proxyfile.yaml:9:3: "auth.ask" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/tracing/yaml/proxyfile.yaml:10:3: "auth.timeout" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/tracing/yaml/proxyfile.yaml:11:3: "auth.enabled" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/tracing/yaml/proxyfile.yaml:12:3: "auth.when_unavailable" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/tracing/yaml/proxyfile.yaml:13:3: "auth.accept" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/tracing/yaml/proxyfile.yaml:14:1: "remove_from_clients" holding a name with a * prefix is refused by --target nginx: nginx takes each header by name; write each name in full
 examples/tracing/yaml/proxyfile.yaml:19:1: "tracing" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/tracing/yaml/proxyfile.yaml:20:3: "tracing.provider" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

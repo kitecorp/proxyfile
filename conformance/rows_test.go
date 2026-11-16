@@ -61,8 +61,13 @@ func runsOn(e exchange, written []string) bool {
 // when e.by holds one on that file, then e's literal on the file when e.on holds one, and otherwise e.want and
 // e.admitted.
 func literalFor(e exchange, target, label string) literal {
-	if o, ok := e.by[target]; ok && (o.files == nil || slices.Contains(o.files, label)) {
-		return o.literal
+	if o, ok := e.by[target]; ok {
+		switch {
+		case o.files == nil || slices.Contains(o.files, label):
+			return o.literal
+		case o.other != nil && (o.other.files == nil || slices.Contains(o.other.files, label)):
+			return o.other.literal
+		}
 	}
 	if l, ok := e.on[label]; ok {
 		return l

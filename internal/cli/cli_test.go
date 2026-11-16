@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -62,7 +63,7 @@ func TestRun(t *testing.T) {
 				"docs/haproxy.md lists them under \"Where HAProxy is less strict than the Envoy output\"\n"},
 		{name: "render for nginx counts the ways it is less strict", setup: func(t *testing.T, tmp string) { copyExample(t, tmp, "grpc") },
 			args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/nginx.conf --target nginx",
-			stderr: "proxyfile render: this nginx configuration is less strict than the Envoy output in 9 ways; " +
+			stderr: "proxyfile render: this nginx configuration is less strict than the Envoy output in 12 ways; " +
 				"docs/nginx.md lists them under \"Where nginx is less strict than the Envoy output\"\n"},
 		{name: "render for envoy counts nothing", setup: copyMinimal, args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/envoy.yaml"},
 		{name: "check for haproxy counts nothing", args: "check <ex>/minimal/yaml/proxyfile.yaml -o <ex>/minimal/yaml/haproxy.cfg --target haproxy"},
@@ -587,6 +588,51 @@ func absent(t *testing.T, tmp string, names ...string) {
 		if _, err := os.Stat(filepath.Join(tmp, name)); !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("%s: Stat error = %v, want that it does not exist", name, err)
 		}
+	}
+}
+
+// A gRPC location's table of the header names it sets has no directive in nginx: buckets of 64 bytes and at most 512
+// slots, so a name of 47 bytes or more in remove_from_clients or auth.accept, or a list too long beside the location's
+// own names, does not load (nginx 1.30.6 and 1.31.8: "could not build grpc_headers_hash", 100 names of 20 bytes "could
+// not build optimal grpc_headers_hash"). Each name too long is refused at its place, and a list too long at its first
+// name; 40 names of 20 bytes load.
+func TestGRPCHeaderTableForNginx(t *testing.T) {
+	const words = ` naming headers a gRPC route's location cannot hold is refused by --target nginx: nginx builds the table of ` +
+		`the headers a gRPC location sets with buckets of 64 bytes and at most 512 slots, which no directive changes, so a ` +
+		`name of 47 bytes or more, or a list too long beside the location's own headers, does not load; write shorter ` +
+		"names or fewer, or render it for envoy\n"
+	const grpc = "listen: 8000\nservices:\n  orders: {grpc: 9000}\norigins:\n  all: {hosts: [localhost]}\nroutes:\n" +
+		"  - rpc: {to: {\"*\": orders}}\nrpc:\n  methods:\n    - {service: example.orders.v1.OrderService, method: GetOrder}\n"
+	names := func(n int) string {
+		list := make([]string, n)
+		for i := range list {
+			list[i] = "x-" + strconv.Itoa(i) + "-" + strings.Repeat("a", 16-len(strconv.Itoa(i)))
+		}
+		return strings.Join(list, ", ")
+	}
+	cases := []struct {
+		name, proxyfile, stderr string
+		exit                    int
+	}{
+		{"a name of 47 bytes", grpc + "remove_from_clients: [a, x-" + strings.Repeat("a", 45) + "]\n",
+			`<tmp>/p.yaml:11:26: "remove_from_clients"` + words, 1},
+		{"100 names of 20 bytes", grpc + "remove_from_clients: [" + names(100) + "]\n", `<tmp>/p.yaml:11:23: "remove_from_clients"` + words, 1},
+		{"40 names of 20 bytes", grpc + "remove_from_clients: [" + names(40) + "]\n", "", 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			testsupport.WriteFile(t, filepath.Join(tmp, "p.yaml"), c.proxyfile)
+			var stdout, stderr bytes.Buffer
+			exit := Run([]string{"render", filepath.Join(tmp, "p.yaml"), "-o", filepath.Join(tmp, "nginx.conf"), "--target", "nginx"},
+				&stdout, &stderr, "v9.9.9")
+			if exit != c.exit {
+				t.Errorf("exit = %d, want %d", exit, c.exit)
+			}
+			if got := strings.ReplaceAll(stderr.String(), tmp, "<tmp>"); c.exit == 1 && got != c.stderr {
+				t.Errorf("stderr = %.400q, want %.400q", got, c.stderr)
+			}
+		})
 	}
 }
 

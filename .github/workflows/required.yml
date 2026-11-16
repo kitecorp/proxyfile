@@ -28,8 +28,16 @@ jobs:
       - run: go test -count=1 ./...
       - name: Envoy 1.40.2 loads every generated example
         run: scripts/validate-envoy.sh examples/*/*/envoy.yaml
-      - name: nginx 1.30 and 1.31 load every generated example
-        run: scripts/validate-nginx.sh examples/*/*/nginx.conf
+      # No example asks an auth check, so the battery's two files that ask one are rendered and loaded too: only they
+      # carry the stream block, its module and the relay's socket folder.
+      - name: nginx 1.30 and 1.31 load every generated example and the battery's two files with the auth check
+        run: |
+          checked=$(mktemp -d)
+          for file in nginx-auth nginx-checks; do
+            mkdir "$checked/$file"
+            go run ./cmd/proxyfile render "conformance/testdata/$file.yaml" --target nginx -o "$checked/$file/nginx.conf"
+          done
+          scripts/validate-nginx.sh examples/*/*/nginx.conf "$checked"/*/nginx.conf
       - name: HAProxy 3.2 and 3.4 load every generated example
         run: scripts/validate-haproxy.sh examples/*/*/haproxy.cfg
       # The same requests against each proxy running the rendered file of each proxyfile its entry names in

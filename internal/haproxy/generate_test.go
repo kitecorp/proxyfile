@@ -127,45 +127,6 @@ func beforeApp(route string, lines ...string) string {
 	return slices.Concat(smallFile[:6], testsupport.Document{route}, smallFile[6:], testsupport.Document(lines)).String()
 }
 
-// missing returns the first of the blocks out does not hold as whole lines, "" when it holds them all. The lines of
-// a block must follow one another with nothing between them, and each block must come after the one before it.
-func missing(out string, blocks [][]string) string {
-	lines := strings.Split(out, "\n")
-	from := 0
-	for _, block := range blocks {
-		at := -1
-		for i := from; i+len(block) <= len(lines); i++ {
-			if slices.Equal(lines[i:i+len(block)], block) {
-				at = i
-				break
-			}
-		}
-		if at < 0 {
-			return strings.Join(block, "\n")
-		}
-		from = at + len(block)
-	}
-	return ""
-}
-
-// firstDifference names the first line where got and want differ, "" when they are equal.
-func firstDifference(got, want string) string {
-	gotLines, wantLines := strings.Split(got, "\n"), strings.Split(want, "\n")
-	for i := range max(len(gotLines), len(wantLines)) {
-		var g, w string
-		if i < len(gotLines) {
-			g = gotLines[i]
-		}
-		if i < len(wantLines) {
-			w = wantLines[i]
-		}
-		if g != w || i >= len(gotLines) || i >= len(wantLines) {
-			return fmt.Sprintf("line %d: got %q, want %q", i+1, g, w)
-		}
-	}
-	return ""
-}
-
 const batteryFile = "../../conformance/testdata/haproxy.yaml"
 
 // The battery's file gives the configuration the conformance battery passed on HAProxy 3.2 and 3.4, byte for byte,
@@ -174,10 +135,10 @@ func TestBatteryFile(t *testing.T) {
 	proxyfile := string(testsupport.ReadFile(t, batteryFile))
 	want := string(testsupport.ReadFile(t, "testdata/haproxy-file.cfg"))
 	first := generate(t, proxyfile)
-	if difference := firstDifference(first, want); difference != "" {
+	if difference := testsupport.FirstDifferenceMessage(first, want); difference != "" {
 		t.Errorf("the battery's file: %s", difference)
 	}
-	if difference := firstDifference(generate(t, proxyfile), first); difference != "" {
+	if difference := testsupport.FirstDifferenceMessage(generate(t, proxyfile), first); difference != "" {
 		t.Errorf("a second render: %s", difference)
 	}
 }
@@ -362,7 +323,7 @@ func TestSecurityLines(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if block := missing(out, c.want); block != "" {
+			if block := testsupport.FirstMissingBlock(out, c.want); block != "" {
 				t.Errorf("the output does not hold, in its place:\n%s", block)
 			}
 		})
@@ -388,7 +349,8 @@ func delHeaders(names []string) []string {
 func TestScript(t *testing.T) {
 	plain := script(t, small())
 	if withPattern := script(t, beforeApp(`  - {name: p, pattern: "^/a$", to: app}`)); withPattern != plain {
-		t.Errorf("the script of a file with a pattern route differs from a file's with none: %s", firstDifference(withPattern, plain))
+		t.Errorf("the script of a file with a pattern route differs from a file's with none: %s",
+			testsupport.FirstDifferenceMessage(withPattern, plain))
 	}
 	want := [][]string{
 		{
@@ -439,7 +401,7 @@ func TestScript(t *testing.T) {
 		{`core.register_action("pf_join", {"http-req"}, function(txn)`},
 		{`core.register_action("pf_route", {"http-req"}, function(txn, route, text)`},
 	}
-	if block := missing(plain, want); block != "" {
+	if block := testsupport.FirstMissingBlock(plain, want); block != "" {
 		t.Errorf("the script does not hold, in its place:\n%s", block)
 	}
 }
@@ -476,7 +438,7 @@ func TestPrograms(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if block := missing(generate(t, c.proxyfile), [][]string{c.want}); block != "" {
+			if block := testsupport.FirstMissingBlock(generate(t, c.proxyfile), [][]string{c.want}); block != "" {
 				t.Errorf("the output does not hold, in its place:\n%s", block)
 			}
 		})
@@ -496,7 +458,7 @@ func TestOriginPatterns(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			out := generate(t, smallFile.Replaced(5, 5, `  all: {hosts: [localhost], patterns: ["`+c.pattern+`"]}`))
-			if block := missing(out, [][]string{{c.want}}); block != "" {
+			if block := testsupport.FirstMissingBlock(out, [][]string{{c.want}}); block != "" {
 				t.Errorf("the output does not hold:\n%s", block)
 			}
 		})
@@ -537,7 +499,7 @@ func TestManyValues(t *testing.T) {
 		{`  acl env1_own req.fhdr(origin) -m reg -- '^https?://h100\.example\.com(:[0-9]+)?$'`},
 		{"  use_backend app_http if { var(txn.route) -m str 600 }"},
 	}
-	if block := missing(generate(t, document.String()), want); block != "" {
+	if block := testsupport.FirstMissingBlock(generate(t, document.String()), want); block != "" {
 		t.Errorf("the output does not hold, in its place:\n%s", block)
 	}
 }
@@ -552,7 +514,7 @@ func TestHostsWithADot(t *testing.T) {
 		`  acl env1_own req.fhdr(origin) -m reg -- '^https?://\.dot\.example\.com(:[0-9]+)?$'`,
 		`  acl env1_own req.fhdr(origin) -m reg -- '^https?://dot\.example\.com\.(:[0-9]+)?$'`,
 	}}
-	if block := missing(out, want); block != "" {
+	if block := testsupport.FirstMissingBlock(out, want); block != "" {
 		t.Errorf("the output does not hold, in its place:\n%s", block)
 	}
 }
@@ -572,7 +534,7 @@ func TestHostsThatStartWithADash(t *testing.T) {
 		`  acl env1_own req.fhdr(origin) -m reg -- '^https?://-i(:[0-9]+)?$'`,
 		`  acl env1_own req.fhdr(origin) -m reg -- '^https?://-n(:[0-9]+)?$'`,
 	}}
-	if block := missing(out, want); block != "" {
+	if block := testsupport.FirstMissingBlock(out, want); block != "" {
 		t.Errorf("the output does not hold, in its place:\n%s", block)
 	}
 }
@@ -906,7 +868,7 @@ func TestForms(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			out := generate(t, c.proxyfile)
-			if block := missing(out, c.want); block != "" {
+			if block := testsupport.FirstMissingBlock(out, c.want); block != "" {
 				t.Errorf("the output does not hold, in its place:\n%s", block)
 			}
 			holdsNone(t, out, c.none)
@@ -1047,7 +1009,7 @@ func TestCheckLines(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			out := generate(t, c.proxyfile)
-			if block := missing(out, c.want); block != "" {
+			if block := testsupport.FirstMissingBlock(out, c.want); block != "" {
 				t.Errorf("the output does not hold, in its place:\n%s", block)
 			}
 			if end := strings.Join(c.want[len(c.want)-1], "\n"); c.last && !strings.HasSuffix(out, end) {
@@ -1116,7 +1078,7 @@ func TestQuoting(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if block := missing(generate(t, c.proxyfile), c.want); block != "" {
+			if block := testsupport.FirstMissingBlock(generate(t, c.proxyfile), c.want); block != "" {
 				t.Errorf("the output does not hold, in its place:\n%s", block)
 			}
 		})
@@ -1142,7 +1104,7 @@ func TestEnvironmentNames(t *testing.T) {
 				{ownHost},
 				{"  http-request set-var(txn.admitted) bool(true) if { var(txn.environment) -m str env1 } env1_own"},
 			}
-			if block := missing(out, want); block != "" {
+			if block := testsupport.FirstMissingBlock(out, want); block != "" {
 				t.Errorf("the output does not hold, in its place:\n%s", block)
 			}
 		})

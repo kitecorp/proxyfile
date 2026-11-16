@@ -150,6 +150,48 @@ func lineAt(data []byte, start int) string {
 	return fmt.Sprintf("%q", line)
 }
 
+// FirstDifferenceMessage returns the first line where got and want differ, counted from 1, as one message for a test
+// to print, or "" when they are equal. A text that ends first shows "" for that line. FirstDifferentLine does the same
+// for bytes and returns the parts instead, for a test that words the message itself.
+func FirstDifferenceMessage(got, want string) string {
+	gotLines, wantLines := strings.Split(got, "\n"), strings.Split(want, "\n")
+	for i := range max(len(gotLines), len(wantLines)) {
+		if i >= len(gotLines) || i >= len(wantLines) || gotLines[i] != wantLines[i] {
+			var g, w string
+			if i < len(gotLines) {
+				g = gotLines[i]
+			}
+			if i < len(wantLines) {
+				w = wantLines[i]
+			}
+			return fmt.Sprintf("line %d: got %q, want %q", i+1, g, w)
+		}
+	}
+	return ""
+}
+
+// FirstMissingBlock returns the first of blocks that out does not hold as whole lines, joined by newlines, or "" when
+// it holds them all. The lines of a block follow one another with nothing between them, and each block comes after
+// the one before it, so a test holds the order of the parts of a generated file as well as their text.
+func FirstMissingBlock(out string, blocks [][]string) string {
+	lines := strings.Split(out, "\n")
+	from := 0
+	for _, block := range blocks {
+		at := -1
+		for i := from; i+len(block) <= len(lines); i++ {
+			if slices.Equal(lines[i:i+len(block)], block) {
+				at = i
+				break
+			}
+		}
+		if at < 0 {
+			return strings.Join(block, "\n")
+		}
+		from = at + len(block)
+	}
+	return ""
+}
+
 // ReplaceOrAppend returns a copy of list with item in place of the first item matches reports true for, or, when it
 // reports true for none, with item appended. A test that declares a target of its own replaces the shipped one of that
 // name this way, because a lookup by name finds the first.

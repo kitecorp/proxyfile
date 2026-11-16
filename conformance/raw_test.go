@@ -21,7 +21,7 @@ import (
 // line break, and a trailer of any name. Over http/1.1 it writes the request line, r.line when set and otherwise the
 // method, the path and HTTP/1.1 with one space between them, then Host and each header in the order of their names,
 // then, with r.body or r.trailers, Transfer-Encoding: chunked and the body as one chunk ended by the trailers, or with
-// r.unframed the body as it is, its second half r.pause later, and reads the answer with net/http's reader. Over h2 it writes the connection preface, an empty SETTINGS frame and one
+// r.unframed the body as it is, its second half r.pause later, and r.then after it, and reads the answer with net/http's reader. Over h2 it writes the connection preface, an empty SETTINGS frame and one
 // HEADERS frame of the same fields, each a literal HPACK field with no index and no Huffman coding, then the body as a
 // DATA frame and the trailers as a second HEADERS frame, and reads frames until the stream ends. A closed or reset connection, or a
 // GOAWAY, before the answer is an error, as a client sees a proxy that refused the request so. The connection is the
@@ -31,6 +31,12 @@ func (w *world) sendRaw(r request) result {
 	if r.pause != 0 && (r.proto != "http/1.1" || !r.unframed) {
 		// A pause inside any other body is a mistake in the scenario data, which panics, as send does.
 		panic(fmt.Sprintf("the battery pauses inside an unframed http/1.1 body only, not %+v", r))
+	}
+	if r.scheme != "" && r.proto != "h2" {
+		panic(fmt.Sprintf("the battery sends a :scheme of its own over h2 only, not %+v", r))
+	}
+	if r.then != "" && (r.proto != "http/1.1" || !r.unframed || r.pause != 0 || r.halfClose) {
+		panic(fmt.Sprintf("the battery sends a second request after an unframed http/1.1 body with no pause or half-close only, not %+v", r))
 	}
 	start := time.Now()
 	fail := func(err error) result { return result{err: err, elapsed: time.Since(start)} }
@@ -65,7 +71,7 @@ func (w *world) sendRaw(r request) result {
 	case r.body == "" && r.trailers == nil:
 		text.WriteString("\r\n")
 	case r.unframed:
-		text.WriteString("\r\n" + r.body)
+		text.WriteString("\r\n" + r.body + r.then)
 	default:
 		text.WriteString("Transfer-Encoding: chunked\r\n\r\n")
 		if r.body != "" {
@@ -88,7 +94,9 @@ func (w *world) sendRaw(r request) result {
 	// The answer is read while the rest waits, so one that comes before it is taken then, and a write of the rest that
 	// fails on a connection the proxy closed hides nothing.
 	answered := make(chan result, 1)
-	go func() { answered <- readAnswer(conn, start) }()
+	// One reader for the connection, so the bytes of a second answer it took with the first are read with the second.
+	reader := bufio.NewReader(conn)
+	go func() { answered <- readAnswer(reader, start) }()
 	if rest != "" {
 		select {
 		case got := <-answered:
@@ -102,12 +110,18 @@ func (w *world) sendRaw(r request) result {
 			return fail(err)
 		}
 	}
-	return <-answered
+	got := <-answered
+	if r.then == "" || got.err != nil {
+		return got
+	}
+	second := readAnswer(reader, start)
+	second.first = got.status
+	return second
 }
 
-// readAnswer reads an HTTP/1.1 answer from conn with net/http's reader, timed from start.
-func readAnswer(conn net.Conn, start time.Time) result {
-	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+// readAnswer reads an HTTP/1.1 answer from reader with net/http's reader, timed from start.
+func readAnswer(reader *bufio.Reader, start time.Time) result {
+	resp, err := http.ReadResponse(reader, nil)
 	if err != nil {
 		return result{err: err, elapsed: time.Since(start)}
 	}
@@ -175,7 +189,10 @@ const (
 // sendFrames sends r over h2 on conn, its headers in the order of names, and reads the answer of stream 1.
 func (w *world) sendFrames(conn net.Conn, r request, names []string) result {
 	scheme := "https"
-	if w.plain {
+	switch {
+	case r.scheme != "":
+		scheme = r.scheme
+	case w.plain:
 		scheme = "http"
 	}
 	var block []byte
