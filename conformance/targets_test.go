@@ -61,9 +61,13 @@ func targets(t testing.TB) []target {
 			{label: "nginx-plain", proxyfile: "testdata/nginx-plain.yaml"},
 			{label: "haproxy-file", proxyfile: "testdata/haproxy.yaml"},
 			{label: "two-checks", proxyfile: "testdata/two-checks.yaml"},
+			{label: "nginx-checks", proxyfile: "testdata/nginx-checks.yaml"},
+			{label: "nginx-auth", proxyfile: "testdata/nginx-auth.yaml"},
 		},
 		image: image,
-		args:  []string{"-c", "/config/" + envoy.Config},
+		// Envoy writes its log lines to stdout every 10 s by default; every 100 ms, a row that reads them (answer.logged)
+		// finds them at once. Only the battery's own run of Envoy takes the flag, so no rendered file changes.
+		args:  []string{"-c", "/config/" + envoy.Config, "--file-flush-interval-msec", "100"},
 		ready: "http://127.0.0.1:9901/ready",
 		// The header docs/auth.md names for when_unavailable: allow, whatever the proxy, so a service reads one name.
 		mark: "x-envoy-auth-failure-mode-allowed",

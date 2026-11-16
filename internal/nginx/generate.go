@@ -4,7 +4,6 @@
 package nginx
 
 import (
-	_ "embed"
 	"fmt"
 	"net"
 	"regexp"
@@ -31,35 +30,45 @@ type route struct {
 	// name for its methods, and the upstream the route sends to, as the Envoy output names its route and cluster.
 	name     string
 	upstream string
-}
-
-// scriptName is the name of the script the configuration loads, written beside it: nginx reads a relative name in
-// js_import from the folder of the configuration it was started with.
-const scriptName = "proxyfile.js"
-
-// scriptBody is the script after its header line (script.js beside this file).
-//
-//go:embed script.js
-var scriptBody string
-
-// script is the script beside the configuration: generator.Header in the comment syntax of JavaScript, then the body.
-func script() []byte {
-	return []byte("// " + strings.TrimPrefix(generator.Header, "# ") + "\n" + scriptBody)
+	// checked is a route the auth check is asked on: auth.ask enabled and the route not auth: off. questions are the
+	// lines that set an RPC method's question for the check (questionLines).
+	checked   bool
+	questions []string
 }
 
 // edge is what the gateway does with a client's own headers before it routes the request. connection is true when the
 // client's address is the connection's peer, client_address connection, which the reader fills in for a file with tls
-// and no client_address; removed holds each remove_from_clients name in lower case, and remove the entries as written,
-// in order, which every route location empties.
+// and no client_address; removed holds each name of the early header removal in lower case
+// (generator.RemovedFromClients: remove_from_clients, then with auth.ask the question headers and each accept name),
+// and remove its entries in order, which every route location and the check location empty, checked or not and with
+// the check switched off too; mark is true with auth.ask, whose unchecked mark they empty after the others. accept
+// holds the accept names the handler sets (handlerAccepts).
 type edge struct {
 	connection bool
 	removed    map[string]bool
-	remove     []model.Header
+	remove     []removal
+	mark       bool
+	accept     []model.Header
+}
+
+// removal is an entry of the early header removal, with the key its name is refused by when nginx cannot read it, or
+// "" for a question header, a name of the generator's own, which is written as it is.
+type removal struct {
+	header model.Header
+	key    string
 }
 
 func edgeOf(g *model.Gateway) edge {
-	e := edge{connection: g.ClientAddress == model.ClientConnection, removed: map[string]bool{}, remove: g.RemoveFromClients}
-	for _, header := range g.RemoveFromClients {
+	e := edge{connection: g.ClientAddress == model.ClientConnection, removed: map[string]bool{}, mark: g.Auth != nil, accept: handlerAccepts(g.Auth)}
+	for i, header := range generator.RemovedFromClients(g) {
+		key := "auth.accept"
+		switch {
+		case i < len(g.RemoveFromClients):
+			key = "remove_from_clients"
+		case slices.ContainsFunc(generator.QuestionHeaders, func(q model.Header) bool { return q.Name == header.Name }):
+			key = ""
+		}
+		e.remove = append(e.remove, removal{header: header, key: key})
 		e.removed[strings.ToLower(header.Name)] = true
 	}
 	return e
@@ -346,18 +355,42 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		// version is the one the pinned images ship, which the battery and the validator run.
 		"# Needs the njs module, 1.0.2 or later.",
 		"load_module modules/ngx_http_js_module.so;",
-		"worker_processes auto;",
+	)
+	checkHTTP, checkStream := checkLines(in, &v)
+	if checkStream != nil {
+		// The relay that asks the check is a stream server of the same script.
+		w.lines("load_module modules/ngx_stream_js_module.so;")
+	}
+	// The official image's own nginx.conf writes 1024 connections a worker; nginx's default is 512. With the check, each
+	// checked request in flight holds four of one worker's connections: the client's, the check location's to the
+	// relay's socket, the relay's from it and the relay's to the check. A worker with none left cannot open the
+	// relay's connection, which reads as an unanswered check, so with allow the request went on with the unchecked
+	// mark, the check never asked: at 1024 with 2 workers, 10 of 500 requests at once and 231 of 800, where the Envoy
+	// output marked none. The Envoy output asks at most 1,024 checks at once, its check cluster's 1,024 connections,
+	// and holds 1,024 more waiting (measured on Envoy 1.40.2), so 8,192 lets one worker carry 2,048 checks, twice what
+	// it asks at once, and nginx with 2 or 4 workers then asked every check of 4,000 at once; worker_rlimit_nofile
+	// gives each worker a descriptor for each, where the host's own limit may be lower (measured on nginx 1.30.6 and
+	// 1.31.8; each worker holds 3.4 MiB more from its start: docs/nginx.md, Checks in flight on few workers).
+	connections := "1024"
+	if checkStream != nil {
+		connections = "8192"
+	}
+	w.lines("worker_processes auto;")
+	if checkStream != nil {
+		w.lines("worker_rlimit_nofile " + connections + ";")
+	}
+	w.lines(
 		// nginx logs a request line, with its query, which can carry a token, at error (a refused service) and at
 		// alert (a pattern PCRE2 gave up on), so its own log keeps emerg alone, which still shows a file it cannot
 		// load. The request log, which holds no request line, is writeLog's.
 		"error_log stderr emerg;",
-		// The official image's own nginx.conf writes 1024; nginx's default is 512. multi_accept stays off, nginx's
-		// default: with one worker busy with a flood of costly requests it let a plain request on a new connection
-		// wait 1.4 s at the median instead of 15 s, but the worker held 307 MiB after the flood where it held 30 MiB,
-		// and the battery's 2,000 held connections took 43 KiB each instead of 35; with a worker for each CPU the
-		// plain request waited under 1 ms at the median either way (measured on nginx 1.30.6 and 1.31.8, size 128 KiB).
+		// multi_accept stays off, nginx's default: with one worker busy with a flood of costly requests it let a plain
+		// request on a new connection wait 1.4 s at the median instead of 15 s, but the worker held 307 MiB after the
+		// flood where it held 30 MiB, and the battery's 2,000 held connections took 43 KiB each instead of 35; with a
+		// worker for each CPU the plain request waited under 1 ms at the median either way (measured on nginx 1.30.6
+		// and 1.31.8, size 128 KiB).
 		"events {",
-		"  worker_connections 1024;",
+		"  worker_connections "+connections+";",
 		"}",
 		"http {",
 	)
@@ -408,7 +441,7 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		"  grpc_pass_header Server;",
 	)
 	w.lines(hashSizes(in, routes)...)
-	writeLog(&w, g.Log, tm)
+	writeLog(&w, g.Log, tm, g.Auth)
 	writeTLS(&w, &v, g.TLS)
 	w.lines(
 		"",
@@ -468,12 +501,13 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		writeOriginCheck(&w, &v, i+1, environment, e)
 		writeCORSMaps(&w, &v, i+1, environment, in.Origins.CORS, e)
 	}
-	if hasDollar(g, in.Origins.CORS) {
+	if hasDollar(in) {
 		// A rewrite, an add_header value and a map's value read $ as the start of a variable, and nginx has no escape
 		// for it: this variable holds a $.
 		w.lines(`  geo $pf_dollar { default "$"; }`)
 	}
-	writeRouteChoice(&w, routes)
+	w.lines(checkHTTP...)
+	writeRouteChoice(&w, routes, asked(g) != nil)
 	for _, service := range g.Services {
 		for _, port := range service.Ports {
 			writeUpstream(&w, &v, service, port, tm.upstream)
@@ -555,6 +589,9 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		// The TLS answers come after the server's checks, which stay first in the order Envoy makes them; nginx
 		// applies an error_page and finds a named location wherever the server writes them.
 		w.lines(tlsServerLines(g.TLS, own)...)
+		if a := asked(g); a != nil {
+			writeCheck(&w, &v, a, g.Listen.Number, e)
+		}
 		w.lines(
 			// Every request goes on to the named location the route choice names: error_page takes a target that holds a
 			// variable (the core module page), and the 418 is only the step to it. Every other location is a named one,
@@ -565,7 +602,13 @@ func Generate(in generator.Input) ([]generator.File, error) {
 			"      error_page 418 = @pf_r_$pf_route;",
 			"    }",
 		)
-		w.lines(answerLocation("pf_r_refused", own, `return 400 "$pf_empty";`)...)
+		// The Envoy output closes the connection after the 400 of a dot segment with a ; parameter, at once with the check
+		// and after 1 s without it, and answers no request sent after it on that connection (measured on Envoy 1.40.2),
+		// so nginx closes it after every 400 this location answers, which a return with a body would otherwise keep.
+		w.lines(answerLocation("pf_r_refused", slices.Concat(own, []string{"      keepalive_timeout 0;"}), `return 400 "$pf_empty";`)...)
+		if asked(g) != nil {
+			w.lines(dotparamLocation(own)...)
+		}
 		w.lines(answerLocation("pf_r_upgrade-refused", own, `return 403 "$pf_upgrade_refused";`)...)
 		// Envoy's CORS filter answers a preflight it lets through itself, 200 with no body, and the service never sees
 		// it.
@@ -581,7 +624,10 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		w.lines(grpcUnavailable(server)...)
 		w.lines("  }")
 	}
+	// nginx sizes its tables once the whole http block is read, so these lines may follow the locations they size.
+	w.lines(v.headerTables()...)
 	w.lines("}")
+	w.lines(checkStream...)
 	if refused := v.Err(); refused != nil {
 		return nil, refused
 	}
@@ -613,7 +659,13 @@ const requestLogFormat = `'{"bytes_in":$request_length,"bytes_out":$body_bytes_s
 // 100% logs every request. Measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2, with each status and flag Envoy
 // logs below status_from; a chunked answer cut short is the one nginx records as whole (the support table's
 // less-strict list).
-func writeLog(w *writer, log *model.Log, tm timers) {
+//
+// With auth.ask the request line also holds authz_us, how long the check took, which the Envoy output writes as text,
+// the microseconds in quotes, or null when no check ran: no header named by only_with_header, a route with auth: off,
+// a preflight, the check switched off (measured on Envoy 1.40.2). escape=json escapes a quote a variable holds, so the
+// line is written by one of two formats, by whether the handler set $pf_authz_us. A request that went on with the
+// unchecked mark writes a third line, gateway_auth_unavailable, with the Envoy output's fields; with deny none does.
+func writeLog(w *writer, log *model.Log, tm timers, auth *model.Auth) {
 	// A request id or Host holding a byte above 0x7F is logged empty, so every line stays UTF-8; nginx logs the
 	// requests it refuses too, Host and all.
 	aboveASCII := regexKey(`[\x80-\xFF]`) + ` "";`
@@ -628,12 +680,25 @@ func writeLog(w *writer, log *model.Log, tm timers) {
 		// which Envoy logs 0 (measured on Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8); a JSON number has no leading
 		// zero, so both lines write it without them, 9 and 0. Every $status is digits, so the key takes each.
 		"  map $status $pf_log_code { "+regexKey(`^0*(?<pf_log_c>[0-9]+)\z`)+" $pf_log_c; }",
-		"  log_format pf_request escape=json "+requestLogFormat+";",
+	)
+	checked := auth != nil && auth.Enabled
+	switch {
+	case checked:
+		w.lines(
+			"  log_format pf_request escape=json "+withAuthz(`"$pf_authz_us"`)+";",
+			"  log_format pf_request_not_asked escape=json "+withAuthz("null")+";",
+		)
+	case auth != nil:
+		w.lines("  log_format pf_request escape=json " + withAuthz("null") + ";")
+	default:
+		w.lines("  log_format pf_request escape=json " + requestLogFormat + ";")
+	}
+	w.lines(
 		// UPE for an answer whose body is shorter than its content-length, which nginx sends on as it came and ends
 		// as Envoy does; a HEAD, a 1xx, a 204 and a 304 carry no body whatever their content-length says.
-		`  map "$request_method:$upstream_status:$upstream_response_length:$upstream_http_content_length" $pf_log_cut { `+
-			regexKey(`^HEAD:`)+` ""; `+regexKey(`^[A-Z]+:(?:1[0-9][0-9]|204|304):`)+` ""; `+
-			regexKey(`^[A-Z]+:[0-9]+:(?<pf_log_got>[0-9]+):(?!\k<pf_log_got>\z)[0-9]+\z`)+` UPE; default ""; }`,
+		`  map "$request_method:$upstream_status:$upstream_response_length:$upstream_http_content_length" $pf_log_cut { ` +
+			regexKey(`^HEAD:`) + ` ""; ` + regexKey(`^[A-Z]+:(?:1[0-9][0-9]|204|304):`) + ` ""; ` +
+			regexKey(`^[A-Z]+:[0-9]+:(?<pf_log_got>[0-9]+):(?!\k<pf_log_got>\z)[0-9]+\z`) + ` UPE; default ""; }`,
 	)
 	condition := ""
 	if log != nil && log.SamplePercent < 100 {
@@ -652,7 +717,26 @@ func writeLog(w *writer, log *model.Log, tm timers) {
 		w.lines(fmt.Sprintf(`  map "%s" $pf_log { "%s" 0; default 1; }`, strings.Join(reads, ""), strings.Repeat("0", len(reads))))
 		condition = " if=$pf_log"
 	}
-	w.lines("  access_log /dev/stdout pf_request" + condition + ";")
+	if checked {
+		// Each request is logged by one of the two formats, as $pf_log says when log samples.
+		if condition != "" {
+			w.lines(
+				`  map "$pf_log:$pf_authz_us" $pf_log_asked { `+regexKey(`^1:.`)+` 1; default 0; }`,
+				`  map "$pf_log:$pf_authz_us" $pf_log_not_asked { "1:" 1; default 0; }`,
+			)
+		} else {
+			w.lines(
+				`  map $pf_authz_us $pf_log_asked { "" 0; default 1; }`,
+				`  map $pf_authz_us $pf_log_not_asked { "" 1; default 0; }`,
+			)
+		}
+		w.lines(
+			"  access_log /dev/stdout pf_request if=$pf_log_asked;",
+			"  access_log /dev/stdout pf_request_not_asked if=$pf_log_not_asked;",
+		)
+	} else {
+		w.lines("  access_log /dev/stdout pf_request" + condition + ";")
+	}
 	// The Envoy output's second line, whatever log says, for a service that refused the connection or did not open it
 	// in the cluster's 5 s (UF), closed it before an answer (UC), said nothing for the route's 15 s (UT), or cut its
 	// answer short or sent one nginx could not read (UPE). nginx answers a connection it could not open in its connect
@@ -675,6 +759,18 @@ func writeLog(w *writer, log *model.Log, tm timers) {
 			strings.Join(failures, " ")+` default ""; }`,
 		"  access_log /dev/stdout pf_upstream_failure if=$pf_log_failure;",
 	)
+	if checked {
+		w.lines(
+			`  log_format pf_auth_unavailable escape=json '{"action":"$pf_action","event":"gateway_auth_unavailable",`+
+				`"failure_mode_allowed":"$pf_unchecked","request_id":"$pf_log_request_id","route":"$pf_log_route","status":$pf_log_code}';`,
+			"  access_log /dev/stdout pf_auth_unavailable if=$pf_unchecked;",
+		)
+	}
+}
+
+// withAuthz is the request log line with authz_us written as authz, its first key as Envoy sorts them.
+func withAuthz(authz string) string {
+	return `'{"authz_us":` + authz + "," + strings.TrimPrefix(requestLogFormat, `'{`)
 }
 
 // milliseconds is the map that writes source, nginx's seconds with three decimals, as Envoy writes a time: whole
@@ -769,6 +865,10 @@ func requestChecks(e edge) []string {
 	return checks
 }
 
+// envoyParses are the methods Envoy's HTTP/1 parser serves: its list but QUERY, which it holds and still answers 400
+// (measured on Envoy 1.40.2 with each method of the list, M-SEARCH, PRI and get).
+var envoyParses = slices.DeleteFunc(slices.Clone(generator.EnvoyMethods), func(method string) bool { return method == "QUERY" })
+
 // writeRequestChecks writes the flags requestChecks reads, each measured on Envoy 1.40.2 beside nginx 1.30.6 and
 // 1.31.8.
 func writeRequestChecks(w *writer, e edge) {
@@ -779,7 +879,7 @@ func writeRequestChecks(w *writer, e edge) {
 	w.lines(
 		// Over HTTP/1 Envoy answers 400 to a method its parser does not know, where nginx sends any method on.
 		`  map "$server_protocol:$request_method" $pf_f_method { `+regexKey(`^HTTP/2\.0:`)+` 0; `+
-			regexKey(`^[^:]*:(?:`+strings.Join(generator.EnvoyMethods, "|")+`)\z`)+` 0; default 1; }`,
+			regexKey(`^[^:]*:(?:`+strings.Join(envoyParses, "|")+`)\z`)+` 0; default 1; }`,
 		// A Connection token compares as any letter case (RFC 9110). Envoy serves a list with empty elements, as in
 		// close, or te,,,, and counts an element of white space alone as a token, as in te, , (measured).
 		`  map $http_connection $pf_f_connection { "" 0; `+
@@ -871,8 +971,14 @@ const decodedHex = `2[DEFdef]|3[0-9]|4[1-9A-Fa-f]|5[0-9ACFacf]|6[1-9A-Fa-f]|7[0-
 // a file with no pattern route matches $uri, because a prefix and a path hold no % and none of those bytes, so they
 // take the byte and its escape alike, and $uri escaped again is Envoy's path; a pattern could take the byte where
 // Envoy's never does, so a file with one refuses the path. Every class's default is e, which no mode takes, so a run
-// PCRE2 gave up on refuses the path.
+// PCRE2 gave up on refuses the path. A path with an empty segment before a dot-dot segment, / and . written or
+// escaped, is refused too (n is d): Envoy resolves dot segments before it merges slashes, so a .. can remove an empty
+// segment and /catalog//../products/1 is /catalog/products/1, where nginx merges first and takes /products/1, another
+// route; an empty segment after the last dot-dot segment comes to the same path both ways, as /products/../open//x does
+// (measured on Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8, over HTTP/1.1 and HTTP/2). The atomic group stops at the
+// first empty segment, since a dot-dot segment after a later one is after the first too, so a long path is read once.
 func writePathClasses(w *writer, hasPattern bool) {
+	const slash, dot = `(?:/|%2[Ff])`, `(?:\.|%2[Ee])`
 	modes := "0000 raw; 0001 rawk; 0100 rawk; 0101 rawk; 1000 uri; "
 	if !hasPattern {
 		modes += "0010 uri; 1010 uri; "
@@ -881,7 +987,8 @@ func writePathClasses(w *writer, hasPattern bool) {
 		// An absolute target with no path is the path /, as Envoy reads it; a target that is no path, such as OPTIONS's
 		// *, gets the default, which every class refuses.
 		`  map $request_uri $pf_rawpath { `+regexKey(`^(?<pf_p>/[^?]*)`)+` $pf_p; `+regexKey(`^\z`)+` /; default ""; }`,
-		`  map $pf_rawpath $pf_c_n { `+regexKey(`//|/\.\.?(?:/|\z)|%(?:`+decodedHex+`)`)+` 1; `+regexKey(`^/`)+` 0; default e; }`,
+		`  map $pf_rawpath $pf_c_n { `+regexKey(`^(?>.*?`+slash+`(?=`+slash+`)).*`+slash+dot+dot+`(?:/|%2[Ff]|\z)`)+` d; `+
+			regexKey(`//|/\.\.?(?:/|\z)|%(?:`+decodedHex+`)`)+` 1; `+regexKey(`^/`)+` 0; default e; }`,
 		`  map $pf_rawpath $pf_c_k { `+regexKey(`%(?!`+decodedHex+`)[0-9A-Fa-f]{2}`)+` 1; `+regexKey(`^/`)+` 0; default e; }`,
 		`  map $pf_rawpath $pf_c_e { `+regexKey("["+generator.EscapedInPath+`\x80-\xFF]`)+` 1; `+regexKey(`^/`)+` 0; default e; }`,
 		`  map $request_uri $pf_c_q { `+regexKey(`^[^?]*\?\z`)+` 1; `+regexKey(`^`)+` 0; default e; }`,
@@ -904,21 +1011,157 @@ func hashSizes(in generator.Input, routes []route) []string {
 			hosts++
 		}
 	}
-	bucket := max(64, (16+(longest+2+7)/8*8+63)/64*64)
+	bucket := hashBucket(longest, 1)
 	// Each route declares up to two variables and its share of the groups' (writeRouteChoice), fewer than three, and each
 	// environment up to five (writeOriginCheck, writeCORSMaps), beside the 81 or fewer the file declares once: its maps,
 	// its flag, the variables of the script, the request log's (writeLog) and the named captures (76 with client_address
 	// connection).
 	variables := 3*len(routes) + 5*len(in.Origins.Environments) + 85
+	if a := asked(in.Gateway); a != nil {
+		// The auth check's: its js_vars, one for each accept name, its maps, their capture, and the values each
+		// environment server sets for the handler (checkLines, writeCheck, writeLog).
+		variables += 17 + len(handlerAccepts(a))
+	}
 	// nginx builds the smallest table that holds the names and tries no size above the maximum (ngx_hash_init), so a
 	// larger maximum costs nothing. With the request log's maps a file of 5 routes needed 1,056 and one of 40 routes
 	// in 8 environments 1,280 (measured on nginx 1.30.6 and 1.31.8), over nginx's default 1,024, so the variables'
 	// maximum is never under 2,048, which held every file measured where 4 for each variable comes to less: up to 140
-	// routes in one environment, or 20 routes in 64 environments.
+	// routes in one environment, or 20 routes in 64 environments. A bucket of 128 bytes holds two names of the longest
+	// variable a file declares where nginx's 64 holds one: with it 600 accept names loaded at 2,048, where at 64 300 and
+	// 600 made nginx warn (measured on nginx 1.30.6 and 1.31.8).
 	return []string{
 		fmt.Sprintf("  server_names_hash_bucket_size %d;", bucket),
 		fmt.Sprintf("  server_names_hash_max_size %d;", max(512, 4*hosts)),
+		"  variables_hash_bucket_size 128;",
 		fmt.Sprintf("  variables_hash_max_size %d;", max(2048, 4*variables)),
+	}
+}
+
+// hashBucket is the bucket of nginx's hash tables, in bytes, that holds n names of longest bytes: a name takes 8 bytes
+// and its length with 2 more rounded up to 8, and a bucket 8 more, rounded up to the cache line of 64 bytes
+// (ngx_hash_init), never under nginx's 64.
+func hashBucket(longest, n int) int {
+	return max(64, (8+n*hashElement(longest)+63)/64*64)
+}
+
+// hashElement is the bytes a name of length bytes takes in a bucket.
+func hashElement(length int) int {
+	return 8 + (length+2+7)/8*8
+}
+
+// headerTable is the header names one location sets, each once, and the key and position of each a user's list gave.
+type headerTable struct {
+	grpc    bool
+	names   []string
+	written map[string]written
+}
+
+// moduleHeaders are the names the proxy and gRPC modules add to every location's table beside the ones it sets.
+var moduleHeaders = []string{"host", "connection", "content-length", "transfer-encoding", "te", "keep-alive", "expect", "upgrade"}
+
+// all is the table's names with the module's own.
+func (t headerTable) all() []string {
+	names := slices.Clone(t.names)
+	for _, name := range moduleHeaders {
+		if !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// hashFits is true when ngx_hash_init builds a table of names with buckets of bucket bytes in at most size slots: it
+// tries each size from its start, and the first in which no bucket overflows is the table; with none, nginx warns and
+// builds an oversized one, or refuses a name no bucket holds. A name's slot is its hash, each byte times 31 plus the
+// next in a 64-bit word, modulo the size (ngx_hash_key_lc). It matched nginx -t on nginx 1.30.6 and 1.31.8 for names
+// of 46 to 4,000 bytes and tables of 31 to 3,041 names.
+func hashFits(names []string, bucket, size int) bool {
+	room := bucket - 8
+	for _, name := range names {
+		if hashElement(len(name)) > room {
+			return false
+		}
+	}
+	start := max(1, len(names)/(room/16))
+	if size > 10000 && size/len(names) < 100 {
+		start = size - 1000
+	}
+	keys := make([]uint64, len(names))
+	for i, name := range names {
+		for j := 0; j < len(name); j++ {
+			keys[i] = keys[i]*31 + uint64(name[j])
+		}
+	}
+	for n := start; n <= size; n++ {
+		used := make([]int, n)
+		fits := true
+		for i, name := range names {
+			slot := keys[i] % uint64(n)
+			used[slot] += hashElement(len(name))
+			if used[slot] > room {
+				fits = false
+				break
+			}
+		}
+		if fits {
+			return true
+		}
+	}
+	return false
+}
+
+// headerTables sizes the table nginx builds of the header names each proxy location sets, which nginx refuses to load
+// when a name does not fit its default bucket of 64 bytes (a name of 47 bytes or more) and warns about past its
+// default 512 slots (130 names of 20 bytes): the bucket holds the longest name, the slots are 4 for each name of the
+// largest table, and the bucket grows by its cache line until every table fits. A gRPC location's table has no
+// directive: nginx builds it with buckets of 64 bytes and at most 512 slots, so each name of auth.accept and
+// remove_from_clients such a location sets is refused when its table does not fit (measured on nginx 1.30.6 and
+// 1.31.8).
+func (v *values) headerTables() []string {
+	longest, most := 0, 0
+	for _, t := range v.tables {
+		if t.grpc {
+			if !hashFits(t.all(), 64, 512) {
+				v.refuseGRPCTable(t)
+			}
+			continue
+		}
+		most = max(most, len(t.all()))
+		for _, name := range t.names {
+			longest = max(longest, len(name))
+		}
+	}
+	bucket, size := hashBucket(longest, 1), max(512, 4*most)
+	for slices.ContainsFunc(v.tables, func(t headerTable) bool { return !t.grpc && !hashFits(t.all(), bucket, size) }) {
+		bucket += 64
+	}
+	return []string{
+		fmt.Sprintf("  proxy_headers_hash_bucket_size %d;", bucket),
+		fmt.Sprintf("  proxy_headers_hash_max_size %d;", size),
+	}
+}
+
+// refuseGRPCTable refuses the names of a gRPC location's table that does not fit: each name too long for a bucket of
+// 64 bytes, or with none, the first name of each list that gave the table names, as nginx warns for the list as a whole.
+func (v *values) refuseGRPCTable(t headerTable) {
+	const form, instead = "naming headers a gRPC route's location cannot hold",
+		"nginx builds the table of the headers a gRPC location sets with buckets of 64 bytes and at most 512 slots, which no directive changes, so a name of 47 bytes or more, or a list too long beside the location's own headers, does not load; write shorter names or fewer, or render it for envoy"
+	long := false
+	for _, name := range t.names {
+		if w, ok := t.written[name]; ok && hashElement(len(name)) > 56 {
+			v.Refuse(w.pos, w.key, form, "nginx", instead)
+			long = true
+		}
+	}
+	if long {
+		return
+	}
+	keys := map[string]bool{}
+	for _, name := range t.names {
+		if w, ok := t.written[name]; ok && !keys[w.key] {
+			keys[w.key] = true
+			v.Refuse(w.pos, w.key, form, "nginx", instead)
+		}
 	}
 }
 
@@ -926,14 +1169,23 @@ func hashSizes(in generator.Input, routes []route) []string {
 // entry, sorted by path as in.RPC is, at the entry's place. Each value of the input goes into the file through v.
 func routesOf(in generator.Input, v *values) ([]route, error) {
 	g := in.Gateway
+	questions := map[string]generator.Question{}
+	for _, q := range generator.Questions(in) {
+		questions[q.Path] = q
+	}
 	var routes []route
 	for i := range g.Routes {
 		entry := &g.Routes[i]
+		checked := asked(g) != nil && entry.AuthOff == nil
 		if entry.RPC != nil {
 			for _, method := range in.RPC {
 				r, err := toService(v, method.Target, model.GRPC, "the RPC method "+method.Path())
 				if err != nil {
 					return nil, err
+				}
+				r.checked = checked
+				if q, ok := questions[method.Path()]; ok && checked {
+					r.questions = questionLines(v, q, method.Pos)
 				}
 				r.key = v.token("rpc.methods", method.Pos, regexKey("^"+regexp.QuoteMeta(method.Path())+`\z`))
 				// The model keeps no position of the name, so the refusal names the rpc entry's to.
@@ -956,6 +1208,7 @@ func routesOf(in generator.Input, v *values) ([]route, error) {
 		}
 		r.rewrite = rewriteLine(v, entry)
 		r.name = v.token("routes[].name", entry.Name.Pos, quoted(entry.Name.Value))
+		r.checked = checked
 		routes = append(routes, r)
 	}
 	return routes, nil
@@ -1051,11 +1304,21 @@ func dollars(text string) string {
 	return strings.ReplaceAll(text, "$", "${pf_dollar}")
 }
 
-// hasDollar says whether a rewrite or a cors value holds a $, which needs $pf_dollar. A certificate's or a key's path
-// holding $ is refused before the generator runs (format's nginxDollarPath).
-func hasDollar(g *model.Gateway, cors origins.CORS) bool {
+// hasDollar says whether a rewrite, a cors value, the auth check's path or an RPC method's question holds a $, which
+// needs $pf_dollar. A certificate's or a key's path holding $ is refused before the generator runs (format's
+// nginxDollarPath).
+func hasDollar(in generator.Input) bool {
+	g, cors := in.Gateway, in.Origins.CORS
 	for _, r := range g.Routes {
 		if r.Rewrite != nil && strings.Contains(r.Rewrite.Value, "$") {
+			return true
+		}
+	}
+	if a := asked(g); a != nil && strings.Contains(a.Path, "$") {
+		return true
+	}
+	for _, q := range generator.Questions(in) {
+		if strings.Contains(q.Action, "$") || slices.ContainsFunc(q.Reports, func(report string) bool { return strings.Contains(report, "$") }) {
 			return true
 		}
 	}
@@ -1092,7 +1355,10 @@ const groupSize = 64
 // escaped again, for a path matched on $uri. A route with a rewrite has one, whose rewrite reads $uri, which is the path
 // as written when the path needs no normalising and keeps no escape; a path that keeps an escape or a target with an
 // empty query (mode rawk) is refused on it, because nginx would send the escape decoded and drop the ?.
-func writeRouteChoice(w *writer, routes []route) {
+//
+// With the auth check asked, a dot segment with a ; parameter goes to dotparamLocation, which asks the check before it
+// refuses the path, as the Envoy output's refusing route is checked.
+func writeRouteChoice(w *writer, routes []route, checked bool) {
 	var level []string
 	for i, r := range routes {
 		n := i + 1
@@ -1128,9 +1394,13 @@ func writeRouteChoice(w *writer, routes []route) {
 		level = next
 	}
 	choice := level[0]
+	dotparam := "refused"
+	if checked {
+		dotparam = "dotparam"
+	}
 	w.lines(
 		`  map "$pf_f_dotparam$pf_f_backslash$pf_f_control$pf_f_upgrade$pf_f_preflight:$pf_mode:`+choice+`" $pf_route {`,
-		"    "+regexKey("^1")+" refused;",
+		"    "+regexKey("^1")+" "+dotparam+";",
 		"    "+regexKey("^01")+" refused;",
 		"    "+regexKey("^001")+" refused;",
 		"    "+regexKey("^0001")+" upgrade-refused;",
@@ -1398,13 +1668,8 @@ func tlsServerLines(tls *model.TLS, headers []string) []string {
 // timeouts.upstream_idle or Envoy's hour (timersOf); 32 is a number chosen, not measured under load.
 func writeUpstream(w *writer, v *values, service model.Service, port model.ServicePort, idle string) {
 	w.lines("  upstream " + v.token(serviceKey, service.Pos, service.Cluster(port.Protocol)) + " {")
-	// addresses holds two addresses or more, so one is address's.
-	key := "services.<service name>.addresses"
-	if len(service.Addresses) == 1 {
-		key = "services.<service name>.address"
-	}
 	for _, address := range service.Addresses {
-		w.lines("    server " + v.token(key, address.Pos, net.JoinHostPort(address.Value, strconv.FormatInt(port.Number, 10))) + " max_fails=0;")
+		w.lines("    server " + v.token(addressKey(&service), address.Pos, net.JoinHostPort(address.Value, strconv.FormatInt(port.Number, 10))) + " max_fails=0;")
 	}
 	w.lines(
 		"    keepalive 32;",
@@ -1433,63 +1698,48 @@ func routeLocations(routes []route, v *values, e edge) string {
 // writeLocation writes the named location name of route r, which sets the path the service receives with path, or
 // sends the target as written when path is "". It writes every header it sends, because a location that writes one
 // proxy_set_header inherits none from the levels above it (the proxy module page), and sets each header Envoy removes
-// empty, which nginx then does not send, and each header remove_from_clients removes, but one the location sends
+// empty, which nginx then does not send, and each name of the early header removal, but one the location sends
 // itself, whose value then reads no client copy (edge.read). A service that fails is answered 502 with no body, or a
 // gRPC call in gRPC's form (grpcUnavailable), through a named location: error_page to a URI would search the
 // locations again; a service that times out is answered by @pf_504 (timeoutAnswer) the same way. The route and
 // upstream the request log writes are set first: set runs before the rewrite's break, and the values stay through an
 // error_page to @pf_502 or @pf_504 (measured on nginx 1.30.6 and 1.31.8), and a request no route location takes logs
-// them empty, where the Envoy output logs them null.
+// them empty, where the Envoy output logs them null. On a checked route the handler runs in the access phase, after
+// the rewrite and before the request is passed on, and the location sets each accepted name and the unchecked mark
+// from it; no line of the location answers before it.
 func writeLocation(w *writer, v *values, name, path string, r route, e edge) {
 	w.lines(
 		"    location "+name+" {",
 		"      set $pf_log_route "+r.name+";",
 		"      set $pf_log_upstream "+r.upstream+";",
 	)
+	w.lines(r.questions...)
 	if path != "" {
 		w.lines("      " + path)
 	}
-	set := "proxy_set_header"
-	if r.grpc {
-		set = "grpc_set_header"
+	if r.checked {
+		w.lines(handlerLines...)
 	}
-	sent := map[string]bool{}
-	send := func(header, written, value string) {
-		sent[header] = true
-		w.lines("      " + set + " " + written + " " + value + ";")
+	h := locationHeaders{w: w, set: "proxy_set_header", sent: map[string]bool{}}
+	if r.grpc {
+		h.set = "grpc_set_header"
 	}
 	// Without Host nginx sends a gRPC service the upstream's name as :authority (measured on nginx 1.30.6 and 1.31.8).
 	// A gRPC location sends TE: trailers itself.
-	send("host", "Host", r.host)
-	send("x-request-id", "X-Request-Id", "$pf_request_id")
-	send("x-forwarded-proto", "X-Forwarded-Proto", "$pf_forwarded_proto")
-	// The service receives the Origin as one line, the lines Envoy joins (writeOrigin).
-	if origin := e.origin(); origin != "" {
-		send("origin", "Origin", origin)
-	}
-	if e.connection {
-		send("x-forwarded-for", "X-Forwarded-For", "$pf_forwarded_for")
-		send("x-envoy-external-address", "x-envoy-external-address", "$remote_addr")
-	}
+	h.send("host", "Host", r.host)
+	h.forwarding(e)
 	if !r.grpc {
-		send("upgrade", "Upgrade", "$pf_upgrade")
-		send("connection", "Connection", "$pf_connection")
-		send("http2-settings", "HTTP2-Settings", "$pf_http2_settings")
-		send("te", "TE", "$pf_te")
+		h.send("upgrade", "Upgrade", "$pf_upgrade")
+		h.send("connection", "Connection", "$pf_connection")
+		h.send("http2-settings", "HTTP2-Settings", "$pf_http2_settings")
+		h.send("te", "TE", "$pf_te")
 	}
-	for _, header := range generator.RemovedByEnvoy {
-		send(header, header, `""`)
+	h.removedByEnvoy(e)
+	if r.checked {
+		h.accepted(v, e)
 	}
-	if e.connection {
-		for _, header := range generator.RemovedByEnvoyFacingClients {
-			send(header, header, `""`)
-		}
-	}
-	for _, header := range e.remove {
-		if name := strings.ToLower(header.Name); !sent[name] {
-			send(name, v.token("remove_from_clients", header.Pos, quoted(name)), `""`)
-		}
-	}
+	h.fromClients(v, e)
+	h.done(v)
 	if r.grpc {
 		w.lines("      grpc_pass " + r.pass + ";")
 	} else {
@@ -1516,7 +1766,10 @@ func (w *writer) lines(texts ...string) {
 // values writes each value of the input into the file through one call, token, which keeps a refusal of each value
 // whose nginx form is longer than nginx reads, by the key that holds it, as the support table names the key. The form
 // decides, not the value: a $ of a rewrite is written as a 12-byte variable, and a dot of an origin's host as \\.
-type values struct{ generator.Refusals }
+type values struct {
+	generator.Refusals
+	tables []headerTable // the header names of each location, in the order written
+}
 
 // token returns written, the nginx form of a value of key at pos, and keeps the value's refusal when nginx would not
 // read written from its file.

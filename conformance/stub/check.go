@@ -32,6 +32,23 @@ func (b *backend) check(w http.ResponseWriter, r *http.Request) {
 	case "report-forwarded":
 		allowed(w, fmt.Sprintf("proto=%s host=%s", r.Header.Get("x-forwarded-proto"), r.Host))
 		w.WriteHeader(http.StatusOK)
+	case "report-removed":
+		// What the check received of the headers a client may not send it: one remove_from_clients names and send
+		// covers, the user its answer accepts, and the unchecked mark.
+		allowed(w, fmt.Sprintf("client-id=%s user-id=%s mark=%s", r.Header.Get("x-client-id"), r.Header.Get("x-user-id"),
+			r.Header.Get("x-envoy-auth-failure-mode-allowed")))
+		w.WriteHeader(http.StatusOK)
+	case "report-settings":
+		// A client's HTTP2-Settings, which only a send that covers it lets reach the check.
+		allowed(w, fmt.Sprintf("http2-settings=%s", r.Header.Get("http2-settings")))
+		w.WriteHeader(http.StatusOK)
+	case "allow-empty":
+		// An allowing answer with no header: the service must receive none of an earlier answer's.
+		w.WriteHeader(http.StatusOK)
+	case "redirect-relative":
+		// A Location that is a path, which a client reads against the request's own origin.
+		w.Header().Set("location", "/login?next=%2Fx")
+		w.WriteHeader(http.StatusFound)
 	case "big-accept":
 		allowed(w, "")
 		w.Header().Set("x-user-id", strings.Repeat("u", 20000))
@@ -45,6 +62,8 @@ func (b *backend) check(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "text/plain")
 		w.WriteHeader(http.StatusUnauthorized)
 		io.WriteString(w, "no entry: 100% sure é\nnext line")
+	case "deny-401-empty":
+		w.WriteHeader(http.StatusUnauthorized)
 	case "deny-403":
 		w.WriteHeader(http.StatusForbidden)
 		io.WriteString(w, "denied by the check")
@@ -143,6 +162,73 @@ var rawAnswers = map[string]string{
 		"content-length: 0\r\n\r\n",
 	"date-twice-in-101":   "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\ndate: v1\r\n" + numbered(98) + "date: v2\r\n\r\n",
 	"cookie-twice-in-101": "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nset-cookie: a=1\r\n" + numbered(98) + "set-cookie: b=2\r\n\r\n",
+	// The forms each of nginx's own readers of an answer reads in a way of its own, a status line, a header line or a
+	// framing that RFC 9112 does not admit or reads otherwise; the relay reads each as Envoy 1.40.2 does or refuses it.
+	// Each 200 reports its token in x-user-check, so a row reads back that it was allowed.
+	"status-spaced":            withStatus("2 0 0 OK", "status-spaced") + "Content-Length: 0\r\n\r\n",
+	"status-fraction":          withStatus("200.1 OK", "status-fraction") + "Content-Length: 0\r\n\r\n",
+	"status-two-digits":        withStatus("20 OK", "status-two-digits") + "Content-Length: 0\r\n\r\n",
+	"status-zero":              withStatus("000 OK", "status-zero") + "Content-Length: 0\r\n\r\n",
+	"allow-line-no-colon":      allowedHead("allow-line-no-colon") + "nocolon\r\nContent-Length: 0\r\n\r\n",
+	"deny-line-no-colon":       "HTTP/1.1 401 Unauthorized\r\nnocolon\r\nContent-Length: 6\r\n\r\ndenied",
+	"deny-folded":              "HTTP/1.1 401 Unauthorized\r\nx-a: a\r\n b\r\nContent-Length: 6\r\n\r\ndenied",
+	"version-2":                "HTTP/2.0 200 OK\r\nx-user-id: u-1\r\nx-user-check: version-2\r\nContent-Length: 0\r\n\r\n",
+	"two-spaces-after-version": "HTTP/1.1  200 OK\r\nx-user-id: u-1\r\nx-user-check: two-spaces-after-version\r\nContent-Length: 0\r\n\r\n",
+	"vertical-tab":             allowedHead("vertical-tab") + "x-a: a\x0bb\r\nContent-Length: 0\r\n\r\n",
+	"gzip-chunked":             allowedHead("gzip-chunked") + "Transfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n",
+	"identity-length":          allowedHead("identity-length") + "Transfer-Encoding: identity\r\nContent-Length: 0\r\n\r\n",
+	"chunk-size-space":         allowedHead("chunk-size-space") + "Transfer-Encoding: chunked\r\n\r\n2 \r\nok\r\n0\r\n\r\n",
+	"bad-chunk-end":            allowedHead("bad-chunk-end") + "Transfer-Encoding: chunked\r\n\r\n2\r\nokXX0\r\n\r\n",
+	"length-spaced":            allowedHead("length-spaced") + "Content-Length:  0 \r\n\r\n",
+	"space-before-colon":       allowedHead("space-before-colon") + "x-a : b\r\nContent-Length: 0\r\n\r\n",
+	"nul-in-name":              allowedHead("nul-in-name") + "\x00x: b\r\nContent-Length: 0\r\n\r\n",
+	"lone-cr":                  allowedHead("lone-cr") + "x-a: b\r\r\nContent-Length: 0\r\n\r\n",
+	"underscore-name":          allowedHead("underscore-name") + "x_a: b\r\nContent-Length: 0\r\n\r\n",
+	"e9-in-name":               allowedHead("e9-in-name") + "x\xe9: b\r\nContent-Length: 0\r\n\r\n",
+	"bytes-after-body":         allowedHead("bytes-after-body") + "Content-Length: 2\r\n\r\nokEXTRA",
+	"length-past-1mib":         allowedHead("length-past-1mib") + "Content-Length: 99999999999999999999\r\n\r\n",
+	"status-304":               "HTTP/1.1 304 Not Modified\r\nx-user-id: u-1\r\n\r\n",
+	"status-500":               "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 14\r\n\r\ncheck-500-body",
+	"status-503-body":          "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 14\r\n\r\ncheck-503-body",
+	"status-599":               withStatus("599 Other", "status-599") + "Content-Length: 0\r\n\r\n",
+	"status-101":               "HTTP/1.1 101 Switching Protocols\r\nConnection: upgrade\r\nUpgrade: x\r\n\r\n",
+	// Envoy 1.40.2 reads a bare LF at the end of a chunk's data, of the final line and of a trailer line, and none at
+	// the end of a chunk-size line, the last chunk's included.
+	"chunk-size-lf":  allowedHead("chunk-size-lf") + "Transfer-Encoding: chunked\r\n\r\n5\nhello\r\n0\r\n\r\n",
+	"last-chunk-lf":  allowedHead("last-chunk-lf") + "Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\n\r\n",
+	"chunk-other-lf": allowedHead("chunk-other-lf") + "Transfer-Encoding: chunked\r\n\r\n5\r\nhello\n0\r\nx-t: v\n\n",
+	// Envoy 1.40.2 keeps a folded line's spaces and tabs, and drops its line end.
+	"folded-tab":    "HTTP/1.1 200 OK\r\nx-user-id: u-1\r\nx-user-check: a\r\n\tb\r\nContent-Length: 0\r\n\r\n",
+	"folded-spaces": "HTTP/1.1 200 OK\r\nx-user-id: u-1\r\nx-user-check: a \r\n  b\r\nContent-Length: 0\r\n\r\n",
+	"folded-twice":  "HTTP/1.1 200 OK\r\nx-user-id: u-1\r\nx-user-check: a\r\n b\r\n\t c \r\nContent-Length: 0\r\n\r\n",
+	// Accepted headers that take the request past the battery files' header limits, of 60 and 96 KiB, beside a client's
+	// header of 30,000 bytes, in an answer whose head is within the 81,920 bytes Envoy 1.40.2 reads; and an accepted
+	// header with an empty value.
+	"accept-past-size": "HTTP/1.1 200 OK\r\nx-user-id: u-1\r\nx-user-check: " + strings.Repeat("c", 70000) + "\r\nContent-Length: 0\r\n\r\n",
+	"accept-empty":     "HTTP/1.1 200 OK\r\nx-user-id: u-1\r\nx-user-check:\r\nContent-Length: 0\r\n\r\n",
+	// An accepted header that takes the request within a few bytes of the 60 KiB header size, so a row tells a count
+	// of the request that is a few bytes short.
+	"accept-60000": "HTTP/1.1 200 OK\r\nx-user-id: u-1\r\nx-user-check: " + strings.Repeat("c", 60000) + "\r\nContent-Length: 0\r\n\r\n",
+	// The relay's own header name in an answer the check writes: the relay frames what it hands nginx by lengths it
+	// writes, so the name is one more header of the check's.
+	"allow-proxyfile-check": allowedHead("allow-proxyfile-check") + "x-proxyfile-check: 1\r\nContent-Length: 0\r\n\r\n",
+	// A byte of 0x80 or more in a header of a denial, which reaches the client as the check wrote it.
+	"deny-e9-header": "HTTP/1.1 401 Unauthorized\r\nx-a: caf\xe9\r\nContent-Length: 6\r\n\r\ndenied",
+	// Bodies at the 1 MiB nginx reads of a check's answer, and past it.
+	"allow-1mib-body":        sized(allowedHead("allow-1mib-body"), 1<<20),
+	"denial-1mib":            sized("HTTP/1.1 401 Unauthorized\r\n", 1<<20),
+	"denial-1mib-and-a-byte": sized("HTTP/1.1 401 Unauthorized\r\n", 1<<20+1),
+	"denial-1100000":         sized("HTTP/1.1 401 Unauthorized\r\n", 1100000),
+}
+
+// withStatus is the start of an answer whose status line is HTTP/1.1 and status, with the headers of allowedHead's.
+func withStatus(status, token string) string {
+	return "HTTP/1.1 " + status + "\r\nx-user-id: u-1\r\nx-user-check: " + token + "\r\n"
+}
+
+// sized is head followed by a Content-Length of size and a body of size bytes.
+func sized(head string, size int) string {
+	return head + fmt.Sprintf("Content-Length: %d\r\n\r\n", size) + strings.Repeat("s", size)
 }
 
 // numbered is n header lines, x-n-001: v and on, each name once.

@@ -3,9 +3,10 @@
 `auth` is not an auth service. It checks each request before the proxy forwards it, in one of two ways or both:
 
 - `ask` makes the proxy ask a service of yours "may this request pass?", and copy the identity headers your service
-  answers onto the request. Your service decides, and the proxy acts on the answer. Envoy and nginx have this built
-  in, as Envoy's `ext_authz` and nginx's `auth_request`. HAProxy has it as a Lua action, in `proxyfile.lua` beside the
-  configuration, that asks the check through a TCP `listen` section of the file
+  answers onto the request. Your service decides, and the proxy acts on the answer. Envoy has this built in, as its
+  `ext_authz`. nginx has it as a function in `proxyfile.js` beside the configuration, that asks the check through a
+  location of the file and a `stream` server ([nginx](nginx.md#the-auth-check)). HAProxy has it as a Lua action, in
+  `proxyfile.lua` beside the configuration, that asks the check through a TCP `listen` section of the file
   ([HAProxy](haproxy.md#the-auth-check)).
 - `jwt` makes the proxy verify a signed token on the request itself, with no service of yours to ask
   ([Tokens](#tokens)). nginx open source has no token verification, and HAProxy's `jwt_verify` takes one key file, with
@@ -25,7 +26,8 @@ auth:
 ```
 
 The check is a plain HTTP request to your service, so your service needs nothing made for one proxy. With the envoy
-target it is Envoy's `ext_authz` in HTTP mode, and with the haproxy target the script `proxyfile.lua` sends it
+target it is Envoy's `ext_authz` in HTTP mode, with the nginx target the script `proxyfile.js` sends it through its
+relay ([nginx](nginx.md#what-the-check-is-sent)), and with the haproxy target the script `proxyfile.lua` sends it
 ([HAProxy](haproxy.md#what-the-check-is-sent)). How the check works:
 
 - The check gets a request to the path of `ask`, never the client's path or query, because paths can carry links and
@@ -33,7 +35,10 @@ target it is Envoy's `ext_authz` in HTTP mode, and with the haproxy target the s
   it gets are the ones `send` names and the route's question below. HTTP mode adds the client's `Host`, the request's
   method, `Authorization` and `Content-Length: 0`, whatever `send` says, and Envoy's own client adds
   `x-envoy-internal: true` and `x-envoy-expected-rq-timeout-ms`, the deadline in milliseconds (measured on Envoy
-  1.40.2), and the script of the haproxy target sends the same two.
+  1.40.2), and the scripts of the nginx and haproxy targets send the same two.
+- Envoy sends the check well-formed UTF-8 in a header value as the client sent it, and writes a `!` for each other byte
+  of 0x80 or more (measured on Envoy 1.40.2), and the script of the nginx target writes the same, where the script of
+  the haproxy target sends such a byte as it received it, a declared difference ([HAProxy](haproxy.md#where-haproxy-answers-the-check-otherwise-than-the-envoy-output)).
 - Each RPC route adds its question to the check: `x-gateway-action` holds the method's `action` and `x-gateway-reports`
   its `reports` joined by commas. A plain route adds neither. The question is for the check alone, and no service sees
   it.
@@ -46,15 +51,18 @@ target it is Envoy's `ext_authz` in HTTP mode, and with the haproxy target the s
   `x-envoy-upstream-service-time`, which Envoy's own client for the check adds ([Defaults](defaults.md)). A denial to a
   request from a listed origin carries that origin's CORS answer, `Access-Control-Allow-Origin` and, when
   `cors.expose_headers` is written, `Access-Control-Expose-Headers` (measured on Envoy 1.40.2, HAProxy 3.2.26 and
-  3.4.7). HAProxy answers some denials otherwise, such as one larger than it reads whole, which it answers `403`
-  ([HAProxy](haproxy.md#where-haproxy-answers-the-check-otherwise-than-the-envoy-output)).
+  3.4.7). HAProxy and nginx answer some denials otherwise, such as one larger than they read whole, which each answers
+  `403` ([HAProxy](haproxy.md#where-haproxy-answers-the-check-otherwise-than-the-envoy-output),
+  [nginx](nginx.md#where-nginx-answers-the-check-otherwise-than-the-envoy-output)).
 - With `when_unavailable: allow`, a request that could not be checked goes through with the header
-  `x-envoy-auth-failure-mode-allowed` set, and with the envoy target the gateway writes a `gateway_auth_unavailable`
-  log line for it. A client's own copy of that header is removed before anything reads it.
+  `x-envoy-auth-failure-mode-allowed` set, and with the envoy and nginx targets the gateway writes a
+  `gateway_auth_unavailable` log line for it ([nginx](nginx.md#the-request-log-with-the-check)). A client's own copy of
+  that header is removed before anything reads it.
 - A check sent on a connection the auth service is closing fails. Set `timeouts.upstream_idle` under the auth service's
   own idle timeout, so the gateway closes an idle connection first. The HAProxy file opens a connection for each check
   and the check closes it after its answer, so it has no idle connection to close, and it refuses
-  `timeouts.upstream_idle`.
+  `timeouts.upstream_idle`. The nginx file's relay opens a connection for each check too and sends `connection: close`,
+  so no idle connection to the check service exists, and `timeouts.upstream_idle` does not reach the check.
 
 ## What the check is told
 
@@ -110,7 +118,8 @@ answer, such as the check's `401`, instead of the `400`, also under a `prefix` w
 through gets the `400`; neither reaches a service (measured on Envoy 1.40.2). A `;` escaped twice, `%253B`, passes as
 sent: a service that decodes the path twice is not covered. The HAProxy file has no route of its own for this: it asks
 the check about such a request whatever its route, answers the check's denial, and answers `400` once the check lets it
-through ([HAProxy](haproxy.md#which-requests-are-asked)).
+through ([HAProxy](haproxy.md#which-requests-are-asked)). The nginx file does the same through the location
+`@pf_r_dotparam` ([nginx](nginx.md#which-requests-are-asked)).
 
 Envoy resolves `..;` written with dots itself from 1.40.0, and from 1.36.10, 1.37.6, 1.38.4 and 1.39.1 on the older
 release lines, as their release notes say, while the runtime setting

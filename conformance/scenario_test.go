@@ -57,6 +57,16 @@ type exchange struct {
 	// once the rows in sequence are done (runFile): a row that waits for a proxy's timer, such as auth.timeout's, waits
 	// beside the others. It is for a row that sends one request, refuses no backend and floods nothing.
 	overlap bool
+	// streams, when set, sends the row's request this many times at once over one HTTP/2 connection, each with its own
+	// number in its query, and wants each answer to be want with that number in place of {i} in its received values
+	// (sendStreams): each stream answered by its own check.
+	streams int
+	// refill, on a file that writes routes[].rate_limit, is waited before the row is sent, so that a limited route's
+	// bucket fills again: rows a limited route serves, sent one after the other on a fast runner, can spend its bucket
+	// before it refills, and a row past that gets 429 for no fault of the proxy. The rate limit scenario's quiet is the
+	// same wait for a whole scenario, before its first row. A row that overlaps sends its request before the rows in
+	// sequence, so it names none.
+	refill time.Duration
 }
 
 // flood is what a row floods the proxy with: requests requests from connections HTTP/1.1 connections at once, request
@@ -90,6 +100,9 @@ type own struct {
 	difference string
 	files      []string
 	literal
+	// other, when set, is the target's literal on its files outside files, by another difference: a request one file
+	// makes the target answer otherwise by one row of the support table and another file by another.
+	other *own
 }
 
 // literal is what a row wants on one file: the answer, and with repeat how many answers before it must be 200.
@@ -134,6 +147,14 @@ type request struct {
 	// pause, on an unframed request, sends the second half of body this long after the rest, the answer read
 	// meanwhile, so a proxy that answers, or closes the connection, before the body ends is read as doing so then.
 	pause time.Duration
+	// scheme, on a raw h2 request, is the :scheme sent in place of the connection's own, https with tls and http
+	// without, as a client in front may send one that differs from the connection it uses.
+	scheme string
+	// then, on a raw unframed http/1.1 request, is a second request written on the same connection right after the
+	// body, in the same write, as a client that reuses its connection sends its next request: the answer compared is
+	// the second's, and the first's status is answer.first. A proxy that answers the first without reading its body
+	// must still read the body as the body, never as a request.
+	then string
 }
 
 // tlsOffer is a client's TLS offer: versions from and to version, or crypto/tls's when 0, and only these TLS 1.2
@@ -167,11 +188,18 @@ type answer struct {
 	noTrailers bool   // the stub must have received no trailer
 	marked     string // the value of the target's unchecked mark the stub must receive
 	unmarked   bool   // the stub must not receive the target's unchecked mark
+	// first, with request.then, is the status the answer to the first request must have; 0 is not compared.
+	first int
 	// unreadable wants a stub's own answer to a request its HTTP server could not read (result.stubError): the proxy
 	// passed the request on as sent. No service is compared then, because that answer names none.
 	unreadable     bool
 	attempt        int
 	atLeast, below time.Duration
+	// logged holds, by the event a line of the proxy's log names, "request" for the request log's own line, which
+	// names none, the fields of the one line of that event the proxy wrote for this request, each the JSON text of its
+	// value matched by the regular expression; a nil entry wants no line of that event. The lines are found by the
+	// request id the answer carries, x-request-id, which every proxy writes as the line's request_id (logLines).
+	logged map[string]map[string]*regexp.Regexp
 }
 
 // compare returns each way got differs from want, in a fixed order, so a failing row reads the same on every run.
@@ -201,6 +229,9 @@ func compare(want answer, got result, mark string) []string {
 	// gRPC client reads as the same status.
 	if want.status != 0 && got.status != want.status {
 		differ("status: got %d, want %d", got.status, want.status)
+	}
+	if want.first != 0 && got.first != want.first {
+		differ("first answer's status: got %d, want %d", got.first, want.first)
 	}
 	switch {
 	case want.unreadable && !got.stubError:
@@ -282,6 +313,25 @@ func compare(want answer, got result, mark string) []string {
 		differ("received the unchecked mark %s: got %q, want %q", mark, value, want.marked)
 	case want.unmarked && marked:
 		differ("received the unchecked mark %s: got %q, want none", mark, value)
+	}
+	if want.logged != nil && got.header.Get("x-request-id") == "" {
+		differ("the answer carries no x-request-id, by which the proxy's log lines for the request are found")
+	}
+	for _, event := range slices.Sorted(maps.Keys(want.logged)) {
+		lines, fields := got.logs[event], want.logged[event]
+		switch {
+		case fields == nil && len(lines) > 0:
+			differ("logged %s: got %q, want no line", event, lines)
+		case fields == nil:
+		case len(lines) != 1:
+			differ("logged %s: got %d lines, want one", event, len(lines))
+		default:
+			for _, name := range slices.Sorted(maps.Keys(fields)) {
+				if value, ok := lines[0][name]; !ok || !fields[name].MatchString(value) {
+					differ("logged %s %s: got %q, want a value %s matches", event, name, value, fields[name])
+				}
+			}
+		}
 	}
 	if want.atLeast != 0 && got.elapsed < want.atLeast {
 		differ("time: got %s, want at least %s", got.elapsed, want.atLeast)

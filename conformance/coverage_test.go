@@ -152,18 +152,27 @@ func rowProblems(ts []target, byEntry map[string][]fileKeys) []string {
 			}
 			for _, name := range slices.Sorted(maps.Keys(e.by)) {
 				declared, _ := format.TargetNamed(name)
-				if difference := e.by[name].difference; declared.Keys[difference].Level != format.Partial {
-					lines = append(lines, fmt.Sprintf("row %q of %q has %s's own literal for %q, which %s does not declare partial",
-						e.name, s.name, name, difference, name))
-				}
 				if !runsOnAny(e, filesOf(name, ts, byEntry)) {
 					lines = append(lines, fmt.Sprintf("row %q of %q has %s's own literal, but runs on none of the files of the %s entries",
 						e.name, s.name, name, name))
 				}
-				for _, label := range e.by[name].files {
-					if !runsOnAny(e, labelled(filesOf(name, ts, byEntry), label)) {
-						lines = append(lines, fmt.Sprintf("row %q of %q has %s's own literal on %q, no file of the %s entries the row runs on",
-							e.name, s.name, name, label, name))
+				for o := e.by[name]; ; o = *o.other {
+					if declared.Keys[o.difference].Level != format.Partial {
+						lines = append(lines, fmt.Sprintf("row %q of %q has %s's own literal for %q, which %s does not declare partial",
+							e.name, s.name, name, o.difference, name))
+					}
+					for _, label := range o.files {
+						if !runsOnAny(e, labelled(filesOf(name, ts, byEntry), label)) {
+							lines = append(lines, fmt.Sprintf("row %q of %q has %s's own literal on %q, no file of the %s entries the row runs on",
+								e.name, s.name, name, label, name))
+						}
+					}
+					if o.other == nil {
+						break
+					}
+					if o.files == nil {
+						lines = append(lines, fmt.Sprintf("row %q of %q has %s's own literal on every file and another beside it, which no run reads",
+							e.name, s.name, name))
 					}
 				}
 			}

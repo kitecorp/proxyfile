@@ -40,7 +40,11 @@ type result struct {
 	// lines 2087 to 2124 of go1.27.4). It tells a request the proxy passed on, which the service could not read, from
 	// the proxy's own refusal of it, which would otherwise read alike: a 4xx with no echo.
 	stubError bool
-	elapsed   time.Duration
+	// first, for a request with then, is the status of the answer to the first request on the connection.
+	first   int
+	elapsed time.Duration
+	// logs are the proxy's log lines for the request, read only for a row that compares them (logLines).
+	logs map[string][]map[string]string
 }
 
 // newClients makes the battery's clients: HTTP/1.1 and HTTP/2 with the client certificate the clients CA signed,
