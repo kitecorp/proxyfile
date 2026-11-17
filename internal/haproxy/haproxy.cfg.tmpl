@@ -108,11 +108,15 @@ frontend public
   service answering HTTP/0.9 with its body alone had that body read as the answer's headers; req.ver gives the version
   as sent, and 2.0 both for HTTP/2 and for HTTP/2.0 on an HTTP/1 connection, which fc_http_major tells apart. Over
   HTTP/1.1 Envoy answers a method its parser does not know 400 (a method in another letter case too), where HAProxy
-  served it. An absolute target, which HAProxy sends on in absolute form after it drops a default or empty
-  port from the target and the Host header, is answered 400: no rule sees the port it dropped, and Envoy sends the path
-  alone with the line's host as Host, and answers an empty port 400. */}}
+  served it. Over HTTP/1.1 and HTTP/2 it answers 400 to a QUERY with no Content-Type, or with none but empty lines,
+  before it picks a route, so before the 404 of an unknown host, the origin check and the auth check, and serves a QUERY
+  with one, and query in another letter case over HTTP/2; an ACL reads each line of req.fhdr, so a QUERY with one empty
+  line and one with a value is served, as by Envoy. An absolute target, which HAProxy sends on in absolute form
+  after it drops a default or empty port from the target and the Host header, is answered 400: no rule sees the port it
+  dropped, and Envoy sends the path alone with the line's host as Host, and answers an empty port 400. */}}
   http-request return status 426 if !{ req.ver 1.1 } !{ fc_http_major 2 }
   http-request return status 400 if { req.ver 1.1 } !{ method {{.Methods}} }
+  http-request return status 400 if { method QUERY } !{ req.fhdr(content-type) -m len gt 0 }
   http-request return status 400 if { req.ver 1.1 } !{ url_beg / }
   {{- /* A client's own upgrade field over HTTP/2 is refused by HAProxy's parser, so an HTTP/2 request that holds one is
   a WebSocket over HTTP/2 (extended CONNECT), which HAProxy 3.2.26 sent the service as an HTTP/1.1 upgrade with a key
@@ -208,15 +212,18 @@ frontend public
   the service as /private; '\\x5c' is a backslash (measured on HAProxy 3.2.26 and 3.4.7). A path the script did not
   escape is answered 400. Every escape that is not decoded keeps the case of its hex digits and an invalid one, such as
   %zz, passes, as through Envoy: neither normalize-uri line holds strict, and no line writes percent-to-uppercase.
-  Envoy answers 400 to %00 in a path. */}}
+  Envoy answers 400 to %00 in a path. The dot segments are resolved before repeated slashes are merged, as Envoy
+  resolves them, so a .. removes an empty segment before it: merged first, /products//../open/x reached an auth-off
+  /open/ route without the check, where Envoy routes /products/open/x and asks it (measured on HAProxy 3.2.26 and 3.4.7
+  beside Envoy 1.40.2, over HTTP/1.1 and HTTP/2, with the / written and escaped). */}}
   http-request normalize-uri fragment-strip
   http-request set-var(txn.path) path,lua.pf_escape,regsub(%2f,/,gi),regsub(%5c,/,gi),regsub('\\x5c',/,g)
   http-request return status 400 if !{ var(txn.path) -m found }
   http-request set-path %[var(txn.path)]
   http-request normalize-uri percent-decode-unreserved
-  http-request normalize-uri path-merge-slashes
   http-request normalize-uri path-strip-dot
   http-request normalize-uri path-strip-dotdot full
+  http-request normalize-uri path-merge-slashes
   http-request set-var(txn.grpc_answer) bool(true) if { path -m sub %00 } { var(txn.grpc_call) -m bool }
   http-request return status 200 hdr grpc-status {{.GRPC.BadRequest}} if { var(txn.grpc_answer) -m bool }
   http-request return status 400 if { path -m sub %00 }
@@ -359,6 +366,12 @@ frontend public
   http-request set-var(txn.origin) req.fhdr(origin) if { var(txn.cors) -m bool }
 {{- end}}
   http-request lua.pf_auth {{.Relay}} {{.Path}} {{.Millis}} {{.Unavailable}} {{.Send}} {{.Accept}} {{.SendRequest}} if { var(txn.pf_ask) -m bool }
+  {{- /* Envoy answers 500 with no body to a request the check's accepted headers take past its header count, and a
+  gRPC call 200 with grpc-status 2, each with an admitted origin's CORS answer (measured on Envoy 1.40.2): the action
+  counts the fields and sets txn.pf_too_many, and these lines answer before the pass rule, while the origin is kept. */}}
+  http-request set-var(txn.grpc_answer) bool(true) if { var(txn.pf_too_many) -m bool } { var(txn.grpc_call) -m bool }
+  http-request return status 200 hdr grpc-status {{$.GRPC.Unknown}} if { var(txn.grpc_answer) -m bool }
+  http-request return status 500 if { var(txn.pf_too_many) -m bool }
   http-request set-var(txn.pf_refused) bool(true) if { var(txn.pf_ask) -m bool } !{ var(txn.pf_passed) -m bool }
   http-request set-var(txn.grpc_answer) bool(true) if { var(txn.pf_refused) -m bool } { var(txn.grpc_call) -m bool }
   http-request return status 200 hdr grpc-status {{$.GRPC.Forbidden}} hdr grpc-message "Invalid CORS request" if { var(txn.grpc_answer) -m bool } has_origin

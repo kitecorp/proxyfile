@@ -82,9 +82,10 @@ type checkView struct {
 
 // grpcStatuses is the grpc-status of each of the file's own refusals of a gRPC call that Envoy makes too, by the
 // refusal's HTTP status (generator.GRPCStatus): Envoy answers a gRPC call it refuses itself 200 with the status mapped,
-// and the pass rule answers an unanswered check under deny as Envoy does, with the mapped 403.
+// and the pass rule answers an unanswered check under deny as Envoy does, with the mapped 403. Unknown is the 500 of a
+// call the check's accepted headers take past Envoy's header count (generator.GRPCUnknown).
 type grpcStatuses struct {
-	BadRequest, Forbidden, NotFound int
+	BadRequest, Forbidden, NotFound, Unknown int
 }
 
 // question is one header of a method's RPC question: Header is a name of generator.QuestionHeaders and Value its value,
@@ -189,7 +190,7 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		EnvoyRemoved: generator.RemovedByEnvoy, Methods: strings.Join(generator.EnvoyMethods, " "),
 		ConnectionTokens: generator.ConnectionTokens, TooManyConnectionTokens: generator.MostConnectionTokens + 1, LongestID: idRoom,
 		GRPC: grpcStatuses{BadRequest: generator.GRPCStatus[http.StatusBadRequest], Forbidden: generator.GRPCStatus[http.StatusForbidden],
-			NotFound: generator.GRPCStatus[http.StatusNotFound]}}
+			NotFound: generator.GRPCStatus[http.StatusNotFound], Unknown: generator.GRPCUnknown}}
 	v.ServerTimeout = "15s"
 	if g.Timeouts.Request != nil {
 		v.ServerTimeout = "300s"

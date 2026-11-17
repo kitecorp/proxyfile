@@ -192,10 +192,20 @@ var routing = scenario{name: "routing",
 			path: "/products/1"}, want: answer{status: 404}},
 		{name: "a method Envoy's parser does not know is answered 400", send: request{proto: "http/1.1", method: "FOO", host: "localhost",
 			path: "/products/1"}, want: answer{status: 400}},
-		// QUERY is in Envoy 1.40.2's list of methods, and its parser still answers it 400 (measured); HAProxy sends it on.
-		{name: "QUERY over HTTP/1.1 is answered 400", send: request{proto: "http/1.1", method: "QUERY", host: "localhost",
+		// Envoy 1.40.2 answers 400 to a QUERY with no Content-Type, or with none but empty lines, over HTTP/1.1 and
+		// HTTP/2, before it picks a route, and serves a QUERY with one (measured). nginx answers every QUERY over
+		// HTTP/1.1 400 and serves one over HTTP/2 with no Content-Type (measured on nginx 1.30.6 and 1.31.8), a declared
+		// difference.
+		{name: "a QUERY with a Content-Type is served", send: request{proto: "http/1.1", method: "QUERY", host: "localhost",
+			path: "/products/1", headers: map[string]string{"content-type": "application/json"}}, want: answer{status: 200, service: "shop"},
+			by: map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
+		{name: "a QUERY with a Content-Type is served over HTTP 2", send: request{proto: "h2", method: "QUERY", host: "localhost",
+			path: "/products/1", headers: map[string]string{"content-type": "application/json"}}, want: answer{status: 200, service: "shop"}},
+		{name: "a QUERY with no Content-Type is answered 400", send: request{proto: "http/1.1", method: "QUERY", host: "localhost",
+			path: "/products/1"}, want: answer{status: 400}},
+		{name: "a QUERY with no Content-Type is answered 400 over HTTP 2", send: request{proto: "h2", method: "QUERY", host: "localhost",
 			path: "/products/1"}, want: answer{status: 400},
-			by: map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 200, service: "shop"}}}}},
+			by: map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{status: 200, service: "shop"}}}}},
 		{name: "a pattern's {,3} is text, as RE2 reads it", keys: []string{"routes[].pattern"}, send: get("/braces/xxx"),
 			want: answer{status: 200, service: "shop", path: "/braces/xxx"}},
 		{name: "a path PCRE2 gives up on as the pattern is written is matched as Go's parse writes it", keys: []string{"routes[].pattern"},
@@ -1151,15 +1161,36 @@ var auth = scenario{name: "auth",
 			want: answer{status: 401}},
 		// Envoy 1.40.2 answers 500 with an empty body to a request that the check's accepted headers take past
 		// limits.request_headers: its size counts each header's name and value, with :method, :path, :authority and
-		// :scheme, and the x-request-id and x-forwarded-proto it adds; its count counts those fields too, so 95 lines
-		// from the client and one or two accepted headers pass 100.
+		// :scheme, and the x-request-id and x-forwarded-proto it adds; its count counts those fields too, and with
+		// client_address connection the x-forwarded-for and x-envoy-external-address it sets, so 91 lines from the
+		// client, Host among them as :authority, and one accepted header reach 100 on two-checks and nginx-checks, and 87
+		// lines and three accepted headers reach 100 on haproxy-file and nginx-auth. It counts no Transfer-Encoding or
+		// Connection line, and over HTTP/2 no host field beside :authority (measured with 87 lines beside each).
 		{name: "a 200 whose accepted header takes the request past the header size is answered 500", keys: []string{"auth.accept"},
 			send: rawToken("accept-past-size", map[string]string{"x-pad": strings.Repeat("p", 30000)}), want: answer{status: 500},
 			by: map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 431}}}}},
 		{name: "a 200 whose accepted headers take the request past the header count is answered 500", keys: []string{"auth.accept"},
 			send: rawToken("allow", numbered(92)), want: answer{status: 500},
-			on: map[string]literal{"full": {want: answer{status: 200, service: "shop"}}, "portable": {want: answer{status: 200, service: "shop"}}},
-			by: map[string]own{"haproxy": {difference: "auth.accept", literal: literal{want: answer{status: 200, service: "shop"}}}}},
+			on: map[string]literal{"full": {want: answer{status: 200, service: "shop"}}, "portable": {want: answer{status: 200, service: "shop"}}}},
+		// Envoy 1.40.2 counts the request only when the check's answer held a header auth.accept covers other than
+		// keep-alive, which it never sets: a 200 that sets none is served up to the 100 lines its parser reads (measured).
+		// nginx counts such a request too, and answered 500 from 91 numbered lines on nginx-auth and 93 on nginx-checks
+		// (measured on nginx 1.30.6 and 1.31.8).
+		{name: "a 200 that sets no accepted header is served beside 96 numbered header lines", keys: []string{"auth.accept"},
+			send: rawToken("allow-empty", numbered(96)), want: answer{status: 200, service: "shop"},
+			by: map[string]own{"nginx": {difference: "auth.accept", literal: literal{want: answer{status: 500}}}}},
+		{name: "a 200 whose accepted headers take the request to the header count is served", keys: []string{"auth.accept"},
+			send: rawToken("allow", numbered(91)), want: answer{status: 200, service: "shop"},
+			on: map[string]literal{"haproxy-file": {want: answer{status: 500}}, "nginx-auth": {want: answer{status: 500}}}},
+		{name: "with client_address connection, a 200 whose accepted headers take the request to the header count is served",
+			keys: []string{"auth.accept", "client_address"}, send: rawToken("allow", numbered(87)), want: answer{status: 200, service: "shop"}},
+		{name: "with client_address connection, a 200 whose accepted headers take the request past the header count is answered 500",
+			keys: []string{"auth.accept", "client_address"}, send: rawToken("allow", numbered(88)), want: answer{status: 500},
+			on: map[string]literal{"full": {want: answer{status: 200, service: "shop"}}, "portable": {want: answer{status: 200, service: "shop"}}}},
+		{name: "a 500 for the header count carries an admitted origin's CORS answer", keys: []string{"auth.accept", "client_address"},
+			send: rawToken("allow", withHeader(numbered(88), "origin", "http://localhost:3000")),
+			want: answer{status: 500, headers: map[string]string{"access-control-allow-origin": "http://localhost:3000"}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}, "portable": {want: answer{status: 200, service: "shop"}}}},
 		// Envoy counts an absolute target's host and port as :authority, whatever Host says, and nginx routes by the same.
 		// With a Host of one byte beside this target, the smallest pad Envoy answered 500 was 1,170 bytes, and a count of
 		// the Host line alone answered 500 from 1,193 (measured on Envoy 1.40.2 and nginx 1.30.6), so 1,181 tells them
@@ -1203,13 +1234,10 @@ var auth = scenario{name: "auth",
 				"haproxy": {difference: "auth.ask", literal: literal{want: answer{status: 403}}}}},
 		{name: "a 200 whose chunk does not end its line is an unanswered check", keys: unanswered, send: token("bad-chunk-end"),
 			want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
-		// HAProxy's script reads a chunk-size line that ends in a bare LF (auth.when_unavailable).
 		{name: "a 200 whose chunk-size line ends in a bare LF is an unanswered check", keys: unanswered, send: token("chunk-size-lf"),
-			want: markedOnly, on: deniedUnderDeny, by: map[string]own{"nginx": refusedUnderAllow["nginx"],
-				"haproxy": {difference: "auth.when_unavailable", literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "chunk-size-lf"}}}}}},
+			want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
 		{name: "a 200 whose last chunk's line ends in a bare LF is an unanswered check", keys: unanswered, send: token("last-chunk-lf"),
-			want: markedOnly, on: deniedUnderDeny, by: map[string]own{"nginx": refusedUnderAllow["nginx"],
-				"haproxy": {difference: "auth.when_unavailable", literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "last-chunk-lf"}}}}}},
+			want: markedOnly, on: deniedUnderDeny, by: refusedUnderAllow},
 		{name: "a 200 whose chunk data, trailer line and final line end in a bare LF is read as allowed", keys: []string{"auth.ask", "auth.accept"},
 			send: token("chunk-other-lf"), want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "chunk-other-lf"}}},
 		{name: "a 200 whose Content-Length has spaces around it is read as allowed", keys: []string{"auth.ask", "auth.accept"},
@@ -1798,19 +1826,16 @@ var paths = scenario{name: "path normalisation",
 		{name: "a dot segment with a ; parameter written with a dot", send: get("/products/.;/1"), want: answer{status: 200, service: "shop", path: "/products/1"},
 			by: map[string]own{"nginx": {difference: dotRow, literal: literal{want: answer{status: 400}}},
 				"haproxy": {difference: dotRow, literal: literal{want: answer{status: 400}}}}},
-		// Envoy resolves a dot-dot segment before it merges repeated slashes, so the .. removes the empty segment, where
-		// nginx and HAProxy merge first; nginx answers an empty segment before a dot-dot segment 400, and HAProxy routes
-		// the merged path (pathRow). After the last dot-dot segment an empty segment gives one path all three ways.
+		// Envoy and HAProxy resolve a dot-dot segment before they merge repeated slashes, so the .. removes the empty
+		// segment, where nginx merges first and answers an empty segment before a dot-dot segment 400 (pathRow). After the
+		// last dot-dot segment an empty segment gives one path all three ways.
 		{name: "an empty segment before a dot-dot one", send: get("/catalog//../products/1"), want: answer{status: 200, service: "catalog", path: "/catalog/products/1"},
-			by: map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}},
-				"haproxy": {difference: pathRow, literal: literal{want: answer{status: 200, service: "shop", path: "/products/1"}}}}},
+			by: map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}}}},
 		{name: "an escaped slash before a dot-dot segment", send: get("/catalog/%2F../products/1"), want: answer{status: 200, service: "catalog", path: "/catalog/products/1"},
-			by: map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}},
-				"haproxy": {difference: pathRow, literal: literal{want: answer{status: 200, service: "shop", path: "/products/1"}}}}},
+			by: map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}}}},
 		{name: "an empty segment before a dot-dot one over HTTP/2", send: request{proto: "h2", method: "GET", host: "localhost", path: "/catalog//../products/1"},
 			want: answer{status: 200, service: "catalog", path: "/catalog/products/1"},
-			by: map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}},
-				"haproxy": {difference: pathRow, literal: literal{want: answer{status: 200, service: "shop", path: "/products/1"}}}}},
+			by:   map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}}}},
 		{name: "an empty segment after a dot-dot one", send: get("/products/../catalog//items"), want: answer{status: 200, service: "catalog", path: "/catalog/items"}},
 		{name: "an invalid escape", send: get("/catalog/a%zz"), want: answer{status: 400, unreadable: true},
 			by: map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}}}},
@@ -1987,6 +2012,14 @@ var offRoute = scenario{name: "an auth-off prefix route",
 		{name: "a dot-dot segment and a backslash leave the route, and the check is told the path the service receives", keys: toldKeys,
 			send: allowed("/public/..\\products/1"), want: toldProducts, by: map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}}}},
 		{name: "a dot-dot segment with a written ; leaves the route", keys: offKeys, send: deny("/public/..;/products/1"), want: answer{status: 401}},
+		// The .. removes the empty segment before it, so the path stays off the route and the check is asked; nginx
+		// answers an empty segment before a dot-dot segment 400 (pathRow).
+		{name: "an empty segment before a dot-dot segment does not reach the route", keys: offKeys, send: deny("/products//../public/readme"),
+			want: answer{status: 401}, by: map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}}}},
+		{name: "an escaped slash before a dot-dot segment does not reach the route over HTTP/2", keys: offKeys,
+			send: request{proto: "h2", method: "GET", host: "localhost", path: "/products/%2F../public/readme",
+				headers: map[string]string{"authorization": "Bearer deny-401"}},
+			want: answer{status: 401}, by: map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}}}},
 		{name: "a dot segment that keeps a ; parameter", keys: offKeys, send: get("/public/%2e%2e;/products/1"), want: answer{status: 400}},
 		{name: "a dot segment that keeps a ; parameter and a token the check allows", keys: offKeys, send: allowed("/public/%2e%2e;/products/1"),
 			want: answer{status: 400}},

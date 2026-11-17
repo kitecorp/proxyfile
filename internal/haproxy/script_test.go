@@ -32,8 +32,21 @@ var (
 		`      if frame == nil then return "refused" end`,
 	}
 	chunkSize = []string{
-		`      local digits = line:match("^%x+$")`,
-		`      if digits == nil or #digits > 8 then return nil, "malformed" end`,
+		`  for _ = 1, 10 do`,
+		`    local byte, err = pf_io(sock, deadline, "receive", 1)`,
+		`    if not byte then return nil, err end`,
+		`    if byte == "\n" then`,
+		`      local digits = line:match("^(%x+)\r$")`,
+		`      if digits == nil then return nil, "malformed" end`,
+		`      return tonumber(digits, 16)`,
+		`    end`,
+		`    line = line .. byte`,
+		`  end`,
+		`  return nil, "malformed"`,
+	}
+	chunkSizeRefused = []string{
+		`      local n, err = pf_size_line(sock, deadline)`,
+		`      if not n then return nil, err end`,
 	}
 )
 
@@ -56,7 +69,8 @@ func TestScriptCheck(t *testing.T) {
 			`local framing = { host = true, ["content-length"] = true, ["transfer-encoding"] = true, connection = true, ["keep-alive"] = true, te = true, trailer = true, upgrade = true, expect = true, ["proxy-connection"] = true }`,
 			`local hop = { ["content-length"] = true, ["transfer-encoding"] = true, connection = true, ["keep-alive"] = true, upgrade = true, ["proxy-connection"] = true }`,
 			`local never_accepted = { ["content-length"] = true, ["transfer-encoding"] = true, host = true, te = true, connection = true, upgrade = true, ["keep-alive"] = true }`,
-			`local grpc_status = { [400] = 13, [401] = 16, [403] = 7, [404] = 12, [429] = 14, [502] = 14, [503] = 14, [504] = 14 }`,
+			`local dropped = { ["keep-alive"] = true }`,
+			`local grpc_status, grpc_unknown = { [400] = 13, [401] = 16, [403] = 7, [404] = 12, [429] = 14, [502] = 14, [503] = 14, [504] = 14 }, 2`,
 			`local unchecked = "x-envoy-auth-failure-mode-allowed"`,
 			`local internal_header, expected_header = "x-envoy-internal", "x-envoy-expected-rq-timeout-ms"`,
 		}}},
@@ -72,9 +86,11 @@ func TestScriptCheck(t *testing.T) {
 			{`local pf_waiting = {}`},
 			{`local function pf_io(sock, deadline, op, arg)`},
 			{`local function pf_line(sock, deadline)`},
+			{`local function pf_size_line(sock, deadline)`},
 			{`local function pf_body(sock, deadline, frame, keep, most)`},
 			{`local function pf_ask(sock, relay, request, deadline, head)`},
 			{`local function pf_refuse(txn, grpc, status, headers, body)`},
+			{`local function pf_fields(headers, unset)`},
 			{`core.register_action("pf_auth", { "http-req" }, function(txn, relay, path, timeout_ms, when_unavailable, send, accept, send_request)`},
 			{`end, 7)`},
 		}},
@@ -129,7 +145,11 @@ func TestScriptCheck(t *testing.T) {
 			{`    if not framing[name] and name ~= "x-gateway-timeout-ms" and not (send_request == "1" and forwarded[name])`},
 		}},
 		{"an answer never sets a header HAProxy frames or routes a request by", [][]string{
-			{`      if pf_matches(h[1], acceptp) and not never_accepted[h[1]] then`},
+			{`      if pf_matches(h[1], acceptp) then`},
+			{
+				`        if not never_accepted[h[1]] then`,
+				`          txn.http:req_set_header(h[1], h[2])`,
+			},
 		}},
 		{"an unanswered check under allow sets the generated mark", [][]string{
 			{`    txn.http:req_set_header(unchecked, "true")`},
@@ -157,6 +177,57 @@ func TestScriptCheck(t *testing.T) {
 		{"a denial counts as HAProxy stores it, and one past the bound is left to the pass rule", [][]string{
 			{`        if not hop[h[1]] then kept = kept + #h[1] + #h[2] + 8 end`},
 			{`  if size + #payload > PF_MOST_DENIAL then return end`},
+		}},
+		// Envoy 1.40.2 answers a gRPC call it refuses with an HTTP status GRPCStatus does not list with grpc-status 2.
+		{"a denial of a status gRPC maps to no other code gets grpc-status 2", [][]string{
+			{`    keep("grpc-status", tostring(grpc_status[status] or grpc_unknown))`},
+		}},
+		// Envoy 1.40.2 answers 500 to a request the check's accepted headers take past its 100 header fields. It counts
+		// the request after its own removals and joins, which the file has made by the check, with :method, :path,
+		// :authority and :scheme, the x-request-id and x-forwarded-proto it sets, with client_address connection the
+		// x-forwarded-for and x-envoy-external-address too, and no Transfer-Encoding line (measured), so the script counts
+		// the lines HAProxy holds once the accepted headers are set, and leaves the 500 to the configuration. It also
+		// counts a te and a transfer-encoding the answer holds under an accepted name, which Envoy sets and counts and the
+		// script never sets. Envoy counts only when the answer held a header an accepted name covers other than
+		// keep-alive, which it never sets: a 200 with none, or with keep-alive alone, is served up to the line limit.
+		{"a request the accepted headers take past 100 fields is left to the configuration's 500", [][]string{
+			{`local PF_MOST_FIELDS = 100`},
+			{`local PF_COUNTED_NOT_SET = { te = true, ["transfer-encoding"] = true }`},
+			{
+				`local function pf_fields(headers, unset)`,
+				`  local n = 3`,
+				`  for name, lines in pairs(headers) do`,
+				`    if name ~= "transfer-encoding" then`,
+				`      local i = 0`,
+				`      while lines[i] ~= nil do i = i + 1 end`,
+				`      n = n + i`,
+				`    end`,
+				`  end`,
+				`  for _ in pairs(unset) do n = n + 1 end`,
+				`  return n`,
+				`end`,
+			},
+			{`    local set, unset, counted = {}, {}, false`},
+			{
+				`      if pf_matches(h[1], acceptp) then`,
+				`        counted = counted or not dropped[h[1]]`,
+			},
+			{
+				`        elseif PF_COUNTED_NOT_SET[h[1]] then`,
+				`          unset[h[1]] = true`,
+				`        end`,
+			},
+			{
+				`    local now = txn.http:req_get_headers()`,
+				`    for name, value in pairs(set) do`,
+				`      if not now[name] or now[name][0] ~= value or now[name][1] ~= nil then return end`,
+				`    end`,
+				`    if counted and pf_fields(now, unset) > PF_MOST_FIELDS then`,
+				`      txn:set_var("txn.pf_too_many", true)`,
+				`      return`,
+				`    end`,
+				`    txn:set_var("txn.pf_passed", true)`,
+			},
 		}},
 		// Envoy answers a refusal in gRPC's form when the content type is application/grpc alone or followed by +, as
 		// written, and answers application/grpc;x=1 and Application/GRPC with the denial's own status (measured on
@@ -195,9 +266,11 @@ func TestScriptCheck(t *testing.T) {
 			`    local rest = pf_line(sock, deadline)`,
 			`    if not rest then return "refused" end`,
 		}}},
-		// A byte that is not hexadecimal, or more digits than the body bound needs: unanswered on Envoy; a chunk
-		// extension: read by Envoy.
-		{"a chunk size that is not plain hexadecimal of at most 8 digits is refused", [][]string{chunkSize}},
+		// A byte that is not hexadecimal, or a size line of a chunk, or of the last chunk, that ends in a bare LF:
+		// unanswered on Envoy, which reads a bare LF at the end of every other line of an answer; more digits than the
+		// body bound needs, a chunk extension, or a space or a tab after the size: read by Envoy. The socket's line read
+		// drops the CR, so the size line is read a byte at a time.
+		{"a chunk-size line that is not plain hexadecimal of at most 8 digits ended by CR LF is refused", [][]string{chunkSize, chunkSizeRefused}},
 		// Unanswered on Envoy.
 		{"a malformed trailer line is refused", [][]string{{`      if not pf_header(line) then return nil, "malformed" end`}}},
 
@@ -267,7 +340,7 @@ func TestScriptCheck(t *testing.T) {
 		}},
 
 		// Forms the reader takes, as Envoy does.
-		{"lines that end in LF alone are read, as Envoy reads them", [][]string{
+		{"lines other than a chunk size's that end in LF alone are read, as Envoy reads them", [][]string{
 			{`  local line, err = pf_io(sock, deadline, "receive", "*l")`},
 		}},
 		{"a status line with no reason is taken", [][]string{statusLine}},

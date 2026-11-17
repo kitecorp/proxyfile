@@ -144,10 +144,15 @@ var HopHeaders = []string{"content-length", "transfer-encoding", "connection", "
 var DroppedByEnvoy = []string{"keep-alive"}
 
 // GRPCStatus is the grpc-status Envoy 1.40.2 answers a gRPC request it denies with, by the HTTP status of the denial;
-// any status it does not list is 2, Unknown (Grpc::Utility::httpToGrpcStatus, source/common/grpc/status.cc). The
+// any status it does not list is GRPCUnknown (Grpc::Utility::httpToGrpcStatus, source/common/grpc/status.cc). The
 // Envoy output answers such a request 200, with this status and the check's body as grpc-message, where a request that
 // is not gRPC gets the denial's own status (measured on Envoy 1.40.2).
 var GRPCStatus = map[int]int{400: 13, 401: 16, 403: 7, 404: 12, 429: 14, 502: 14, 503: 14, 504: 14}
+
+// GRPCUnknown is gRPC's Unknown, the grpc-status Envoy 1.40.2 answers a gRPC request with for an HTTP status
+// GRPCStatus does not list, such as the 500 of a call the check's accepted headers take past its header count
+// (measured).
+const GRPCUnknown = 2
 
 // Question is the RPC question of one method, which the proxy sends the check with a call of it: Action in
 // x-gateway-action and Reports, joined by commas, in x-gateway-reports.
