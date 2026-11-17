@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"regexp/syntax"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/kitecorp/proxyfile/v2/internal/format"
@@ -23,10 +24,10 @@ var scriptBody string
 
 // script is the script beside the configuration: generator.Header as a Lua comment, the headers whose lines pf_join
 // joins (generator.JoinedByEnvoy), the bytes pf_escape escapes (generator.EscapedInPath), the lists pf_auth reads
-// (generator.FramingHeaders, generator.HopHeaders, and format.HAProxyFramedBy with generator.DroppedByEnvoy), Envoy's
-// gRPC statuses (generator.GRPCStatus), the mark of an unanswered check (generator.UncheckedMark), the two headers
-// every check is sent as Envoy sends them (generator.InternalHeader and generator.ExpectedTimeoutHeader), and the
-// functions.
+// (generator.FramingHeaders, generator.HopHeaders, format.HAProxyFramedBy with generator.DroppedByEnvoy, and
+// generator.DroppedByEnvoy alone), Envoy's gRPC statuses (generator.GRPCStatus and generator.GRPCUnknown), the mark of an unanswered check
+// (generator.UncheckedMark), the two headers every check is sent as Envoy sends them (generator.InternalHeader and
+// generator.ExpectedTimeoutHeader), and the functions.
 func script() []byte {
 	var joined strings.Builder
 	for _, name := range generator.JoinedByEnvoy {
@@ -37,7 +38,9 @@ func script() []byte {
 		"local framing = " + luaSet(generator.FramingHeaders) + "\n" +
 		"local hop = " + luaSet(generator.HopHeaders) + "\n" +
 		"local never_accepted = " + luaSet(slices.Concat(format.HAProxyFramedBy, generator.DroppedByEnvoy)) + "\n" +
-		"local grpc_status = " + luaStatuses(generator.GRPCStatus) + "\n" +
+		"local dropped = " + luaSet(generator.DroppedByEnvoy) + "\n" +
+		"local grpc_status, grpc_unknown = " + luaStatuses(generator.GRPCStatus) + ", " +
+		strconv.Itoa(generator.GRPCUnknown) + "\n" +
 		"local unchecked = " + luaString(generator.UncheckedMark) + "\n" +
 		"local internal_header, expected_header = " + luaString(generator.InternalHeader) + ", " +
 		luaString(generator.ExpectedTimeoutHeader) + "\n\n" + scriptBody)

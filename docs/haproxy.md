@@ -215,6 +215,20 @@ script reads each header back after it sets it: HAProxy drops a header that does
 an error, so a request whose accepted header did not fit is answered `403`, and the service never receives it without
 the identity.
 
+A request the accepted headers take past 100 header fields is answered `500` with no body, a gRPC call `200` with
+`grpc-status` 2, each with an admitted origin's CORS answer, as Envoy 1.40.2 answers it. The script counts the fields as
+Envoy counts the request it passes on: each header line the request holds once the accepted headers are set, Host as
+`:authority`, with `:method`, `:path` and `:scheme`. By then the file has removed `Connection` and a client's own copies
+of the headers it sets, and joined the lines of each header Envoy joins, as Envoy has before it counts. The
+`x-request-id` and `x-forwarded-proto` the file sets count, and with `client_address: connection` the `x-forwarded-for`
+and `x-envoy-external-address` too. A chunked request's `Transfer-Encoding` line is not counted, and over HTTP/2 a
+`host` field beside `:authority` is one line, as for Envoy (measured on HAProxy 3.2.26 and 3.4.7 beside Envoy 1.40.2,
+with 100 and 101 fields). A `te` or a `transfer-encoding` the check's answer holds under an `accept` name counts as one
+field each, though the script sets neither, as Envoy sets each and counts it; a `host` takes the place of `:authority`
+and adds none (measured). The script counts only when the check's answer held a header an `accept` name covers other
+than `keep-alive`, as Envoy does: a `200` with none, or with `keep-alive` alone, is served up to the 100 header lines
+HAProxy reads, and one with `host` alone is counted (measured).
+
 The check's answer never sets `content-length`, `transfer-encoding`, `host`, `te`, `connection`, `upgrade` or
 `keep-alive` on the request; naming one of the first six in full is refused, and Envoy never sets `keep-alive` either.
 HAProxy frames or routes a request by the first six, so a check service can never change how the request it passes on
@@ -251,7 +265,8 @@ removes it there; over HTTP/1.1 both write `content-length: 0`.
 The script passes a request only on a `200` it reads whole as RFC 9112 writes it: a status line of `HTTP/1.0` or
 `HTTP/1.1`, one space, three digits and then nothing or a space and a reason; header lines of a token name, a colon and
 a value with no control byte but a tab; at most one `Content-Length`, digits only and never beside `Transfer-Encoding`;
-and a `Transfer-Encoding` of `chunked` alone, each chunk size plain hexadecimal. It skips `1xx` answers before the final
+and a `Transfer-Encoding` of `chunked` alone, each chunk size plain hexadecimal on a line that ends in CR LF, where
+Envoy 1.40.2 reads a bare LF at the end of every other line. It skips `1xx` answers before the final
 one and joins a folded header line to the value before it by one space, where Envoy keeps the spaces and tabs of both
 lines. It reads each head of the answer, from the status
 line to the empty line with their line ends, a `1xx` head included, and the trailer section, to 81,920 bytes, the
@@ -278,9 +293,9 @@ A check counts as unanswered, as it does for Envoy 1.40.2, in these six cases:
 check as Envoy does: `403`, with the body `Invalid CORS request` when the request carries an `Origin`, and for a gRPC
 call `200` with `grpc-status` 7 and, with an `Origin`, `grpc-message` `Invalid CORS request`.
 
-Every other answer the script cannot read whole is not an unanswered check: a header line that breaks off, an answer
-that RFC 9112 does not write and an answer past the script's size bounds are answered `403` under `allow` too. The
-notes on `auth.ask` and `auth.when_unavailable` say what Envoy does with each.
+Every other answer the script cannot read whole is not an unanswered check: a header line, a chunk-size line or a
+trailer line that breaks off, an answer that RFC 9112 does not write and an answer past the script's size bounds are
+answered `403` under `allow` too. The notes on `auth.ask` and `auth.when_unavailable` say what Envoy does with each.
 
 ### The relay
 
@@ -364,12 +379,12 @@ Each difference below is declared on HAProxy's row of its key in
 on HAProxy 3.2.26 and 3.4.7 beside Envoy 1.40.2, the service received a request the check was asked about only after the
 check let it through; each case counted the requests the service and the check received.
 
-- **`auth.ask`**: an answer of the check HAProxy cannot read whole is answered 403, where Envoy passes it on: a denial whose header lines and body pass 15,100 bytes, each line counted as its name, its value and 8 bytes, a header line of 16,383 bytes or more, a 200 whose body passes 1 MiB, a head of more than 100 header lines, folded lines not counted, with a name on two of them, where Envoy counts a name it keeps inline, such as date, once, and a status of 101, which a gRPC call gets as grpc-status 7, where Envoy gives 2; an answer in HTTP/1.2, a chunk extension or a space after a chunk size, two spaces or a tab after the version, a lone CR in a header value, a status line of 16,383 bytes or more, or a line whose CR falls at a multiple of 16,384 bytes into the answer (measured at 16,384 and 81,920), which HAProxy's socket hands to the script with the CR kept, is answered 403, where Envoy reads it; each head of the answer and its trailer section are read to 81,920 bytes, Envoy's bound, each line counted with a CR and an LF, so lines that end in LF alone reach it sooner; a status outside 100 to 599 or a status line in HTTP/2.0 is answered 403, where Envoy passes the check's status on; the check is sent connection: close on a connection of its own, where Envoy sends no Connection header and keeps its connections to the check open; after a check's 304 HAProxy closes the client's connection, so a request the client sends next on it gets no answer, where Envoy answers it.
+- **`auth.ask`**: an answer of the check HAProxy cannot read whole is answered 403, where Envoy passes it on: a denial whose header lines and body pass 15,100 bytes, each line counted as its name, its value and 8 bytes, a header line of 16,383 bytes or more, a 200 whose body passes 1 MiB, a head of more than 100 header lines, folded lines not counted, with a name on two of them, where Envoy counts a name it keeps inline, such as date, once, and a status of 101, which a gRPC call gets as grpc-status 7, where Envoy gives 2; an answer in HTTP/1.2, a chunk size of 9 hexadecimal digits or more, a chunk extension or a space or a tab after a chunk size, CR CR LF after a chunk's data or a trailer value, a folded trailer line, two spaces or a tab after the version, a lone CR in the status line or in a header value, a status line of 16,383 bytes or more, or a line other than a chunk-size line whose CR falls at a multiple of 16,384 bytes into the answer (measured at 16,384, 32,768 and 81,920), which HAProxy's socket hands to the script with the CR kept, is answered 403, where Envoy reads it; each head of the answer and its trailer section are read to 81,920 bytes, Envoy's bound, each line counted with a CR and an LF, so lines that end in LF alone reach it sooner; a status outside 100 to 599 or a status line in HTTP/2.0 is answered 403, where Envoy passes the check's status on; the check is sent connection: close on a connection of its own, where Envoy sends no Connection header and keeps its connections to the check open; after a check's 304 HAProxy closes the client's connection, so a request the client sends next on it gets no answer, where Envoy answers it.
 - **`auth.only_with_header`**: over HTTP/2 a request that carries the header with every value empty is asked, where Envoy does not ask it: HAProxy reads an HTTP/2 value of spaces alone as empty, and Envoy asks one, so HAProxy asks both.
 - **`auth.send`**: the check receives each byte of 0x80 or more that is not part of well-formed UTF-8 in a header it is sent as the client sent it, where Envoy writes a ! for each such byte.
-- **`auth.when_unavailable`**: with allow, an answer that breaks off inside its header lines, by a close or by passing auth.timeout, a 200 or a denial whose body never ends, an answer whose head or trailer section passes 81,920 bytes, a head of more than 100 header lines with a name on two of them, such as set-cookie, and an answer HAProxy cannot read as RFC 9112 writes one (a Content-Length that is not one line of digits, a control byte in a header value, a status line that does not end) are answered 403, where Envoy serves the request with the unchecked mark, x-envoy-auth-failure-mode-allowed: true; a 200 whose chunk-size line ends in a bare LF, the last chunk's included, is read as allowed, where Envoy reads it as no answer, and answers 403 with deny and serves the request with the unchecked mark with allow.
+- **`auth.when_unavailable`**: with allow, an answer that breaks off inside its header lines, a chunk-size line or a trailer line, by a close or by passing auth.timeout, a 200 or a denial whose body never ends, an answer whose head or trailer section passes 81,920 bytes, a head of more than 100 header lines with a name on two of them, such as set-cookie, and an answer HAProxy cannot read as RFC 9112 writes one (a Content-Length that is not one line of digits, a control byte in a header value, a status line that does not end, a chunk-size line that ends in a bare LF) are answered 403, where Envoy serves the request with the unchecked mark, x-envoy-auth-failure-mode-allowed: true.
 - **`auth.send_request`**: over HTTP/2 a request whose :scheme differs from its connection's scheme is told in x-forwarded-proto the connection's, where Envoy tells it the :scheme.
-- **`auth.accept`**: an accepted header too large for HAProxy's request buffer is answered 403, where Envoy sets it on the request (the sizes are in HAProxy's row of `auth.accept` in [Portability](portability.md#support-by-proxy-from-the-generators)); a * prefix never sets transfer-encoding, host or te from the check's answer, where Envoy sets each; a folded header line of the check's answer reaches the service joined to the value before it by one space, where Envoy keeps the spaces and tabs of both lines and drops the line end; a request the accepted headers take past 100 header fields, as Envoy counts them with its pseudo-headers and the x-request-id and x-forwarded-proto it sets, reaches the service, where Envoy answers 500. Two forms are refused at render, naming the key: `auth.accept` naming content-length, transfer-encoding, host, te, connection or upgrade in full is refused by `--target haproxy`: HAProxy frames or routes a request by these headers, so the check's answer never sets them; remove the name from auth.accept. And `auth.accept` holding a * prefix that covers content-length, connection or upgrade is refused by `--target haproxy`: the Envoy output sends the body chunked once Content-Length is removed, and leaves a WebSocket upgrade unanswered once Connection or Upgrade is removed, which HAProxy cannot write; write the other names in full, or a longer prefix, or render it for envoy.
+- **`auth.accept`**: an accepted header too large for HAProxy's request buffer is answered 403, where Envoy sets it on the request (the sizes are in HAProxy's row of `auth.accept` in [Portability](portability.md#support-by-proxy-from-the-generators)); a * prefix never sets transfer-encoding, host or te from the check's answer, where Envoy sets each; a folded header line of the check's answer reaches the service joined to the value before it by one space, where Envoy keeps the spaces and tabs of both lines and drops the line end. Two forms are refused at render, naming the key: `auth.accept` naming content-length, transfer-encoding, host, te, connection or upgrade in full is refused by `--target haproxy`: HAProxy frames or routes a request by these headers, so the check's answer never sets them; remove the name from auth.accept. And `auth.accept` holding a * prefix that covers content-length, connection or upgrade is refused by `--target haproxy`: the Envoy output sends the body chunked once Content-Length is removed, and leaves a WebSocket upgrade unanswered once Connection or Upgrade is removed, which HAProxy cannot write; write the other names in full, or a longer prefix, or render it for envoy.
 - **`remove_from_clients`**: names and * prefixes that cover none of content-length, connection and upgrade. A value holding content-length, connection or upgrade, in full or under a * prefix, is refused by `--target haproxy`: the Envoy output sends the body chunked once Content-Length is removed, and leaves a WebSocket upgrade unanswered once Connection or Upgrade is removed, which HAProxy cannot write; write the other names in full, or a longer prefix, or render it for envoy.
 - **`origins.<environment name>.origins` and `origins.<environment name>.patterns`**: an admitted Origin longer than 872 bytes less the length of cors.expose_headers is answered 403 with the body Invalid CORS request before the check and the service, where the Envoy output echoes it: HAProxy has 1,024 bytes for the lines it adds to an answer.
 - **`client_address`**: under forwarded, a client's own X-Request-Id longer than 980 bytes, or than 908 bytes less an echoed Origin and cors.expose_headers, is answered 400 before the check and the service, where the Envoy output serves it: HAProxy echoes the id in the 1,024 bytes it keeps for the lines it adds to an answer; over HTTP/2 an X-Forwarded-Proto of spaces alone is answered 404, where the Envoy output serves it.
@@ -447,15 +462,15 @@ memory idle (two runs): Envoy 22.4 to 23.2 MiB; 3.2.26 80.4 to 81.6 MiB with the
 
 ## The path a route is matched on
 
-The file normalises the path before any rule reads it, as the Envoy output does: the script escapes what Envoy
-escapes, `%2F`, `%5C` and a backslash are read as `/`, an escaped letter, digit, `-`, `.`, `_` or `~` is decoded,
-repeated slashes are merged and dot segments resolved, and the route and the service read that path. Every escape it
-does not decode reaches the service as written, in the case of its hex digits, and so does an invalid one such as
-`%zz`; `%00` in a path is answered `400`, as by Envoy. A path that still holds a dot segment with a `;` parameter, the
-`;` written or escaped once, is answered `400` once its route, its upgrade and its origin are checked, as by Envoy,
-whose file refuses it by a route of its own (below). Measured on
-HAProxy 3.2.26 and 3.4.7 beside Envoy 1.40.2; three differences stay, each named on HAProxy's row of it in
-[Portability](portability.md#support-by-proxy-from-the-generators):
+The file normalises the path before any rule reads it, as the Envoy output does: the script escapes what Envoy escapes,
+`%2F`, `%5C` and a backslash are read as `/`, an escaped letter, digit, `-`, `.`, `_` or `~` is decoded, dot segments
+are resolved and then repeated slashes merged, so a `..` removes an empty segment before it, as through Envoy
+(`/catalog//../products/1` is `/catalog/products/1`), and the route and the service read that path. Every escape it does
+not decode reaches the service as written, in the case of its hex digits, and so does an invalid one such as `%zz`;
+`%00` in a path is answered `400`, as by Envoy. A path that still holds a dot segment with a `;` parameter, the `;`
+written or escaped once, is answered `400` once its route, its upgrade and its origin are checked, as by Envoy, whose
+file refuses it by a route of its own (below). Measured on HAProxy 3.2.26 and 3.4.7 beside Envoy 1.40.2; two differences
+stay, each named on HAProxy's row of it in [Portability](portability.md#support-by-proxy-from-the-generators):
 
 - **A dot segment whose `;` parameter is written with dots, such as `/a/..;/b`, is answered `400`**, where Envoy 1.40
   drops the parameter and resolves the segment: HAProxy's `path-strip-dot` and `path-strip-dotdot` do not take `..;`
@@ -464,10 +479,6 @@ HAProxy 3.2.26 and 3.4.7 beside Envoy 1.40.2; three differences stay, each named
   Envoy asks only when that route is checked and, with `send_request`, sends the check the resolved path. After the
   `400` of such a segment with the `;` written `%3B`, which both answer, HAProxy keeps the connection open, where Envoy
   closes it.
-- **A path that holds an empty segment before a dot-dot segment, such as `/catalog//../products/1`, takes the route of
-  the path with its slashes merged first**, `/products/1`, with `/` written or escaped, over HTTP/1.1 and HTTP/2, where
-  Envoy resolves the dot-dot segment first, so that the `..` removes the empty segment, and routes
-  `/catalog/products/1`.
 - **An escape of an unreserved character in the query, such as `?q=%41` or `?q=%7e`, reaches the service and the
   check decoded**, as `?q=A` and `?q=~`, with or without a dot segment in the path, where Envoy passes the query as
   the client wrote it; an escape of a reserved character, such as `%2F`, `%26` or `%3d`, reaches both as written, as
@@ -477,12 +488,15 @@ HAProxy 3.2.26 and 3.4.7 beside Envoy 1.40.2; three differences stay, each named
 
 Before any other rule the file answers what Envoy refuses and HAProxy's own parsers pass: every HTTP/1 version but 1.1
 with `426`, from `HTTP/0.0` to `HTTP/9.9`, and with `400` a method Envoy's HTTP/1 parser does not know (a known one in
-another letter case too; `QUERY`, which Envoy 1.40.2 answers `400`, it sends on), and over HTTP/2 a request past Envoy's 100 header fields. It removes the headers Envoy
-removes: `Keep-Alive`, `Proxy-Connection`, `X-Forwarded-Client-Cert`, the 16 `x-envoy-` headers that steer an Envoy,
-`Connection` but a WebSocket upgrade's, and a request's trailers. From a service's answer it removes `Keep-Alive`, which
-HAProxy would pass on to an HTTP/1.1 client and Envoy does not. It sends `TE: trailers` in any letter case on when
-`Connection` names `te`, as Envoy does. HAProxy counts the request line among its 101 header lines, so 100 header lines
-are served and 101 refused, as by Envoy.
+another letter case too), a `QUERY` with no `Content-Type` or with none but empty lines, over HTTP/1.1 and HTTP/2, which
+Envoy 1.40.2 answers `400` before it picks a route and so before the `404` of an unknown host, the origin check and the
+auth check, and over HTTP/2 a request past Envoy's 100 header fields. A `QUERY` with a `Content-Type` is served, and
+over HTTP/2 so is `query` in another letter case, as by Envoy. It removes the headers Envoy removes: `Keep-Alive`,
+`Proxy-Connection`, `X-Forwarded-Client-Cert`, the 16 `x-envoy-` headers that steer an Envoy, `Connection` but a
+WebSocket upgrade's, and a request's trailers. From a service's answer it removes `Keep-Alive`, which HAProxy would pass
+on to an HTTP/1.1 client and Envoy does not. It sends `TE: trailers` in any letter case on when `Connection` names `te`,
+as Envoy does. HAProxy counts the request line among its 101 header lines, so 100 header lines are served and 101
+refused, as by Envoy.
 
 A header value that holds a byte from 0x01 to 0x08, 0x0B, 0x0C, 0x0E to 0x1F or 0x7F is refused before any other rule, as
 Envoy refuses it: with `400` over HTTP/1.1, and by resetting the stream over HTTP/2, where Envoy closes the connection.
@@ -546,6 +560,9 @@ service what Envoy would not, are in [the next section](#where-haproxy-is-less-s
   limit of 60 KiB. Over HTTP/2, a path whose escaped form outgrows HAProxy's buffer, such as one of 7,000 bytes above
   0x7F, is answered `400` by HAProxy 3.4.7 and `500` by 3.2.26, where Envoy serves it.
 - **A request line with no version, HTTP/0.9's own form, is answered `400`**, where Envoy answers `426`.
+- **Over HTTP/2 a `QUERY` whose `content-type` field is spaces alone is answered `400`**, where Envoy serves it:
+  HAProxy reads an HTTP/2 value of spaces alone as empty, as on `auth.only_with_header`, so the rule that answers `400`
+  to a `QUERY` with no `Content-Type` or an empty one, as Envoy does, answers this one too.
 - **Over HTTP/2, a header or trailer name outside RFC 9110's token characters or a `#` in `:path` resets the stream**,
   where Envoy closes the connection or answers `400`, and a request with neither `:authority` nor `host` is answered
   `404`, where Envoy closes the connection.

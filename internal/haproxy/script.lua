@@ -325,7 +325,9 @@ end, 2)
 -- request: a runtime error in an action lets the request continue to the next rule (measured on HAProxy 3.2.26 and
 -- 3.4.7). The script answers only a denial it copies from the check; every refusal of its own (an unanswered check
 -- under deny, an answer it cannot read whole, an accepted header that did not fit) it leaves to the pass rule, which
--- answers in the forms Envoy answers an unanswered check with, so those forms are written once.
+-- answers in the forms Envoy answers an unanswered check with, so those forms are written once. A request the accepted
+-- headers take past Envoy's header count it marks with txn.pf_too_many, which the configuration answers 500 before the
+-- pass rule.
 
 local function pf_split(list)
   local out = {}
@@ -362,6 +364,13 @@ local PF_MOST_HEAD = 81920
 local PF_MOST_DENIAL = 15100
 -- The body of a 200 is read and dropped up to this (Envoy 1.40.2 passed 16 MiB and refused 64 MiB: measured).
 local PF_MOST_ALLOWED_BODY = 1048576
+-- Envoy answers 500 to a request the check's accepted headers take past its header count, max_headers_count, 100 when
+-- limits.request_headers is not written, which HAProxy's generator does not write yet (measured on Envoy 1.40.2).
+local PF_MOST_FIELDS = 100
+-- Of the headers the script never sets from the check's answer, Envoy 1.40.2 sets te and transfer-encoding from it
+-- under a name auth.accept covers and counts each as one field, where host takes the place of :authority and adds
+-- none (measured), so these two are counted as if they were set.
+local PF_COUNTED_NOT_SET = { te = true, ["transfer-encoding"] = true }
 
 local function pf_now()
   local t = core.now()
@@ -432,6 +441,26 @@ local function pf_line(sock, deadline)
   return line, err
 end
 
+-- pf_size_line reads a chunk-size line and returns the size it gives: plain hexadecimal of at most 8 digits, few
+-- enough that the size is exact (Lua reads 16 of them as a negative number), ended by CR LF. Envoy 1.40.2 reads a bare
+-- LF at the end of every other line of an answer, and none at the end of a chunk-size line, the last chunk's included
+-- (measured), and the socket's line read drops the CR, so this line is read a byte at a time, up to the 10 bytes it
+-- can hold. A line written otherwise returns "malformed", and a read that fails the socket's error.
+local function pf_size_line(sock, deadline)
+  local line = ""
+  for _ = 1, 10 do
+    local byte, err = pf_io(sock, deadline, "receive", 1)
+    if not byte then return nil, err end
+    if byte == "\n" then
+      local digits = line:match("^(%x+)\r$")
+      if digits == nil then return nil, "malformed" end
+      return tonumber(digits, 16)
+    end
+    line = line .. byte
+  end
+  return nil, "malformed"
+end
+
 -- The check's answer is read as RFC 9112 writes one: a request passes only on a 200 whose every line this reader
 -- takes, and an answer it cannot read is refused under allow as under deny, never passed, never taken as unanswered
 -- and never copied as a denial. Envoy 1.40.2 treated each malformed answer measured as unanswered, but read a status
@@ -498,16 +527,13 @@ local function pf_body(sock, deadline, frame, keep, most)
   end
   if frame == "chunked" then
     while true do
-      local line, err = pf_line(sock, deadline)
-      if not line then return nil, err end
-      -- Hexadecimal digits alone, and few enough that the size is exact: Lua reads 16 of them as a negative number.
-      local digits = line:match("^%x+$")
-      if digits == nil or #digits > 8 then return nil, "malformed" end
-      local n = tonumber(digits, 16)
+      local n, err = pf_size_line(sock, deadline)
+      if not n then return nil, err end
       if n == 0 then break end
       if size + n > most then return nil, "too long" end
       err = read(n)
       if err then return nil, err, true end
+      local line
       line, err = pf_line(sock, deadline)
       if not line then return nil, err end
       if line ~= "" then return nil, "malformed" end
@@ -634,7 +660,7 @@ local function pf_refuse(txn, grpc, status, headers, body)
   end
   if grpc then
     keep("content-type", "application/grpc")
-    keep("grpc-status", tostring(grpc_status[status] or 2))
+    keep("grpc-status", tostring(grpc_status[status] or grpc_unknown))
     if body ~= nil and body ~= "" then
       keep("grpc-message", (body:gsub("[^ -$&-~]", function(c) return string.format("%%%02X", c:byte()) end)))
     end
@@ -650,6 +676,27 @@ local function pf_refuse(txn, grpc, status, headers, body)
   -- refusal (measured).
   if status == 304 or (grpc and txn.f:req_ver() == "2.0") then txn:set_var("txn.pf_no_length", true) end
   txn:done(reply)
+end
+
+-- pf_fields is the number of fields of the request HAProxy holds, as Envoy 1.40.2 counts the request it passes on
+-- once its check has answered: each header line, Host as :authority, with :method, :path and :scheme. Envoy counts it
+-- after it has removed and joined what the file removes and joins before the check (Connection, Keep-Alive, the
+-- client's own copies of the headers the proxy sets, the lines of a header it joins), and over HTTP/2 it counts no host
+-- field beside :authority, which HAProxy holds as one Host line. It counts no Transfer-Encoding line, which HAProxy
+-- holds for a chunked request: with it counted, a chunked request with 100 fields as Envoy counts them was answered 500
+-- where Envoy served it (measured). Each name in unset, a header of PF_COUNTED_NOT_SET the answer held, counts one
+-- more.
+local function pf_fields(headers, unset)
+  local n = 3
+  for name, lines in pairs(headers) do
+    if name ~= "transfer-encoding" then
+      local i = 0
+      while lines[i] ~= nil do i = i + 1 end
+      n = n + i
+    end
+  end
+  for _ in pairs(unset) do n = n + 1 end
+  return n
 end
 
 -- The four headers send_request writes into the check's request.
@@ -724,20 +771,31 @@ core.register_action("pf_auth", { "http-req" }, function(txn, relay, path, timeo
   end
   if kind ~= "answer" then return end
   if status == 200 then
-    local set = {}
+    local set, unset, counted = {}, {}, false
     for _, h in ipairs(headers) do
       -- A check never changes how HAProxy frames or routes the request it passes on, so these are never set from
       -- its answer (Envoy 1.40.2 set each of them under an accept prefix that covers it: measured), nor is
-      -- keep-alive, which Envoy never sets from it (measured).
-      if pf_matches(h[1], acceptp) and not never_accepted[h[1]] then
-        txn.http:req_set_header(h[1], h[2])
-        set[h[1]] = h[2]
+      -- keep-alive, which Envoy never sets from it (measured). Envoy counts the request's fields only when the answer
+      -- held a header an accepted name covers other than keep-alive: a 200 with none, or with keep-alive alone, was
+      -- served up to the 100 lines its parser reads, and one with host alone was counted (measured).
+      if pf_matches(h[1], acceptp) then
+        counted = counted or not dropped[h[1]]
+        if not never_accepted[h[1]] then
+          txn.http:req_set_header(h[1], h[2])
+          set[h[1]] = h[2]
+        elseif PF_COUNTED_NOT_SET[h[1]] then
+          unset[h[1]] = true
+        end
       end
     end
     -- A header that does not fit in the request buffer is dropped without an error (measured), so each is read back.
     local now = txn.http:req_get_headers()
     for name, value in pairs(set) do
       if not now[name] or now[name][0] ~= value or now[name][1] ~= nil then return end
+    end
+    if counted and pf_fields(now, unset) > PF_MOST_FIELDS then
+      txn:set_var("txn.pf_too_many", true)
+      return
     end
     txn:set_var("txn.pf_passed", true)
     return

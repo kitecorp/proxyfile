@@ -200,15 +200,19 @@ func TestSecurityLines(t *testing.T) {
 			"  # client_address: connection",
 		}}},
 		{"the script, loaded by every thread", [][]string{{"global"}, {"  tune.lua.bool-sample-conversion normal", "  lua-load-per-thread proxyfile.lua"}}},
-		{"the normalisation block", [][]string{{
+		// Envoy resolves the dot segments before it merges repeated slashes, so a .. removes an empty segment before it:
+		// /catalog//../products/1 is /catalog/products/1, where merging first gave /products/1, and
+		// /products//../public/x reached an auth-off /public/ route without the check (measured on HAProxy 3.2.26 and
+		// 3.4.7 beside Envoy 1.40.2).
+		{"the normalisation block, the dot segments before the slashes are merged", [][]string{{
 			"  http-request normalize-uri fragment-strip",
 			`  http-request set-var(txn.path) path,lua.pf_escape,regsub(%2f,/,gi),regsub(%5c,/,gi),regsub('\\x5c',/,g)`,
 			"  http-request return status 400 if !{ var(txn.path) -m found }",
 			"  http-request set-path %[var(txn.path)]",
 			"  http-request normalize-uri percent-decode-unreserved",
-			"  http-request normalize-uri path-merge-slashes",
 			"  http-request normalize-uri path-strip-dot",
 			"  http-request normalize-uri path-strip-dotdot full",
+			"  http-request normalize-uri path-merge-slashes",
 			"  http-request set-var(txn.grpc_answer) bool(true) if { path -m sub %00 } { var(txn.grpc_call) -m bool }",
 			"  http-request return status 200 hdr grpc-status 13 if { var(txn.grpc_answer) -m bool }",
 			"  http-request return status 400 if { path -m sub %00 }",
@@ -275,7 +279,10 @@ func TestSecurityLines(t *testing.T) {
 			{
 				"  # what Envoy refuses before it reads a request further, and the headers it removes",
 				"  http-request return status 426 if !{ req.ver 1.1 } !{ fc_http_major 2 }",
-				"  http-request return status 400 if { req.ver 1.1 } !{ method " + strings.Join(generator.EnvoyMethods, " ") + " }",
+				"  http-request return status 400 if { req.ver 1.1 } !{ method ACL BIND CHECKOUT CONNECT COPY DELETE GET HEAD LINK LOCK MERGE MKACTIVITY MKCALENDAR MKCOL MOVE MSEARCH NOTIFY OPTIONS PATCH POST PROPFIND PROPPATCH PURGE PUT QUERY REBIND REPORT SEARCH SOURCE SUBSCRIBE TRACE UNBIND UNLINK UNLOCK UNSUBSCRIBE }",
+				// Envoy 1.40.2 answers 400 to a QUERY with no Content-Type, or with none but empty lines, over HTTP/1.1 and
+				// HTTP/2, before it picks a route, and serves a QUERY with one (measured).
+				"  http-request return status 400 if { method QUERY } !{ req.fhdr(content-type) -m len gt 0 }",
 				"  http-request return status 400 if { req.ver 1.1 } !{ url_beg / }",
 				"  http-request return status 400 if { req.ver 2.0 } { req.fhdr(upgrade) -m found }",
 				`  http-request return status 400 if { req.hdr(connection) -i -m reg '^(?!(?:close|keep-alive|upgrade|http2-settings|te)?\z)' }`,
@@ -702,7 +709,7 @@ func TestForms(t *testing.T) {
 				slices.Concat([]string{"  http-after-response set-header x-request-id %[var(txn.request_id)]"}, grpcCall,
 					[]string{"  # the path, normalised before anything reads it"}),
 				{
-					"  http-request normalize-uri path-strip-dotdot full",
+					"  http-request normalize-uri path-merge-slashes",
 					"  http-request set-var(txn.grpc_answer) bool(true) if { path -m sub %00 } { var(txn.grpc_call) -m bool }",
 					"  http-request return status 200 hdr grpc-status 13 if { var(txn.grpc_answer) -m bool }",
 					"  http-request return status 400 if { path -m sub %00 }",
@@ -908,6 +915,14 @@ func TestCheckLines(t *testing.T) {
 		`  http-request return status 403 content-type text/plain string "Invalid CORS request" if { var(txn.pf_refused) -m bool } has_origin`,
 		"  http-request return status 403 if { var(txn.pf_refused) -m bool }",
 	}
+	// Envoy 1.40.2 answers 500 with no body to a request the check's accepted headers take past its 100 header fields,
+	// a gRPC call 200 with grpc-status 2, each with an admitted origin's CORS answer (measured): the action counts the
+	// fields and sets txn.pf_too_many, and these lines answer before the pass rule, while the origin is kept.
+	pastCount := []string{
+		"  http-request set-var(txn.grpc_answer) bool(true) if { var(txn.pf_too_many) -m bool } { var(txn.grpc_call) -m bool }",
+		"  http-request return status 200 hdr grpc-status 2 if { var(txn.grpc_answer) -m bool }",
+		"  http-request return status 500 if { var(txn.pf_too_many) -m bool }",
+	}
 	afterCheck := []string{
 		"  http-request del-header x-gateway-action",
 		"  http-after-response del-header content-length if { var(txn.pf_no_length) -m bool }",
@@ -954,7 +969,7 @@ func TestCheckLines(t *testing.T) {
 		{name: "no only_with_header", proxyfile: small(ask), want: [][]string{{askAll}}, none: []string{"txn.pf_header"}},
 		{name: "the action and the pass rule", proxyfile: small(ask), want: [][]string{
 			{`  http-request return status 403 content-type text/plain string "Invalid CORS request" if !{ var(txn.admitted) -m bool }`},
-			slices.Concat([]string{action}, passRule, afterCheck),
+			slices.Concat([]string{action}, pastCount, passRule, afterCheck),
 			{"  http-request return status 400 if dot_segment"},
 		}},
 		// Envoy's denial carries the CORS answer of an admitted origin, and its answer to a dot segment none (measured on
@@ -962,7 +977,7 @@ func TestCheckLines(t *testing.T) {
 		{name: "a denial carries the CORS answer", proxyfile: slices.Concat(smallFile[:4],
 			testsupport.Document{`  all: {hosts: [localhost], origins: ["http://localhost:3000"]}`}, smallFile[5:], testsupport.Document{ask}).String(),
 			want: [][]string{slices.Concat([]string{askAll, "  http-request set-var(txn.origin) req.fhdr(origin) if { var(txn.cors) -m bool }", action},
-				passRule, []string{"  http-request unset-var(txn.origin)", "  http-request del-header x-gateway-action"})}},
+				pastCount, passRule, []string{"  http-request unset-var(txn.origin)", "  http-request del-header x-gateway-action"})}},
 		{name: "the relay", proxyfile: small(ask), want: [][]string{relay("  server app1 127.0.0.1:3000")}, last: true},
 		{name: "the relay to each address of the check service", proxyfile: slices.Concat(smallFile[:2],
 			testsupport.Document{`  app: {http: 3000, addresses: ["10.0.0.1", "10.0.0.2"]}`}, smallFile[3:], testsupport.Document{ask}).String(),
@@ -1002,7 +1017,7 @@ func TestCheckLines(t *testing.T) {
 				"  http-request del-header 'x-user-id'",
 				"  http-request del-header x-envoy-auth-failure-mode-allowed",
 			}},
-			none: []string{"pf_auth", "pf_ask", "pf_passed", "pf_refused", "pf_preflight", "pf_no_length", "set-header x-gateway", "listen check", "mode tcp"}},
+			none: []string{"pf_auth", "pf_ask", "pf_passed", "pf_refused", "pf_too_many", "pf_preflight", "pf_no_length", "set-header x-gateway", "listen check", "mode tcp"}},
 		{name: "a value with a quote", proxyfile: small(`auth: {ask: "app /a'b", timeout: 1s, enabled: true, when_unavailable: deny}`),
 			want: [][]string{{`  http-request lua.pf_auth 'abns@proxyfile-8000-check' '/a'\''b' 1000 deny '-' '-' 0 if { var(txn.pf_ask) -m bool }`}}},
 	}
