@@ -1,0 +1,62 @@
+# The documentation site, built by scripts/build-site.sh from the README and the pages under docs/ as they are: no page
+# carries front matter or is copied, and each built page keeps its file's place, docs/<name>.md as docs/<name>.html and
+# the README as index.html, so a relative link between pages keeps its meaning. Every link between pages is relative,
+# so it works wherever the site is served. The project root is the repository's, so the link render hook can tell a
+# folder from a file anywhere in it.
+title = 'proxyfile'
+# The site's address, the one line to change when it is served at another: only the canonical address, the Open Graph
+# address of each page, the sitemap and robots.txt name it.
+baseURL = 'https://kitecorp.github.io/proxyfile/'
+uglyURLs = true
+# A page whose file name holds a capital is built under that name, so the links GitHub follows to it work here too.
+disablePathToLower = true
+# The pages and the sitemap alone: no list of the docs folder, no feed and no 404 page that no page links.
+disableKinds = ['section', 'taxonomy', 'term', 'rss', '404']
+enableRobotsTXT = true
+# The repository is mounted read-only, so the build writes nothing into it.
+noBuildLock = true
+
+[params]
+# Links to files outside the site lead here, at the commit built, which build-site.sh passes as HUGO_PARAMS_COMMIT.
+repository = 'https://github.com/kitecorp/proxyfile'
+# The script that draws the README's Mermaid diagrams, and its licence, fetched by the build at this release and refused
+# unless each SHA-256 sum is the one here, read from the files of the npm package mermaid 12.3.0 (the package checked
+# against the integrity npm publishes for it). Two hosts serve the package's files, so the build asks the second only
+# when the first does not answer. The site serves both files itself, so a reader's browser asks no other host, and only
+# a page with a diagram loads the script.
+[params.mermaid]
+script = { sha256 = '336df803d87a38b70a01e736e666c8f7601d2ce42f5e47c8fafe5d721074b9a3', urls = [
+  'https://cdn.jsdelivr.net/npm/mermaid@12.3.0/dist/mermaid.min.js',
+  'https://unpkg.com/mermaid@12.3.0/dist/mermaid.min.js',
+] }
+licence = { sha256 = 'ec9fb67dcb25eccc416ed56e1aab819222c805a2a4bfe4cb19e7556bf2ffde80', urls = [
+  'https://cdn.jsdelivr.net/npm/mermaid@12.3.0/LICENSE',
+  'https://unpkg.com/mermaid@12.3.0/LICENSE',
+] }
+
+# The pages are written for GitHub's renderer, so the extensions it lacks are off: they would read a line that starts
+# with ": " as a definition, a heading that ends in {...} as attributes, and turn ' and -- into other characters.
+[markup.goldmark.extensions]
+definitionList = false
+typographer = false
+[markup.goldmark.parser.attribute]
+title = false
+# The README shows the comparison figure through a <picture> element.
+[markup.goldmark.renderer]
+unsafe = true
+[[module.mounts]]
+source = 'README.md'
+target = 'content/_index.md'
+[[module.mounts]]
+source = 'docs'
+target = 'content/docs'
+files = ['*.md']
+[[module.mounts]]
+source = 'docs/images'
+target = 'static/docs/images'
+[[module.mounts]]
+source = 'site/layouts'
+target = 'layouts'
+[[module.mounts]]
+source = 'site/static'
+target = 'static'

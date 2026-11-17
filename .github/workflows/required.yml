@@ -26,6 +26,12 @@ jobs:
           if [ -n "$unformatted" ]; then printf '%s\n' "$unformatted"; exit 1; fi
       - run: go vet ./...
       - run: go test -count=1 ./...
+      # The site the Pages workflow publishes from master, built and checked the same way but not published, so a change
+      # that breaks a page or a link fails here before it merges.
+      - name: The documentation site builds, with every page, the credit and every link
+        run: |
+          scripts/build-site.sh "$RUNNER_TEMP/site"
+          scripts/check-site.sh "$RUNNER_TEMP/site"
       - name: Envoy 1.40.2 loads every generated example
         run: scripts/validate-envoy.sh examples/*/*/envoy.yaml
       # No example asks an auth check, so the battery's two files that ask one are rendered and loaded too: only they

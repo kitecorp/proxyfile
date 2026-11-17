@@ -1,0 +1,15 @@
+{{- /* What a search engine and a link preview show under the title: the page's first paragraph that holds text, cut to
+its first two sentences, or to the first when two are long, as the page's file writes them. A sentence the paragraph
+leaves open, such as one that ends with a colon before a list, is not taken. */ -}}
+{{- $text := "" -}}
+{{- range findRE `(?s)<p>.*?</p>` .Content -}}
+  {{- if not $text -}}
+    {{- $text = . | plainify | htmlUnescape | replaceRE `\s+` " " | strings.TrimSpace -}}
+  {{- end -}}
+{{- end -}}
+{{- $description := $text -}}
+{{- with findRE `\S.*?[.!?](?:\s|$)` $text 2 -}}
+  {{- $description = strings.TrimSpace (delimit . "") -}}
+  {{- if gt (len $description) 200 -}}{{- $description = strings.TrimSpace (index . 0) -}}{{- end -}}
+{{- end -}}
+{{- return truncate 300 $description -}}

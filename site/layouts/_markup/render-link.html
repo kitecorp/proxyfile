@@ -1,0 +1,30 @@
+{{- /* A link between pages leads to the built page, with its fragment; a link to another file of the repository, which
+the site does not publish, leads to that file on GitHub at the commit built, as a folder or as a file. The pages write
+these links as GitHub reads them, relative to the page's file, so each is resolved from the page's place in the
+repository. A built page keeps that place, so the link written is relative to the page as well and works wherever the
+site is served. */ -}}
+{{- $url := urls.Parse .Destination -}}
+{{- $href := .Destination -}}
+{{- if and (not $url.IsAbs) $url.Path -}}
+  {{- $page := cond .Page.IsHome "README.md" .Page.File.Path -}}
+  {{- $target := path.Join (path.Dir $page) $url.Path -}}
+  {{- $fragment := cond (eq $url.Fragment "") "" (printf "#%s" $url.Fragment) -}}
+  {{- $up := strings.Repeat (len (findRE "/" $page)) "../" -}}
+  {{- if eq $target "README.md" -}}
+    {{- /* The folder, not index.html, so the first page has one address. */ -}}
+    {{- $href = printf "%s%s" (cond (eq $up "") "./" $up) $fragment -}}
+  {{- else if findRE `^docs/[^/]+\.md$` $target -}}
+    {{- $href = printf "%s%s.html%s" $up (strings.TrimSuffix ".md" $target) $fragment -}}
+  {{- else if hasPrefix $target "docs/images/" -}}
+    {{- $href = printf "%s%s%s" $up $target $fragment -}}
+  {{- else -}}
+    {{- /* The address on GitHub would answer 404, and the check of the built site does not fetch it. */ -}}
+    {{- $file := os.Stat $target -}}
+    {{- if not $file -}}{{- errorf "%s: the link %s leads to no file of the repository" $page .Destination -}}{{- end -}}
+    {{- if not site.Params.commit -}}{{- errorf "no commit to link files at: set HUGO_PARAMS_COMMIT" -}}{{- end -}}
+    {{- $kind := cond (and $file $file.IsDir) "tree" "blob" -}}
+    {{- $href = printf "%s/%s/%s/%s%s" site.Params.repository $kind site.Params.commit $target $fragment -}}
+  {{- end -}}
+{{- end -}}
+<a href="{{ $href | safeURL }}"{{ with .Title }} title="{{ . }}"{{ end }}>{{ .Text }}</a>
+{{- /* chomp trailing newline */ -}}

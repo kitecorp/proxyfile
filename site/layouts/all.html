@@ -1,0 +1,107 @@
+{{- /* Every page of the site: the README as the first page and each page under docs/. A page's title is its first
+heading. The README's own "Made by" section is the credit on the first page, and the footer of every other page renders
+that section, so the credit reads the same everywhere, is written once and shows once on each page. */ -}}
+{{- $up := strings.Repeat (len (findRE "/" .File.Path)) "../" -}}
+{{- $heading := "" -}}
+{{- with findRESubmatch `<h1[^>]*>(.*?)</h1>` .Content 1 -}}{{- $heading = index . 0 1 | plainify | htmlUnescape -}}{{- end -}}
+{{- $credit := findRESubmatch `(?s)\n## Made by\n+(.+?)(?:\n\n|\n*$)` site.Home.RawContent 1 -}}
+{{- if not $credit -}}{{- errorf "README.md has no ## Made by section for the footer" -}}{{- end -}}
+{{- /* GitHub never runs a script a page writes, in a script element or an attribute such as onload, where the site
+would; a frame, an object or an embed brings in another page or program, and a base element moves every relative link.
+The build refuses such a page rather than publish it. */ -}}
+{{- with findRE `(?i)<(?:script|iframe|frame|object|embed|applet|base)[\s/>]|<[a-z][^>]*\son[a-z]+\s*=` .Content 1 -}}
+  {{- errorf "%s: the page writes %s, and the site publishes no script, on... attribute, frame, object, embed or base a page writes" (cond $.IsHome "README.md" $.File.Path) (index . 0) -}}
+{{- end -}}
+{{- $title := cond (or .IsHome (not $heading)) site.Title (printf "%s · %s" $heading site.Title) -}}
+{{- $address := partial "address.html" . -}}
+{{- $description := partial "description.html" . -}}
+{{- /* A page of four sections and subsections or more starts with the list of them (Hugo's list holds the second and
+third heading levels), under its title. */ -}}
+{{- $content := .Content -}}
+{{- if ge (len (findRE `<h[23] id=` $content)) 4 -}}
+  {{- $content = replace $content "</h1>" (printf "</h1>\n%s" .TableOfContents) 1 -}}
+{{- end -}}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ $title }}</title>
+<meta name="description" content="{{ $description }}">
+<link rel="canonical" href="{{ $address }}">
+<meta property="og:title" content="{{ $title }}">
+<meta property="og:description" content="{{ $description }}">
+<meta property="og:type" content="{{ cond .IsHome "website" "article" }}">
+<meta property="og:url" content="{{ $address }}">
+<style>
+:root {
+  color-scheme: light dark;
+  --text: #1f2328;
+  --muted: #59636e;
+  --background: #ffffff;
+  --surface: #f6f8fa;
+  --border: #d1d9e0;
+  --link: #0969da;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text: #f0f6fc;
+    --muted: #9198a1;
+    --background: #0d1117;
+    --surface: #151b23;
+    --border: #3d444d;
+    --link: #4493f8;
+  }
+}
+body {
+  margin: 0 auto;
+  max-width: 64rem;
+  padding: 0 1rem;
+  color: var(--text);
+  background: var(--background);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  overflow-wrap: break-word;
+}
+a { color: var(--link); }
+header, footer { color: var(--muted); padding: 1rem 0; }
+footer { margin-top: 3rem; border-top: 1px solid var(--border); }
+code, pre { font: 0.875em/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+code { padding: 0.1em 0.3em; border-radius: 4px; background: var(--surface); }
+pre { padding: 1rem; overflow-x: auto; border-radius: 6px; background: var(--surface); }
+pre code { padding: 0; font-size: 1em; background: none; }
+/* The widest tables, such as the support table, scroll inside their own box instead of widening the page. */
+table { display: block; width: max-content; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+th, td { padding: 0.375rem 0.75rem; border: 1px solid var(--border); vertical-align: top; }
+img { max-width: 100%; }
+/* A diagram is drawn over its source, which stays hidden in its place until then; a wide drawing scrolls in its box. */
+pre.mermaid { padding: 0; text-align: center; background: none; }
+pre.mermaid:not([data-processed]) { visibility: hidden; }
+/* The list of a long page's sections. */
+#TableOfContents { margin: 1rem 0; padding: 0.25rem 1rem; border-left: 3px solid var(--border); }
+#TableOfContents ul { margin: 0.25rem 0; padding-left: 1.25rem; }
+#TableOfContents > ul { padding-left: 0; list-style: none; }
+</style>
+<noscript><style>
+/* Without scripts nothing draws the diagrams, so each shows its source as code. */
+pre.mermaid:not([data-processed]) { visibility: visible; padding: 1rem; text-align: left; background: var(--surface); }
+</style></noscript>
+</head>
+<body>
+{{- if not .IsHome }}
+<header><a href="{{ $up }}">{{ site.Title }}</a></header>
+{{- end }}
+<main>
+{{ $content | safeHTML }}
+</main>
+{{- if not .IsHome }}
+<footer>{{ .RenderString (index $credit 0 1) }}</footer>
+{{- end }}
+{{- if .Store.Get "mermaid" }}
+{{- with site.Params.mermaid }}
+{{- partialCached "pinned-file.html" (dict "urls" .licence.urls "sha256" .licence.sha256 "path" "mermaid/LICENSE.txt") "licence" }}
+{{- partialCached "pinned-file.html" (dict "urls" .script.urls "sha256" .script.sha256 "path" "mermaid/mermaid.min.js") "script" }}
+{{- end }}
+<script src="{{ $up }}mermaid/draw.js" defer></script>
+{{- end }}
+</body>
+</html>
