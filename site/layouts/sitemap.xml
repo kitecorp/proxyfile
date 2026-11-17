@@ -1,0 +1,7 @@
+{{- /* Every page once, at the address its canonical link names. */ -}}
+{{ printf "<?xml version=%q encoding=%q?>" "1.0" "utf-8" | safeHTML }}
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+{{- range site.Pages }}
+  <url><loc>{{ partial "address.html" . }}</loc></url>
+{{- end }}
+</urlset>

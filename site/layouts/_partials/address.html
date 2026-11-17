@@ -1,0 +1,3 @@
+{{- /* A page's one address: the site's address for the first page, so it is never also named with index.html, and the
+page's own path under it for every other. */ -}}
+{{- return cond .IsHome site.BaseURL .Permalink -}}

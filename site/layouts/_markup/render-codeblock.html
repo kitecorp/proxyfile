@@ -1,0 +1,5 @@
+{{- /* A code block keeps its text, uncoloured, and takes the page's light or dark scheme. Hugo's highlighter would
+write fixed colours into it, and turning it off in the configuration also turns off the hook that draws Mermaid
+blocks. */ -}}
+<pre><code{{ with .Type }} class="language-{{ . }}"{{ end }}>{{ .Inner | htmlEscape | safeHTML }}</code></pre>
+{{- /* chomp trailing newline */ -}}

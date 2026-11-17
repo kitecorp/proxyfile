@@ -1,0 +1,4 @@
+{{- /* A Mermaid block, as GitHub shows it: a diagram, which the script all.html loads on this page alone draws in the
+reader's browser from the element's text. */ -}}
+<pre class="mermaid">{{ .Inner | htmlEscape | safeHTML }}</pre>
+{{- .Page.Store.Set "mermaid" true -}}

@@ -345,3 +345,49 @@ answer (`by`, above):
    configuration at `/config/<file name>`, and the ports 10000 and 9901 and the folders `/etc/gateway/tls` and `/etc/gateway/jwt` are
    the examples', the same for every target. Its files together must run each row Envoy's files run, unless its
    target refuses one of the row's keys, or the battery fails before any container starts.
+
+## The documentation site
+
+The README and the pages under `docs/` are also published as a site, at https://kitecorp.github.io/proxyfile/, built
+from the same files, so no page is written twice. That address is the line `baseURL` in
+[`site/hugo.toml`](../site/hugo.toml), the one line to change when the site is served at another.
+[`scripts/build-site.sh`](../scripts/build-site.sh) builds it with Hugo, the release pinned by digest in
+`scripts/hugo-image`, from the configuration in [`site/`](../site). Each page keeps its file's place and name, capitals
+included, `docs/<name>.md` as `docs/<name>.html` and the README as the first page, `index.html`. A link between pages
+leads to the built page and its heading, a link to any other file of the repository leads to that file on GitHub at the
+commit built, and the build fails on a link to a file the repository does not hold. A page of four sections and
+subsections or more starts with the list of them. Each page names, for search engines and link previews, a description
+taken from its first paragraph, its one canonical address and its Open Graph title, description, type and address;
+`sitemap.xml` lists every page, and `robots.txt` names the sitemap. The README's own Made by section is the credit on
+the first page, and the footer of every other page renders it.
+
+A Mermaid block, in a list or a quote too, is drawn as on GitHub, by a copy of Mermaid the build fetches at the release
+pinned in `site/hugo.toml`, from jsDelivr or, when jsDelivr does not answer, from unpkg, and refuses unless its SHA-256
+sum is the one pinned there. The site serves that copy itself, and a page with a diagram asks for it only when a
+diagram comes near the screen. Until then the diagram's box keeps its place, and a reader without scripts sees the
+block as code. A wide diagram is drawn at its own size and scrolls in its box.
+
+The build refuses a page that the site would show otherwise than GitHub, naming the page and the text. Before Hugo
+runs, it refuses a page that holds two opening braces followed by `<` or `%`, which Hugo reads as the start of its own
+shortcode anywhere in a page, in a code block too, and a page whose first text starts with `-`, `+`, `{` or `#+`, which
+Hugo reads as front matter. Hugo then refuses a page whose Markdown writes a script, an `on...` attribute such as
+`onload`, a frame, an object, an embed or a `base` element: GitHub never runs a script a page writes, and the site
+would.
+
+[`scripts/check-site.sh`](../scripts/check-site.sh) then reads what was built, every tag as a browser reads it, in any
+quoting or case and outside comments. It fails when a page `git ls-files 'docs/*.md'` lists has no built page, when a
+footer is not the first page's Made by paragraph byte for byte or a page says it twice, when a Mermaid block is not
+drawn, when a page lacks its description, canonical address or Open Graph names or the sitemap does not list it once,
+when a page of four sections or more does not start with their list, when a page holds a script the theme did not
+write, a frame or a `base` element, when the browser would fetch from another host something the page's own Markdown
+does not name, or when a link leads to no built file or names no heading of it. A link that leaves the site is checked
+for its form, never fetched.
+
+The check `Required` builds and checks the site without publishing it, so a change that breaks a page or a link fails
+before it merges. The `Pages` workflow builds and checks it the same way on each push to `master`, or when started by
+hand, and publishes it when it runs on `master`. To build and check it yourself, with Docker running:
+
+```sh
+site=$(mktemp -d)
+scripts/build-site.sh "$site" && scripts/check-site.sh "$site"
+```

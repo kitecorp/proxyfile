@@ -174,6 +174,9 @@ generator writes with no key. [docs/portability.md](docs/portability.md) says wh
 which belong to Envoy alone, [From 1.x to 2.0](docs/format.md#from-1x-to-20) which keys a 1.x file moves, and
 [From 2.0 to 2.1](docs/format.md#from-20-to-21) what 2.1 changes for a 2.0 file.
 
+This README and the pages under `docs/` are also published as a site, at
+[kitecorp.github.io/proxyfile](https://kitecorp.github.io/proxyfile/).
+
 ## Keys
 
 Each key's page says what it does and holds a table of every key under it, written from the format description that the

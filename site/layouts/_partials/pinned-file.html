@@ -1,0 +1,30 @@
+{{- /* Fetches a file at build time from addresses that name its release, and publishes it at the path given, so the
+site serves its own copy and a reader's browser asks no other host. Each address is asked twice at most, and the next
+one only when the one before answered nothing; a file whose SHA-256 sum is not the one pinned fails the build at once,
+whichever address served it. The build fails too when no address answers. Context: a dict with urls, sha256 and path.
+*/ -}}
+{{- $want := .sha256 -}}
+{{- $file := false -}}
+{{- $failures := slice -}}
+{{- range $url := .urls -}}
+  {{- range $attempt := seq 2 -}}
+    {{- if not $file -}}
+      {{- /* A key of its own for each attempt, so a second attempt asks again instead of reading the first. */ -}}
+      {{- with try (resources.GetRemote $url (dict "key" (printf "%s attempt %d" $url $attempt))) -}}
+        {{- with .Err -}}{{- $failures = $failures | append (printf "%s: %s" $url .) -}}
+        {{- else with .Value -}}
+          {{- if ne (sha256 .Content) $want -}}
+            {{- errorf "%s: its SHA-256 sum is %s, not the %s pinned" $url (sha256 .Content) $want -}}
+          {{- end -}}
+          {{- $file = . -}}
+        {{- else -}}{{- $failures = $failures | append (printf "%s answered no file" $url) -}}
+        {{- end -}}
+      {{- end -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- with $file -}}
+  {{- (resources.Copy $.path .).Publish -}}
+{{- else -}}
+  {{- errorf "%s: no address answered: %s" .path (delimit $failures "; ") -}}
+{{- end -}}

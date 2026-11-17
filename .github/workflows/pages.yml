@@ -1,0 +1,53 @@
+# Publishes the documentation site, the README and the pages under docs/, to GitHub Pages: built from the commit the
+# workflow runs on by scripts/build-site.sh and checked by scripts/check-site.sh, so a site with a missing page, a page
+# without the credit or a broken link is never published. The repository's Pages source must be "GitHub Actions";
+# until it is, the build job still builds and checks the site, and the deploy job fails with a message that points to
+# the Pages settings.
+name: Pages
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+permissions: {}
+# One run at a time for each ref. A run that waits is replaced by a newer one of the same ref, so the last commit of
+# master is the one published, and a deployment already running finishes rather than leaving the site half replaced.
+# The ref is in the group, so a run started by hand on another branch, which publishes nothing, never replaces a run of
+# master that waits.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      # The token stays out of the git config, so no script the job runs can read it from there.
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the site
+        run: scripts/build-site.sh "$RUNNER_TEMP/site"
+      - name: Check its pages, the credit and every link
+        run: scripts/check-site.sh "$RUNNER_TEMP/site"
+      - uses: actions/upload-pages-artifact@v5.0.0
+        with:
+          path: ${{ runner.temp }}/site
+  # The only job that can publish, and it runs no code of the repository: it deploys the artifact the build uploaded.
+  # A run started by hand on another branch builds and checks that branch's site and publishes nothing.
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      # deploy-pages proves to Pages, with an OIDC token, that the deployment comes from this workflow run.
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5.0.1
