@@ -212,7 +212,7 @@ func TestCheckLines(t *testing.T) {
 				`      proxy_set_header "x-user-check" "";`,
 				`      proxy_set_header x-envoy-auth-failure-mode-allowed "";`,
 			}, checkEnd),
-			{"    location @pf_r_dotparam {", "      set $pf_then refused;", `      default_type "";`, "      types {}", "      js_access pf.check;", "    }"},
+			{"    location @pf_r_dotparam {", "      set $pf_then refused;", `      default_type "";`, "      js_access pf.check;", "    }"},
 			{
 				"stream {",
 				"  js_engine njs;",
@@ -234,7 +234,7 @@ func TestCheckLines(t *testing.T) {
 				"  }",
 				"}",
 			},
-		}, absent: []string{`    "~^1" refused;`}},
+		}, absent: []string{`    "~^1" refused;`, "      types {}"}},
 		{name: "deny, the request log", out: checksOut, want: [][]string{
 			{requestLog("pf_request", `"$pf_authz_us"`), requestLog("pf_request_not_asked", "null")},
 			{
@@ -266,11 +266,10 @@ func TestCheckLines(t *testing.T) {
 			}, checkEnd),
 			{
 				"    location @pf_r_dotparam {",
-				"      add_header x-request-id $pf_request_id always;",
+				"      add_header x-request-id $pf_answer_id always;",
 				"      add_header Vary Origin always;",
 				"      set $pf_then refused;",
 				`      default_type "";`,
-				"      types {}",
 				"      js_access pf.check;",
 				"    }",
 			},
@@ -279,7 +278,6 @@ func TestCheckLines(t *testing.T) {
 				`      set $pf_log_route "braces";`,
 				`      set $pf_log_upstream "accounts_http";`,
 				`      default_type "";`,
-				"      types {}",
 				"      js_access pf.check;",
 			},
 			{
@@ -299,7 +297,7 @@ func TestCheckLines(t *testing.T) {
 				"      proxy_pass http://accounts_http;",
 			},
 			{`    set $pf_check_send "authorization x-country x-client-* http2-settings x-gateway-timeout-ms x-envoy-internal x-envoy-expected-rq-timeout-ms x-gateway-action x-gateway-reports x-forwarded-uri x-forwarded-method x-forwarded-proto x-forwarded-host";`},
-		}},
+		}, absent: []string{"      types {}"}},
 		{name: "allow, an RPC method's question", out: authOut, want: [][]string{{
 			"    location @pf_r_3 {",
 			`      set $pf_log_route "shop";`,
@@ -307,7 +305,6 @@ func TestCheckLines(t *testing.T) {
 			`      set $pf_action "buy";`,
 			`      set $pf_reports "browse";`,
 			`      default_type "";`,
-			"      types {}",
 			"      js_access pf.check;",
 		}, {
 			`      grpc_set_header "x-user-id" $pf_accept_0_grpc;`,
@@ -370,15 +367,15 @@ func TestCheckLines(t *testing.T) {
 		}},
 		{name: "an escaped question", out: escapedQuestion, want: [][]string{
 			{`  geo $pf_dollar { default "$"; }`},
-			{`      set $pf_action "read \"q\" ${pf_dollar}x";`, `      default_type "";`, "      types {}", "      js_access pf.check;"},
+			{`      set $pf_action "read \"q\" ${pf_dollar}x";`, `      default_type "";`, "      js_access pf.check;"},
 		}},
 		{name: "the check path routes a client", out: checksOut, want: [][]string{
 			{"    location = /.proxyfile/check {", `      if ($pf_checking = "") {`, "        return 418;", "      }", "      error_page 418 = @pf_r_$pf_route;"},
 		}},
 		{name: "the dot segment is asked", out: authOut, want: [][]string{
 			{`    "~^1" dotparam;`, `    "~^01" refused;`},
-			{"    location @pf_r_refused {", "      add_header x-request-id $pf_request_id always;", "      add_header Vary Origin always;",
-				"      keepalive_timeout 0;", `      return 400 "$pf_empty";`, "    }", "    location @pf_r_dotparam {"},
+			{"    location @pf_r_refused {", "      add_header x-request-id $pf_answer_id always;", "      add_header Vary Origin always;",
+				"      keepalive_timeout 0;", `      default_type "";`, `      return 400 "$pf_empty";`, "    }", "    location @pf_r_dotparam {"},
 		}, absent: []string{`    "~^1" refused;`}},
 		{name: "keep-alive is never set", out: keepAlive, want: [][]string{
 			{`    set $pf_accept "x-user-id";`},
@@ -471,7 +468,10 @@ func TestCheckedRouteLocations(t *testing.T) {
 	if got := unchecked(generate(t, string(testsupport.ReadFile(t, authFile)))); !slices.Equal(got, slices.Concat(perServer, perServer, perServer, perServer)) {
 		t.Errorf("nginx-auth.yaml: route locations with no handler %q, want %q in each of the four environment servers", got, perServer)
 	}
-	if got := len(unchecked(generate(t, string(testsupport.ReadFile(t, batteryFile))))); got != 632 {
-		t.Errorf("nginx.yaml: %d route locations with no handler, want 632, every one", got)
+	// nginx.yaml writes no auth: its 81 places of a route in each of four environments, each with a second location but
+	// the two with a rewrite, and a copy that tries once of each of the six locations of its three RPC methods, which it
+	// retries: (81 * 2 - 2 + 6) * 4 = 664.
+	if got := len(unchecked(generate(t, string(testsupport.ReadFile(t, batteryFile))))); got != 664 {
+		t.Errorf("nginx.yaml: %d route locations with no handler, want 664, every one", got)
 	}
 }

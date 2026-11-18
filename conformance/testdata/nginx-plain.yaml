@@ -4,8 +4,12 @@
 # no tls, so the battery runs nginx's lines for a client in front of the proxy. It removes x-request-id from clients,
 # which nginx reads to keep a client's own request id under forwarded, so a row shows the removed name read as never
 # sent. Its hold service is the battery's backend that takes no connection, so a row shows the answer to a service
-# that does not take one within the 5 s a file with no timeouts gives it. Every entry runs it, Envoy's too, so its
-# literals are Envoy's answers.
+# that does not take one within the 5 s a file with no timeouts gives it, and its rpc entry, which retries once, sends
+# example.hold.* to its held service, at the two backends that take no connection, so a row shows the answer to a
+# retried call whose every try times out connecting. Its route limited admits one request a minute
+# by client, and no row but the client keys' sends to it, so each of those rows finds the bucket of the address it
+# sends as the rows before it left it: under forwarded the client is the last X-Forwarded-For entry when that entry is
+# an address, and otherwise the peer. Every entry runs it, Envoy's too, so its literals are Envoy's answers.
 listen: 10000
 admin: 9901
 services:
@@ -16,6 +20,7 @@ services:
   accounts: {grpc: 7070, http: 7070, host_header: "127.0.0.1:7070"}
   catalog: {http: 8090, address: "10.0.2.21"}
   hold: {http: 8095, address: "10.0.2.30"}
+  held: {grpc: 8095, addresses: ["10.0.2.30", "10.0.2.31"]}
 remove_from_clients: [x-request-id]
 origins:
   live: {hosts: [api.example.com, api.example.org]}
@@ -23,16 +28,20 @@ origins:
   local: {hosts: [127.0.0.1, localhost]}
 routes:
   - rpc:
+      retries: 1
       to:
         example.shop.*: {service: shop, name: shop}
+        example.hold.*: {service: held, name: held}
         "*": accounts
   - {name: accounts-webhooks, path: /api/webhooks, method: POST, to: accounts, rewrite: /hooks/payments}
   - {name: catalog, prefix: /catalog/, to: catalog}
   - {name: hooks, prefix: /hooks/, to: accounts, rewrite: /in/}
   - {name: hold, prefix: /hold/, to: hold}
+  - {name: limited, prefix: /limited/, to: shop, rate_limit: {requests: 1, per: 1m, by: client}}
   - {name: shop, prefix: /, to: shop}
 rpc:
   methods:
     - {service: example.shop.v1.CartService, method: GetCart}
     - {service: example.accounts.v1.ProfileService, method: GetProfile}
     - {service: example.shop.v1.CartService, method: AddItem}
+    - {service: example.hold.v1.S, method: Call}

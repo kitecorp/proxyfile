@@ -244,6 +244,21 @@ type RateLimit struct {
 	ByClient        bool
 }
 
+// WholeRate is requests in millis milliseconds as a whole number of requests a second, unit "s", or, when a second
+// gives none, a minute, unit "m", and false when neither is whole or millis is not above 0. nginx's limit_req_zone
+// takes a rate in those units alone (ngx_http_limit_req_module), so the nginx generator writes this rate and its
+// declaration refuses a limit that has none.
+func WholeRate(requests, millis int64) (count int64, unit string, ok bool) {
+	switch {
+	case millis <= 0:
+	case requests*1000%millis == 0:
+		return requests * 1000 / millis, "s", true
+	case requests*60000%millis == 0:
+		return requests * 60000 / millis, "m", true
+	}
+	return 0, "", false
+}
+
 type RPCTarget struct {
 	Pattern   string
 	Service   Text

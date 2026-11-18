@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -203,18 +204,33 @@ func runFile(t *testing.T, tg target, f file, config string, lock func(*testing.
 	}
 }
 
-// sendRepeated sends e's request e.repeat times back to back, or once, and returns each way the answers differ from
-// l, the row's literal on the file: each of the first l.admitted answers that is not 200, and, when no later answer is
-// what l.want asks, the last one's differences, or with e.every each later answer's differences. Back to back, one
-// after the other on the same client, is how a rate limit's burst is sent, so a failure of a repeated row also says
-// how long its requests took: a runner too slow for the burst shows there.
+// sendRepeated sends e's request e.repeat times back to back, or once, and every second time e.alternate when e names
+// it, and returns each way the answers differ from l, the row's literal on the file: each of the first l.admitted
+// answers that is not 200, and, when no later answer is what l.want asks, the last one's differences, or with e.every
+// each later answer's differences, from l.also's too when l names it and the answer is neither, and a line when no
+// later answer is l.want or none is l.also; and, when l.want asks for one instance, the instances the later answers
+// came from when they are more than one. Back to back, one after the other on the same client, is how a rate limit's
+// burst is sent, so a failure of a repeated row also says how long its requests took: a runner too slow for the burst
+// shows there.
 func sendRepeated(w *world, e exchange, l literal) []string {
 	count := max(e.repeat, 1)
 	if l.admitted >= count {
 		// A row that compares no answer with want is a mistake in the scenario data, which panics, as send does.
 		panic(fmt.Sprintf("exchange %q admits all %d answers, so none is compared with want", e.name, count))
 	}
+	if l.want.oneInstance && count-l.admitted < 2 {
+		// One answer comes from one instance whatever the proxy does, so the row checks nothing.
+		panic(fmt.Sprintf("exchange %q wants its answers from one instance but compares fewer than two", e.name))
+	}
+	if e.alternate != nil && count < 2 {
+		panic(fmt.Sprintf("exchange %q alternates its request but sends it once", e.name))
+	}
+	if l.also != nil && !e.every {
+		panic(fmt.Sprintf("exchange %q has a second answer on a file but does not say every", e.name))
+	}
 	var differences, last []string
+	var sawWant, sawAlso bool
+	instances := map[string]int{}
 	matched := false
 	start := time.Now()
 	// A row that wants no line of an event waits for the request log's line, written with it (logLines).
@@ -227,9 +243,20 @@ func sendRepeated(w *world, e exchange, l literal) []string {
 		}
 	}
 	for i := 1; i <= count; i++ {
-		got := w.send(e.send)
+		r := e.send
+		if e.alternate != nil && i%2 == 0 {
+			r = *e.alternate
+		}
+		got := w.send(r)
 		if l.want.logged != nil {
 			got.logs = w.logLines(got.header.Get("x-request-id"), wait)
+		}
+		if i > l.admitted && l.want.oneInstance {
+			instance := "no service"
+			if got.echo != nil {
+				instance = got.echo.Instance
+			}
+			instances[instance]++
 		}
 		switch {
 		case i <= l.admitted && got.err != nil:
@@ -237,7 +264,19 @@ func sendRepeated(w *world, e exchange, l literal) []string {
 		case i <= l.admitted && got.status != http.StatusOK:
 			differences = append(differences, fmt.Sprintf("answer %d: got %d, want 200", i, got.status))
 		case i > l.admitted && e.every:
-			for _, difference := range compare(l.want, got, w.mark) {
+			wrong := compare(l.want, got, w.mark)
+			if l.also != nil && wrong == nil {
+				sawWant = true
+			} else if l.also != nil {
+				other := compare(*l.also, got, w.mark)
+				if other == nil {
+					sawAlso, wrong = true, nil
+				}
+				for _, difference := range other {
+					wrong = append(wrong, "or "+difference)
+				}
+			}
+			for _, difference := range wrong {
 				differences = append(differences, fmt.Sprintf("answer %d: %s", i, difference))
 			}
 		case i > l.admitted && !matched:
@@ -246,6 +285,19 @@ func sendRepeated(w *world, e exchange, l literal) []string {
 		}
 	}
 	differences = append(differences, last...)
+	if l.also != nil && !sawWant {
+		differences = append(differences, "no answer after the first admitted was what want asks")
+	}
+	if l.also != nil && !sawAlso {
+		differences = append(differences, "no answer after the first admitted was what also asks")
+	}
+	if len(instances) > 1 || instances["no service"] > 0 {
+		var from []string
+		for _, instance := range slices.Sorted(maps.Keys(instances)) {
+			from = append(from, fmt.Sprintf("%s %d", instance, instances[instance]))
+		}
+		differences = append(differences, fmt.Sprintf("the answers came from %s, want one instance", strings.Join(from, ", ")))
+	}
 	if differences != nil && count > 1 {
 		differences = append(differences, fmt.Sprintf("the %d requests took %s", count, time.Since(start).Round(time.Millisecond)))
 	}

@@ -1,6 +1,8 @@
 package nginx
 
 import (
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -28,5 +30,31 @@ func TestOverLong(t *testing.T) {
 				t.Errorf("overLong = %d, want %d", got, c.want)
 			}
 		})
+	}
+}
+
+// TestDeclared: the variables table counts each variable the http block declares once: each one a map, js_set, js_var,
+// set, geo or split_clients line names, and each named capture of a regular expression; a variable a line reads, a
+// lookbehind and a comment declare none.
+func TestDeclared(t *testing.T) {
+	text := strings.Join([]string{
+		`  map "$host:$uri" $pf_a { "~^(?<pf_b>[a-z]+):" $pf_b; "~(?<=x)y" 1; default ""; }`,
+		`  map $request_uri $pf_c { default 0; }`,
+		"  js_set $pf_d pf.d;",
+		"  js_var $pf_e;",
+		`  geo $pf_f { default "$"; }`,
+		"  split_clients $pf_request_id $pf_g { 1% 1; * 0; }",
+		"    set $pf_h 1;",
+		"      set $pf_h 2;",
+		"      proxy_set_header Host $pf_i;",
+		"  # map $x $pf_j { }",
+		`  map $pf_a $pf_c { default 1; }`,
+	}, "\n")
+	got := slices.Sorted(maps.Keys(declared(text)))
+	if want := []string{"pf_a", "pf_b", "pf_c", "pf_d", "pf_e", "pf_f", "pf_g", "pf_h"}; !slices.Equal(got, want) {
+		t.Errorf("declared = %q, want %q", got, want)
+	}
+	if got, want := variablesHash(text), []string{"  variables_hash_bucket_size 128;", "  variables_hash_max_size 2048;"}; !slices.Equal(got, want) {
+		t.Errorf("variablesHash = %q, want %q", got, want)
 	}
 }

@@ -1,15 +1,19 @@
 # The conformance battery's file for nginx: the world of examples/full with only the keys the nginx generator writes in
-# this version, catalog at its address instead of a DNS name, four more pattern routes (one that takes any character,
-# one whose {,3} RE2 reads as text and PCRE2 as a repetition, one that PCRE2 gives up on for a long path as written and
-# takes as Go's parse writes it, and one that PCRE2 gives up on for a long path RE2 does not take), four patterns a path
-# with an escape or a character outside ASCII would meet otherwise if nginx matched the path it has decoded, and a
-# prefix route with a rewrite. The pattern of live, the 64 patterns of many, the 24 asset routes and the 40 routes k01
-# to k40 are haproxy.yaml's, which hold what a long path, a long Origin and a flood of new paths cost: written with .*
-# for each *, the 64 patterns held one worker of nginx for 17 to 30 s with an Origin of 6,321 bytes. Its tls with
-# clients, client_address, remove_from_clients, cors and the three environments' lists are examples/full's, but
-# remove_from_clients names only x-client-id, as the generator refuses full's names with a * prefix. It writes Envoy's
-# own header limits, 60 KiB and 100 fields, an idle time of 2 s, so a row sees a silent service ended without waiting
-# long, an upstream idle time of 3 s, and examples/full's log, so the battery runs every form of those keys the
+# this version, four more pattern routes (one that takes any character, one whose {,3} RE2 reads as text and PCRE2 as a
+# repetition, one that PCRE2 gives up on for a long path as written and takes as Go's parse writes it, and one that
+# PCRE2 gives up on for a long path RE2 does not take), four patterns a path with an escape or a character outside ASCII
+# would meet otherwise if nginx matched the path it has decoded, and a prefix route with a rewrite. The pattern of live,
+# the 64 patterns of many, the 24 asset routes and the 40 routes k01 to k40 are haproxy.yaml's, which hold what a long
+# path, a long Origin and a flood of new paths cost: written with .* for each *, the 64 patterns held one worker of nginx
+# for 17 to 30 s with an Origin of 6,321 bytes. Its tls with clients, client_address, remove_from_clients, cors and the
+# three environments' lists are examples/full's, but remove_from_clients names only x-client-id, as the generator
+# refuses full's names with a * prefix. So are its traffic keys: catalog found by its DNS name through dns.resolver and
+# balanced by the hash of x-session-id, the catalog route limited to 20 requests a second with a burst of 10 by client,
+# the rpc entry's retries and its limit of 100 a second for all, and shop balanced by least requests; but the shop route
+# writes retries: 0, as the generator refuses 1 or more, and a service sessions at shop's two addresses, balanced by the
+# hash of x-session-id, takes the route /sessions/, so the hash rows send to a route with no rate limit. It writes
+# Envoy's own header limits, 60 KiB and 100 fields, an idle time of 2 s, so a row sees a silent service ended without
+# waiting long, an upstream idle time of 3 s, and examples/full's log, so the battery runs every form of those keys the
 # generator writes. Every entry runs it, Envoy's too, so its literals are Envoy's answers.
 listen: 10000
 admin: 9901
@@ -28,8 +32,11 @@ services:
     http: 8080
     grpc: 8081
     addresses: ["10.0.1.11", "10.0.1.12"]
+    balance: least_requests
   accounts: {grpc: 7070, http: 7070, host_header: "127.0.0.1:7070"}
-  catalog: {http: 8090, address: "10.0.2.21"}
+  catalog: {http: 8090, address: catalog.internal.example, balance: hash, hash: {header: x-session-id}}
+  sessions: {http: 8080, addresses: ["10.0.1.11", "10.0.1.12"], balance: hash, hash: {header: x-session-id}}
+dns: {resolver: "10.0.0.2:53"}
 remove_from_clients: [x-client-id]
 cors: {allow_methods: "*", allow_headers: "*", expose_headers: "Content-Disposition,X-Request-Id", max_age: "600"}
 origins:
@@ -115,6 +122,8 @@ origins:
 routes:
   - {name: accounts-events, pattern: "^/events/[a-z0-9-]+$", to: accounts}
   - rpc:
+      retries: 1
+      rate_limit: {requests: 100, per: 1s, by: all}
       to:
         example.shop.*: {service: shop, name: shop}
         "*": accounts
@@ -123,7 +132,7 @@ routes:
   - {name: braces, pattern: "^/braces/x{,3}$", to: accounts}
   - {name: backtrack, pattern: "^/backtrack/((a|a)*c|a+b)$", to: accounts}
   - {name: give-up, pattern: "^/give-up/(a|aa)+$", to: accounts}
-  - {name: catalog, prefix: /catalog/, to: catalog}
+  - {name: catalog, prefix: /catalog/, to: catalog, rate_limit: {requests: 20, per: 1s, burst: 10, by: client}}
   - {name: api-admin, pattern: "^/api/[A-Za-z0-9%_-]+/admin$", to: accounts}
   - {name: user, pattern: "^/u/@[a-z]+$", to: accounts}
   - {name: letters, pattern: "^/l/[a-z ]+$", to: accounts}
@@ -193,7 +202,8 @@ routes:
   - {name: k38, pattern: "/k38/(a|b)*a(a|b){12}c", to: catalog}
   - {name: k39, pattern: "/k39/(a|b)*a(a|b){12}c", to: catalog}
   - {name: k40, pattern: "/k40/(a|b)*a(a|b){12}c", to: catalog}
-  - {name: shop, prefix: /, to: shop}
+  - {name: sessions, prefix: /sessions/, to: sessions}
+  - {name: shop, prefix: /, to: shop, retries: 0}
 rpc:
   methods:
     - {service: example.shop.v1.CartService, method: GetCart}

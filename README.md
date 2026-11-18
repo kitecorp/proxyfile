@@ -11,15 +11,16 @@ You describe your gateway in one short file: the services behind it, the routes 
 writes the complete configuration of the proxy you run from it.
 
 Generators: Envoy writes every key; nginx writes routing, CORS with the origin lists, the client's address, header
-removal, TLS, the header limits, the two idle times, the admin port's paths, the request log and the auth check
-([docs/nginx.md](docs/nginx.md)), and HAProxy routing, TLS, CORS and the auth check
-([docs/haproxy.md](docs/haproxy.md)), each refusing by name the keys it does not write.
+removal, TLS, the header limits, the two idle times, the admin port's paths, the request log, the auth check, rate
+limits, RPC retries, balance, hash and services found by DNS name ([docs/nginx.md](docs/nginx.md)), and HAProxy
+routing, TLS, CORS and the auth check ([docs/haproxy.md](docs/haproxy.md)), each refusing by name the keys it does not
+write.
 
 ```mermaid
 flowchart TB
     source["Your proxyfile<br/>YAML or HOCON"] --> render["proxyfile render"]
     render --> envoy["The Envoy configuration<br/>every key"]
-    render --> nginx["The nginx configuration<br/>routing, CORS, the client's address,<br/>header removal, TLS, header limits,<br/>idle times, admin paths, the log<br/>and the auth check"]
+    render --> nginx["The nginx configuration<br/>routing, CORS, the client's address,<br/>header removal, TLS, header limits,<br/>idle times, admin paths, the log,<br/>the auth check, rate limits, RPC retries,<br/>balance, hash and DNS names"]
     render --> haproxy["The HAProxy configuration<br/>routing, TLS, CORS<br/>and the auth check"]
 ```
 
@@ -78,9 +79,10 @@ refuse a hand edit or a missed render:
 proxyfile render -o envoy.yaml                    # the default target, envoy: a complete Envoy configuration
 proxyfile check -o envoy.yaml                     # in the build: renders again, fails when envoy.yaml differs
 proxyfile render --target nginx -o nginx.conf     # routing, CORS, the client's address, header removal, TLS, header
-                                                  # limits, idle times, admin paths, the request log and the auth
-                                                  # check, and proxyfile.js beside it; other keys are refused, and a
-                                                  # line on standard error counts where it is less strict than Envoy
+                                                  # limits, idle times, admin paths, the request log, the auth check,
+                                                  # rate limits, RPC retries, balance, hash and DNS names, and
+                                                  # proxyfile.js beside it; other keys are refused, and a line on
+                                                  # standard error counts where it is less strict than Envoy
 proxyfile render --target haproxy -o haproxy.cfg  # HAProxy 3.2 or 3.4: routing, TLS, CORS and the auth check; other
                                                   # keys refused by name, and the same line counts where it is less
                                                   # strict than Envoy
