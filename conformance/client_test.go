@@ -45,6 +45,9 @@ type result struct {
 	elapsed time.Duration
 	// logs are the proxy's log lines for the request, read only for a row that compares them (logLines).
 	logs map[string][]map[string]string
+	// unread is set when an answer came that this reader cannot read, such as a :status coded with Huffman, which the
+	// raw HTTP/2 reader does not decode: no row may take it for any answer, a refusal included (compare).
+	unread string
 }
 
 // newClients makes the battery's clients: HTTP/1.1 and HTTP/2 with the client certificate the clients CA signed,
@@ -142,9 +145,16 @@ func (w *world) send(r request) result {
 // sendOn sends r, which is no raw request, through client.
 func (w *world) sendOn(client *http.Client, r request) result {
 	var body io.Reader
-	if r.proto == "grpc" {
+	switch {
+	case r.proto == "grpc" && r.body != "":
+		panic(fmt.Sprintf("the battery sends a gRPC call with the empty message alone, not %+v", r))
+	case r.proto == "grpc":
 		// The empty message: no compression flag and a length of 0.
 		body = bytes.NewReader([]byte{0, 0, 0, 0, 0})
+	case r.body != "":
+		// net/http frames a body of known length by it, a Content-Length line over HTTP/1.1 and a content-length field
+		// with DATA frames over HTTP/2.
+		body = strings.NewReader(r.body)
 	}
 	// The URL names the server name the client asks for, which a TLS client takes from it; every client dials the
 	// listener whatever the URL names (toListener).

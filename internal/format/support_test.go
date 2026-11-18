@@ -345,9 +345,16 @@ func TestRefusals(t *testing.T) {
 				`  - rpc: {to: {"*": shop}, retries: 2, rate_limit: {requests: 3, per: 2s, by: all}}`,
 				"  - {name: catalog, prefix: /catalog/, to: catalog, retries: 0}", "  - {name: app, prefix: /, to: app}"),
 			want: nil},
-		// nginx sent a GET and a PUT again after the service read them, where the Envoy output never does.
-		{name: "retries of 1 or more", spec: Proxyfile, target: nginxTarget, document: m.Replaced(6, 6, "  - {name: app, prefix: /, to: app, retries: 1}"),
-			want: []string{`g.yaml:6:37: "routes[].retries" 1 or more is refused by --target nginx: nginx sends a request again after a service read it when its method is not POST, LOCK or PATCH; write retries: 0, or render it for envoy`}},
+		// A route's retries of any count, to a service of one, two or ten backends or found by a DNS name, are written as
+		// nginx's declaration says.
+		{name: "the HTTP retries nginx writes", spec: Proxyfile, target: nginxTarget,
+			document: m.Replaced(3, 6, "  app: {http: 3000}", `  two: {http: 3000, addresses: ["10.0.0.1", "10.0.0.2"]}`,
+				`  ten: {http: 3000, addresses: ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6", "10.0.0.7", "10.0.0.8", "10.0.0.9", "10.0.0.10"]}`,
+				"  named: {http: 3000, address: named.internal.example}", `dns: {resolver: "10.0.0.2:53"}`, "origins: origins.json", "routes:",
+				"  - {name: one, prefix: /one/, to: app, retries: 1}", "  - {name: two, prefix: /two/, to: two, retries: 3}",
+				"  - {name: ten, prefix: /ten/, to: ten, retries: 4294967295}", "  - {name: named, prefix: /named/, to: named, retries: 1}",
+				"  - {name: app, prefix: /, to: app, retries: 4294967295}"),
+			want: nil},
 		// limit_req_zone takes a whole number of requests a second or a minute, and no other unit.
 		{name: "a per that gives no whole rate", spec: Proxyfile, target: nginxTarget,
 			document: m.Replaced(6, 6, "  - {name: app, prefix: /, to: app, rate_limit: {requests: 1, per: 7s}}"),
@@ -514,7 +521,7 @@ func TestHeaderNamesNeedNoEscaping(t *testing.T) {
 func TestLessStrictWarning(t *testing.T) {
 	for _, c := range []struct{ target, want string }{
 		{"envoy", ""},
-		{"nginx", `this nginx configuration is less strict than the Envoy output in 13 ways; docs/nginx.md lists them under "Where nginx is less strict than the Envoy output"`},
+		{"nginx", `this nginx configuration is less strict than the Envoy output in 14 ways; docs/nginx.md lists them under "Where nginx is less strict than the Envoy output"`},
 		{"haproxy", `this HAProxy configuration is less strict than the Envoy output in 10 ways; docs/haproxy.md lists them under "Where HAProxy is less strict than the Envoy output"`},
 	} {
 		target, _ := TargetNamed(c.target)
@@ -563,10 +570,11 @@ func TestLessStrictWays(t *testing.T) {
 			{line, "a service's answer with a malformed header line or a malformed status line reaches the client"},
 			{line, "over HTTP/2, empty frames in a row are served"},
 			{"timeouts.request", "without timeouts.request, an answer that keeps arriving runs past 15 s"},
+			{"timeouts.request", "without timeouts.request, a request body its service does not read, or reads slowly, runs past 15 s"},
 			{"auth.when_unavailable", "with allow, a check service that does not close its connection right after its answer leaves requests unchecked past about 470 checks a second"},
 			{"auth.when_unavailable", "with allow, a worker with none of its 8192 connections left serves requests unchecked"},
 			{"auth.ask", "a request whose client closes its connection during the check can still reach the service"},
-			{"routes[].rpc.retries", "a retried call is sent again at once and with no limit on retries at the same time"},
+			{"routes[].rpc.retries", "a retried request or call is sent again at once and with no limit on retries at the same time"},
 			{"log", "a chunked answer its service cuts short writes no upstream-failure line"},
 		}},
 	} {

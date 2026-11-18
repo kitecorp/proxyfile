@@ -223,9 +223,11 @@ func writeCheck(w *writer, v *values, a *model.Auth, listen int64, e edge, targe
 		accept = v.token("auth.accept", e.accept[0].Pos, quoted(strings.Join(names, " ")))
 	}
 	ms := strconv.FormatInt(a.Timeout.Millis, 10)
+	// The model keeps no position of only_with_header, so its refusal names ask's.
+	onlyWith := v.token("auth.only_with_header", a.Service.Pos, quoted(strings.ToLower(a.OnlyWithHeader)))
 	w.lines(
 		"    set $pf_when_unavailable "+unavailable+";",
-		"    set $pf_only_with "+quoted(strings.ToLower(a.OnlyWithHeader))+";",
+		"    set $pf_only_with "+onlyWith+";",
 		"    set $pf_accept "+accept+";",
 		"    set $pf_check_ms "+ms+";",
 		// A client's own request for this path is routed as any other: only the handler's subrequest has set
@@ -389,7 +391,7 @@ func (h *locationHeaders) accepted(v *values, e edge) {
 			value += "_grpc"
 		}
 		h.from(name, "auth.accept", header.Pos)
-		h.send(name, v.token("auth.accept", header.Pos, quoted(name)), value)
+		h.send(name, v.keyToken("auth.accept", header.Pos, quoted(name)), value)
 	}
 	h.send(generator.UncheckedMark, generator.UncheckedMark, "$pf_unchecked")
 }
@@ -401,7 +403,7 @@ func (h *locationHeaders) fromClients(v *values, e edge) {
 		name := strings.ToLower(removal.header.Name)
 		form := name
 		if removal.key != "" {
-			form = v.token(removal.key, removal.header.Pos, quoted(name))
+			form = v.keyToken(removal.key, removal.header.Pos, quoted(name))
 			h.from(name, removal.key, removal.header.Pos)
 		}
 		h.send(name, form, `""`)

@@ -151,18 +151,51 @@ func limitedAnswers(cors []string) []string {
 // with another method, GET or PUT with gRPC's content type over HTTP/1.1, reached the service twice, so every method
 // but POST goes to the -once copy, which reached it once. Measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2 with
 // a service that reset or closed the connection, or reset the call's stream, after it read the call.
+//
+// A retried plain route's location reads the body whole before its first try (bodyLines), so it takes a request that
+// carries no Transfer-Encoding and either has a Content-Length of at most 1 MiB, whatever its method and protocol, or
+// has no body: over HTTP/1.x a request with neither header has none (RFC 9112, section 6.3), whatever its method, and
+// the Envoy output tried a POST, PUT, PATCH, LOCK or PROPFIND with neither again after a refused connection; over
+// HTTP/2 nginx cannot tell at the jump a request whose headers end the stream from one whose body follows with no
+// content-length, as $content_length and every header read the same, so a GET, HEAD, OPTIONS or DELETE with none is
+// taken, its body then bounded by 1 MiB. Every other request goes to -once, which streams its body as the Envoy output
+// does and never tries it again, a Transfer-Encoding in any letter case among them: nginx's buffer bounds the bytes it
+// reads, chunk lines included, so a GET whose 300,000 bytes came in one-byte chunks passed the buffer and nginx wrote
+// its body to a temporary file. nginx answers a coding other than chunked 501, and chunked beside a Content-Length, on
+// two lines or over HTTP/2 400, before the map is read. Measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2. The
+// map reads the route's jumps
+// ($pf_rt_jumps, retryMaps), which only a retried plain route's locations have, the length after the method, then the
+// protocol, and last the Transfer-Encoding, a client's text, which only an empty value matches; a call's key ends the
+// method with :.
 func retryOnce(routes []route) []string {
-	var retried []string
+	var calls, plain []string
 	for i, r := range routes {
-		if r.retries > 0 {
-			retried = append(retried, strconv.Itoa(i+1))
+		switch {
+		case r.retries > 0:
+			calls = append(calls, strconv.Itoa(i+1))
+		case r.jumps >= 0:
+			plain = append(plain, strconv.Itoa(i+1))
 		}
 	}
-	if retried == nil {
+	if calls == nil && plain == nil {
 		return nil
 	}
-	return []string{`  map "$pf_route:$request_method" $pf_rt_once { ` +
-		regexKey(`^(?:`+strings.Join(retried, "|")+`)(?:-uri)?:(?!POST\z)`) + ` -once; default ""; }`}
+	source, call, end := `"$pf_route:$request_method"`, ":", `\z`
+	if plain != nil {
+		source, call, end = `"$pf_route:$pf_rt_jumps:$request_method:$content_length:$server_protocol:$http_transfer_encoding"`, "::", `:`
+	}
+	var keys []string
+	// The calls' routes are named groupSize to a key, so a key stays far under the 4,093 bytes nginx reads before a
+	// space whatever the count of retried methods: one key of 1,100 routes took 4,419.
+	for piece := range slices.Chunk(calls, groupSize) {
+		keys = append(keys, regexKey(`^(?:`+strings.Join(piece, "|")+`)(?:-uri)?`+call+`(?!POST`+end+`)`)+" -once;")
+	}
+	if plain != nil {
+		location := fmt.Sprintf(`^[^:]*:[0-%d]:`, maxJumps)
+		keys = append(keys, regexKey(location+`[^:]+:`+mebibyteOrLess+`:[^:]*:\z`)+` "";`, regexKey(location+`[^:]+::HTTP/1\.[01]:\z`)+` "";`,
+			regexKey(location+`(?:GET|HEAD|OPTIONS|DELETE)::HTTP/2\.0:\z`)+` "";`, regexKey(location)+" -once;")
+	}
+	return []string{"  map " + source + " $pf_rt_once { " + strings.Join(keys, " ") + ` default ""; }`}
 }
 
 // retryLines are the lines of a retried RPC route's locations, which try each call on the next backend after a

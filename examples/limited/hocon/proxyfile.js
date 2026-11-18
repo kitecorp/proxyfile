@@ -1355,4 +1355,31 @@ function limitedKind(r) {
     }
 }
 
-export default {headerNames, forwardedProto, origin, relay, check, clientKey, hashKey, limitedKind};
+// retrySpent names the copy of a retried route's location that takes the next try, by the time the request's tries
+// have taken: the seconds spent, to the nearest, at most $pf_rt_copies, "" for none, or "s" once the route's time,
+// $pf_rt_time in milliseconds, is spent. nginx lists each try's own time in $upstream_response_time, in seconds with
+// three decimals, ", " between the tries of one upstream and " : " between the locations; it counts neither the
+// client's upload nor the check (measured on nginx 1.30.6 and 1.31.8), as the Envoy output counts its route's time from
+// the complete request. nginx.conf reads the value again at each jump (nocache). A time it cannot read is spent, so the
+// request is answered and never tried again.
+function retrySpent(r) {
+    try {
+        var v = r.variables, tries = v.upstream_response_time.split(/, | : /), spent = 0;
+        for (var i = 0; i < tries.length; i++) {
+            if (!/^[0-9]+\.[0-9]{3}$/.test(tries[i])) {
+                return "s";
+            }
+            spent += Number(tries[i].replace(".", ""));
+        }
+        var k = Math.round(spent / 1000);
+        if (!(k * 1000 < Number(v.pf_rt_time))) {
+            return "s";
+        }
+        k = Math.min(k, Number(v.pf_rt_copies));
+        return k > 0 ? String(k) : "";
+    } catch (e) {
+        return "s";
+    }
+}
+
+export default {headerNames, forwardedProto, origin, relay, check, clientKey, hashKey, limitedKind, retrySpent};

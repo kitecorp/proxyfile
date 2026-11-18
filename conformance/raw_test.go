@@ -286,8 +286,8 @@ func (w *world) sendFrames(conn net.Conn, r request, names []string) result {
 				body = append(body, content...)
 			} else {
 				headers = append(headers, content...)
-				if flags&flagEndHeaders != 0 && got.status == 0 {
-					got.status = statusOf(headers)
+				if flags&flagEndHeaders != 0 && got.status == 0 && got.unread == "" {
+					got.status, got.unread = statusOf(headers)
 				}
 			}
 			if kind != frameContinuation && flags&flagEndStream != 0 {
@@ -341,25 +341,26 @@ func readHPACKInt(b []byte, bits uint) (int, int) {
 var staticStatus = map[int]int{8: 200, 9: 204, 10: 206, 11: 304, 12: 400, 13: 404, 14: 500}
 
 // statusOf returns the :status a response's header block names, or 0 when it names none this reader can read: an entry
-// of the static table, or a literal whose value has no Huffman coding. A status it cannot read gives 0, which no row
-// takes for a refusal or an answer.
-func statusOf(block []byte) int {
+// of the static table, or a literal whose value has no Huffman coding. A status coded with Huffman, as Envoy codes one
+// the static table does not hold, such as 502, gives 0 and the reason (result.unread), so the row fails saying that
+// it is to be sent through the net/http client, rather than reading 0 as a status.
+func statusOf(block []byte) (int, string) {
 	for len(block) > 0 {
 		b := block[0]
 		switch {
 		case b&0x80 != 0: // an indexed field
 			index, n := readHPACKInt(block, 7)
 			if n == 0 {
-				return 0
+				return 0, ""
 			}
 			if status, ok := staticStatus[index]; ok {
-				return status
+				return status, ""
 			}
 			block = block[n:]
 		case b&0xe0 == 0x20: // a change of the dynamic table's size
 			_, n := readHPACKInt(block, 5)
 			if n == 0 {
-				return 0
+				return 0, ""
 			}
 			block = block[n:]
 		default: // a literal field, indexed (01), not indexed (0000) or never indexed (0001)
@@ -369,33 +370,37 @@ func statusOf(block []byte) int {
 			}
 			index, n := readHPACKInt(block, bits)
 			if n == 0 {
-				return 0
+				return 0, ""
 			}
 			block = block[n:]
-			name, plain := "", true
+			// A name coded with Huffman is never the text :status, so it is skipped as any other field.
+			name := ""
 			if index == 0 {
 				var ok bool
-				if name, plain, block, ok = readHPACKString(block); !ok {
-					return 0
+				if name, _, block, ok = readHPACKString(block); !ok {
+					return 0, ""
 				}
 			} else if _, ok := staticStatus[index]; ok {
 				name = ":status"
 			}
 			value, valuePlain, rest, ok := readHPACKString(block)
 			if !ok {
-				return 0
+				return 0, ""
 			}
 			block = rest
-			if name == ":status" && plain && valuePlain {
+			if name == ":status" && !valuePlain {
+				return 0, "the answer's :status is coded with Huffman, which the raw HTTP/2 reader does not decode: send the row through the net/http client"
+			}
+			if name == ":status" {
 				status, err := strconv.Atoi(value)
 				if err != nil {
-					return 0
+					return 0, ""
 				}
-				return status
+				return status, ""
 			}
 		}
 	}
-	return 0
+	return 0, ""
 }
 
 // readHPACKString reads an HPACK string from the start of b: its text, whether it has no Huffman coding (the text is

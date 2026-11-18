@@ -20,12 +20,14 @@ import (
 // writes, so its output holds every block the generator writes.
 const batteryFile = "../../conformance/testdata/nginx.yaml"
 
-// batteryLimits, batteryTimeouts and batteryLog are the battery file's limits, timeouts and log, which a test replaces
-// (rewritten) to read the output of other values, or of none.
+// batteryLimits, batteryTimeouts and batteryLog are the battery file's limits, timeouts and log, and batteryRetried its
+// two retried routes, which a test replaces (rewritten) to read the output of other values, or of none.
 const (
 	batteryLimits   = "limits:\n  request_headers: {size: 60KiB, count: 100}\n"
 	batteryTimeouts = "timeouts:\n  idle: 2s\n  upstream_idle: 3s\n"
 	batteryLog      = "log: {status_from: 400, sample: 1%}\n"
+	batteryRetried  = "  - {name: retried, prefix: /retried/, to: shop, retries: 1}\n" +
+		"  - {name: retried-limited, prefix: /retried-limited/, to: shop, retries: 1, rate_limit: {requests: 10, per: 1m, by: all}}\n"
 )
 
 // generate returns the text of the configuration nginx.Generate writes for the proxyfile text, read as render reads a
@@ -40,19 +42,7 @@ func generate(t *testing.T, proxyfile string) string {
 // script it loads, named proxyfile.js. A problem, an error or other files end the test.
 func generateFiles(t *testing.T, proxyfile string) (config, script string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "proxyfile.yaml")
-	testsupport.WriteFile(t, path, proxyfile)
-	file, problems := read.Proxyfile(path)
-	if problems != nil {
-		t.Fatalf("read.Proxyfile: %q", testsupport.ProblemStrings(problems))
-	}
-	var routes []rpc.Route
-	if file.MethodsKey != nil {
-		if routes, problems = rpc.Resolve(file.Gateway, file.Methods); problems != nil {
-			t.Fatalf("rpc.Resolve: %q", testsupport.ProblemStrings(problems))
-		}
-	}
-	files, err := nginx.Generate(generator.Input{Gateway: file.Gateway, Origins: file.Origins, RPC: routes})
+	files, err := generateIn(t, t.TempDir(), proxyfile)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -64,6 +54,26 @@ func generateFiles(t *testing.T, proxyfile string) (config, script string) {
 		t.Fatalf("Generate returned files named %q, want the configuration, named \"\", and proxyfile.js", names)
 	}
 	return string(files[0].Bytes), string(files[1].Bytes)
+}
+
+// generateIn returns what nginx.Generate returns for the proxyfile text, written as proxyfile.yaml in dir and read as
+// render reads a proxyfile that writes its origins and its RPC methods: the files, or the error, which names the file by
+// its path in dir. A problem ends the test.
+func generateIn(t *testing.T, dir, proxyfile string) ([]generator.File, error) {
+	t.Helper()
+	path := filepath.Join(dir, "proxyfile.yaml")
+	testsupport.WriteFile(t, path, proxyfile)
+	file, problems := read.Proxyfile(path)
+	if problems != nil {
+		t.Fatalf("read.Proxyfile: %q", testsupport.ProblemStrings(problems))
+	}
+	var routes []rpc.Route
+	if file.MethodsKey != nil {
+		if routes, problems = rpc.Resolve(file.Gateway, file.Methods); problems != nil {
+			t.Fatalf("rpc.Resolve: %q", testsupport.ProblemStrings(problems))
+		}
+	}
+	return nginx.Generate(generator.Input{Gateway: file.Gateway, Origins: file.Origins, RPC: routes})
 }
 
 // smallFile is a proxyfile with one environment and one service, app on 127.0.0.1 port 3000 over HTTP, whose routes
@@ -173,6 +183,23 @@ func TestSecurityLines(t *testing.T) {
 	// The battery file with the log given in place of its own.
 	withLog := func(log string) string {
 		return generate(t, rewritten(t, battery, batteryLog, "log: "+log+"\n"))
+	}
+	// The battery file with no retried route, with the timeouts given in place of its own, or none for "": the
+	// upstream-failure line of a file with none.
+	notRetried := func(timeouts string) string {
+		if timeouts != "" {
+			timeouts = "timeouts: " + timeouts + "\n"
+		}
+		return generate(t, rewritten(t, rewritten(t, battery, batteryRetried, ""), batteryTimeouts, timeouts))
+	}
+	// The battery file whose shop route, to a service of two backends, is retried once, with the timeouts given in place
+	// of its own, or none for "".
+	retriedShop := func(timeouts string) string {
+		file := rewritten(t, battery, "{name: shop, prefix: /, to: shop, retries: 0}", "{name: shop, prefix: /, to: shop, retries: 1}")
+		if timeouts != "" {
+			timeouts = "timeouts: " + timeouts + "\n"
+		}
+		return generate(t, rewritten(t, file, batteryTimeouts, timeouts))
 	}
 	cases := []struct {
 		name  string
@@ -311,7 +338,7 @@ func TestSecurityLines(t *testing.T) {
 			return ""
 		}},
 		{"the first route that is not 0 wins, and a failed run is refused", func() string {
-			// The battery file's 81 places of a route are read in groups of 64, and a third map reads the two groups.
+			// The battery file's 83 places of a route are read in groups of 64, and a third map reads the two groups.
 			var first []string
 			for n := 1; n <= 64; n++ {
 				first = append(first, fmt.Sprintf("$pf_m%d", n))
@@ -320,7 +347,7 @@ func TestSecurityLines(t *testing.T) {
 			for _, line := range []string{
 				`  map "$pf_p5:$request_method" $pf_m5 { "~^1:POST\\z" 5w; "~^e:" failed; default 0; }`,
 				`  map "` + strings.Join(first, ":") + `:" $pf_g1 ` + pick,
-				`  map "$pf_m65:$pf_m66:$pf_m67:$pf_m68:$pf_m69:$pf_m70:$pf_m71:$pf_m72:$pf_m73:$pf_m74:$pf_m75:$pf_m76:$pf_m77:$pf_m78:$pf_m79:$pf_m80:$pf_m81:" $pf_g2 ` + pick,
+				`  map "$pf_m65:$pf_m66:$pf_m67:$pf_m68:$pf_m69:$pf_m70:$pf_m71:$pf_m72:$pf_m73:$pf_m74:$pf_m75:$pf_m76:$pf_m77:$pf_m78:$pf_m79:$pf_m80:$pf_m81:$pf_m82:$pf_m83:" $pf_g2 ` + pick,
 				`  map "$pf_g1:$pf_g2:" $pf_g3 ` + pick,
 			} {
 				if broken := missing(out, line); broken != "" {
@@ -353,9 +380,9 @@ func TestSecurityLines(t *testing.T) {
 					return fmt.Sprintf("a route map that names another route: %q", line)
 				}
 			}
-			// 81 places of a route, one of them with a method, which maps its path and then its method.
-			if count != 82 {
-				return fmt.Sprintf("%d route maps, want 82", count)
+			// 83 places of a route, one of them with a method, which maps its path and then its method.
+			if count != 84 {
+				return fmt.Sprintf("%d route maps, want 84", count)
 			}
 			return ""
 		}},
@@ -387,16 +414,28 @@ func TestSecurityLines(t *testing.T) {
 				return broken
 			}
 			servers := environmentServers(out)
-			routeLocations := 0
+			routeLocations, jumping := 0, 0
 			for n, server := range servers {
 				for _, location := range blocks(server, "    location @pf_r_") {
-					if !regexp.MustCompile(`^    location @pf_r_[0-9]+(-uri)?(-once)? \{$`).MatchString(location[0]) {
+					if !regexp.MustCompile(`^    location @pf_r_[0-9]+(-uri)?(-once|-rt[0-9]*)? \{$`).MatchString(location[0]) {
 						continue
 					}
 					routeLocations++
+					// A retried route's location and its copies that take a next try send a failed try to the next, or
+					// to @pf_fail, which answers it with the lines every other route location holds.
+					if retryJumps(server, location) {
+						jumping++
+						if !slices.Contains(location, retryJump) || slices.Contains(location, "      error_page 502 = @pf_502$pf_grpc_call;") {
+							return fmt.Sprintf("%q holds no %q in place of error_page 502 = @pf_502$pf_grpc_call", location[0], retryJump)
+						}
+						continue
+					}
 					if !slices.Contains(location, "      error_page 502 = @pf_502$pf_grpc_call;") {
 						return fmt.Sprintf("%q holds no error_page 502 = @pf_502$pf_grpc_call", location[0])
 					}
+				}
+				if fail := blocks(server, "    location @pf_fail {"); len(fail) != 1 || !slices.Contains(fail[0], "      error_page 502 = @pf_502$pf_grpc_call;") {
+					return fmt.Sprintf("the server holds %q, want one location @pf_fail with error_page 502 = @pf_502$pf_grpc_call", fail)
 				}
 				name := server[slices.IndexFunc(server, func(line string) bool { return strings.HasPrefix(line, "    server_name ") })]
 				// The 502 carries no Content-Type, as the Envoy output's carries none: nginx would give it default_type,
@@ -423,11 +462,13 @@ func TestSecurityLines(t *testing.T) {
 				"    location @pf_502-grpc {"); len(got) != 1 || !slices.Equal(got[0], want) {
 				return fmt.Sprintf("the gRPC example holds %q, want %q", got, want)
 			}
-			// 81 places of a route in each of four environments, each with a second location but the two with a
-			// rewrite, and a copy that tries once of each of the six locations of the three RPC methods, which the file
-			// retries: (81 * 2 - 2 + 6) * 4 = 664.
-			if routeLocations != 664 {
-				return fmt.Sprintf("%d route locations, want 664", routeLocations)
+			// 83 places of a route in each of four environments, each with a second location but the two with a
+			// rewrite, a copy that tries once of each of the six locations of the three RPC methods, which the file
+			// retries, and for each of the two retried routes the two copies that try once and the four that take a
+			// next try: (83 * 2 - 2 + 6 + 2 * 6) * 4 = 728, of which the two retried routes' two locations and their four
+			// copies that take a next try jump: 2 * 6 * 4 = 48.
+			if routeLocations != 728 || jumping != 48 {
+				return fmt.Sprintf("%d route locations of which %d jump to a next try, want 728 and 48", routeLocations, jumping)
 			}
 			return ""
 		}},
@@ -1105,46 +1146,68 @@ func TestSecurityLines(t *testing.T) {
 			// when the route's 15 s are. A service that does not take the connection in the cluster's 5 s is answered 502
 			// with no body, as the Envoy output answers it, wherever the connect time is those 5 s, through @pf_502 so a
 			// gRPC call gets the gRPC answer; under idle: 2s Envoy's idle timer ends it first, with its text. With idle
-			// and request none nothing but the connection is timed. The check reads the last try's connect time, which
-			// is "-, -" for a retried call whose two tries timed out connecting.
+			// and request none nothing but the connection is timed. The check reads the last try's connect time, the
+			// value after the last space, as nginx lists one for each try: "-, -" for a retried call whose two tries
+			// timed out connecting, and "- : -" for a retried plain route's request that went on to a next backend.
 			idleText := []string{"    location @pf_504 {", `      return 504 "stream timeout";`, "    }"}
 			checked := func(answer string) []string {
 				return []string{"    location @pf_504 {", "      error_page 502 = @pf_502$pf_grpc_call;",
-					`      if ($upstream_connect_time ~ "^(?:[^:]*, )?-\\z") {`, "        return 502;", "      }", answer, "    }"}
+					`      if ($upstream_connect_time ~ "(?:^| )-\\z") {`, "        return 502;", "      }", answer, "    }"}
 			}
-			routeLocation := regexp.MustCompile(`^    location @pf_r_[0-9]+(-uri)?(-once)? \{$`)
+			// A retried route's location and its copies that take a next try send a failed try to the next, or to
+			// @pf_fail, which holds the two lines every other route location holds, its copies that try once among them.
+			routeLocation := regexp.MustCompile(`^    location @pf_r_[0-9]+(-uri)?(-once|-rt[0-9]*)? \{$`)
+			twoLines := func(location []string) bool {
+				at := slices.Index(location, "      error_page 502 = @pf_502$pf_grpc_call;")
+				return at >= 0 && at+1 < len(location) && location[at+1] == "      error_page 504 = @pf_504;"
+			}
 			for _, want := range []struct {
 				file   string
 				answer []string // the server's @pf_504 location
+				copies int      // the copies that take a next try of each location of a retried route, by its timers
 			}{
-				{withTimeouts("{idle: 2s}"), idleText},
-				{withTimeouts("{idle: 10s}"), checked(`      return 504 "stream timeout";`)},
-				{withTimeouts("{request: none, idle: 6m}"), checked(`      return 504 "stream timeout";`)},
-				{noTimeouts, checked(`      return 504 "upstream request timeout";`)},
-				{withTimeouts("{idle: 90s}"), checked(`      return 504 "upstream request timeout";`)},
-				{withTimeouts("{request: none}"), checked(`      return 504 "stream timeout";`)},
-				{withTimeouts("{request: none, idle: none}"), checked("      return 504;")},
+				{withTimeouts("{idle: 2s}"), idleText, 2},
+				{withTimeouts("{idle: 10s}"), checked(`      return 504 "stream timeout";`), 6},
+				{withTimeouts("{request: none, idle: 6m}"), checked(`      return 504 "stream timeout";`), 6},
+				{noTimeouts, checked(`      return 504 "upstream request timeout";`), 6},
+				{withTimeouts("{idle: 90s}"), checked(`      return 504 "upstream request timeout";`), 6},
+				{withTimeouts("{request: none}"), checked(`      return 504 "stream timeout";`), 6},
+				{withTimeouts("{request: none, idle: none}"), checked("      return 504;"), 1},
 			} {
-				servers, locations := 0, 0
+				servers, locations, jumping := 0, 0, 0
 				for _, server := range environmentServers(want.file) {
 					servers++
 					at := slices.Index(server, want.answer[0])
 					if at < 0 || at+len(want.answer) > len(server) || !slices.Equal(server[at:at+len(want.answer)], want.answer) {
 						return fmt.Sprintf("a server holds no %q", want.answer)
 					}
-				}
-				for _, location := range blocks(lines(want.file), "    location @pf_r_") {
-					if !routeLocation.MatchString(location[0]) {
-						continue
+					if fail := blocks(server, "    location @pf_fail {"); len(fail) != 1 || !twoLines(fail[0]) {
+						return fmt.Sprintf("the server holds %q, want one location @pf_fail with error_page 504 = @pf_504 after its error_page 502", fail)
 					}
-					locations++
-					at := slices.Index(location, "      error_page 502 = @pf_502$pf_grpc_call;")
-					if at < 0 || at+1 >= len(location) || location[at+1] != "      error_page 504 = @pf_504;" {
-						return fmt.Sprintf("%s holds no error_page 504 = @pf_504 after its error_page 502", location[0])
+					for _, location := range blocks(server, "    location @pf_r_") {
+						if !routeLocation.MatchString(location[0]) {
+							continue
+						}
+						locations++
+						switch jumps := retryJumps(server, location); {
+						case jumps && (!slices.Contains(location, retryJump) || slices.Contains(location, "      error_page 504 = @pf_504;")):
+							return fmt.Sprintf("%s holds no %q in place of error_page 502 and 504", location[0], retryJump)
+						case jumps:
+							jumping++
+						case !twoLines(location):
+							return fmt.Sprintf("%s holds no error_page 504 = @pf_504 after its error_page 502", location[0])
+						}
 					}
 				}
-				if servers != 4 || locations != 664 {
-					return fmt.Sprintf("%d servers and %d route locations, want 4 and 664", servers, locations)
+				// 83 places of a route in each of four environments, each with a second location but the two with a
+				// rewrite, a copy that tries once of each of the six locations of the three RPC methods, which the file
+				// retries, and for each of the two retried routes the two copies that try once:
+				// (83 * 2 - 2 + 6 + 2 * 2) * 4 = 696, and the copies that take a next try of the two retried routes' two
+				// locations, 2 * 2 * copies * 4; those two locations and their copies jump: 2 * 2 * (1 + copies) * 4.
+				all, jumps := 696+2*2*want.copies*4, 2*2*(1+want.copies)*4
+				if servers != 4 || locations != all || jumping != jumps {
+					return fmt.Sprintf("%d servers, %d route locations of which %d jump to a next try, want 4, %d and %d", servers,
+						locations, jumping, all, jumps)
 				}
 			}
 			return ""
@@ -1283,11 +1346,30 @@ func TestSecurityLines(t *testing.T) {
 			for _, line := range []string{"  split_clients $pf_request_id $pf_log_sampled { 1% 1; * 0; }",
 				`  map "$pf_log_status$pf_log_sampled$pf_log_flagged" $pf_log { "000" 0; default 1; }`,
 				// A response the Envoy output flags is logged below status_from too: nginx's own answers but its preflight
-				// 200 and its 403s, which Envoy answers with no flag, and every failure of a service.
-				`  map "$upstream_header_time:$status:$pf_log_cut" $pf_log_flagged { "~:UPE\\z" 1; "~^(?:[^:]*, )?[0-9][^:,]*:(?!499:)" 0; "~^:(?:200|403):" 0; default 1; }`,
+				// 200 and its 403s, which Envoy answers with no flag, and every failure of a service. A request a retry
+				// served is not flagged, as its last try's header time says.
+				`  map "$pf_last_header:$status:$pf_log_cut" $pf_log_flagged { "~:UPE\\z" 1; "~^[0-9][^:]*:(?!499:)" 0; "~^:(?:200|403):" 0; default 1; }`,
 				"  access_log /dev/stdout pf_request if=$pf_log;"} {
 				if broken := missing(out, line); broken != "" {
 					return broken
+				}
+			}
+			// The log reads the last try of a request nginx tried again, as the Envoy output logs the try that answered:
+			// nginx writes a value of each $upstream_ variable for each try, joined by ", " within an upstream and by
+			// " : " across the locations a retried route's request goes through, and no value holds a space.
+			// upstream_ms is the last try's header time. A file with no retried route writes the same maps.
+			for _, file := range []string{out, notRetried("{idle: 2s, upstream_idle: 3s}")} {
+				for _, line := range []string{
+					`  map $upstream_status $pf_last_status { "~(?:^| )(?<pf_l1>[^ ]+)\\z" $pf_l1; default ""; }`,
+					`  map $upstream_connect_time $pf_last_connect { "~(?:^| )(?<pf_l1>[^ ]+)\\z" $pf_l1; default ""; }`,
+					`  map $upstream_header_time $pf_last_header { "~(?:^| )(?<pf_l1>[^ ]+)\\z" $pf_l1; default ""; }`,
+					`  map $upstream_bytes_received $pf_last_received { "~(?:^| )(?<pf_l1>[^ ]+)\\z" $pf_l1; default ""; }`,
+					`  map $upstream_response_length $pf_last_length { "~(?:^| )(?<pf_l1>[^ ]+)\\z" $pf_l1; default ""; }`,
+					`  map $pf_last_header $pf_log_upstream_ms { "~^0\\.0*(?<pf_log_u1>[0-9]+)\\z" $pf_log_u1; "~^(?<pf_log_u2>[0-9]+)\\.(?<pf_log_u3>[0-9]{3})\\z" $pf_log_u2$pf_log_u3; default null; }`,
+				} {
+					if broken := missing(file, line); broken != "" {
+						return broken
+					}
 				}
 			}
 			byStatus := withLog("{status_from: 404, sample: 0%}")
@@ -1321,17 +1403,51 @@ func TestSecurityLines(t *testing.T) {
 			// A service that fails before its answer, or cuts an answer it started with a content-length, writes the
 			// Envoy output's second line with the flag Envoy gives it; a timeout Envoy counts as its idle timer's writes
 			// none, as Envoy writes none for it. A 502 after the connection opened is UC when the service sent nothing
-			// and UPE when it sent an answer nginx could not read, as Envoy flags them.
-			format := `  log_format pf_upstream_failure escape=json '{"event":"gateway_upstream_failure","flags":"$pf_log_failure","route":"$pf_log_route","status":$pf_log_code,"upstream":"$pf_log_upstream"}';`
-			for _, want := range []struct{ file, failure string }{
-				{noTimeouts, `  map "$pf_log_retried:$upstream_status:$upstream_connect_time:$upstream_header_time:$pf_log_cut:$upstream_bytes_received" $pf_log_failure { "~:UPE:" UPE; "~^1:(?:[^:]*, )?502:(?:[^:]*, )?-:" URX,UF; "~^[01]:(?:[^:]*, )?502:(?:[^:]*, )?-:" UF; "~^[01]:(?:[^:]*, )?502:(?:[^:]*, )?[0-9][^:,]*:(?:[^:]*, )?-::(?:[^:]*, )?0\\z" UC; "~^[01]:(?:[^:]*, )?502:(?:[^:]*, )?[0-9][^:,]*:(?:[^:]*, )?-:" UPE; "~^1:(?:[^:]*, )?504:(?:[^:]*, )?-:" URX,UF; "~^[01]:(?:[^:]*, )?504:(?:[^:]*, )?-:" UF; "~^[01]:(?:[^:]*, )?504:(?:[^:]*, )?[0-9][^:,]*:(?:[^:]*, )?-:" UT; default ""; }`},
-				{withTimeouts("{idle: 2s}"), `  map "$pf_log_retried:$upstream_status:$upstream_connect_time:$upstream_header_time:$pf_log_cut:$upstream_bytes_received" $pf_log_failure { "~:UPE:" UPE; "~^1:(?:[^:]*, )?502:(?:[^:]*, )?-:" URX,UF; "~^[01]:(?:[^:]*, )?502:(?:[^:]*, )?-:" UF; "~^[01]:(?:[^:]*, )?502:(?:[^:]*, )?[0-9][^:,]*:(?:[^:]*, )?-::(?:[^:]*, )?0\\z" UC; "~^[01]:(?:[^:]*, )?502:(?:[^:]*, )?[0-9][^:,]*:(?:[^:]*, )?-:" UPE; default ""; }`},
-				{withTimeouts("{idle: 10s}"), `  map "$pf_log_retried:$upstream_status:$upstream_connect_time:$upstream_header_time:$pf_log_cut:$upstream_bytes_received" $pf_log_failure { "~:UPE:" UPE; "~^1:(?:[^:]*, )?502:(?:[^:]*, )?-:" URX,UF; "~^[01]:(?:[^:]*, )?502:(?:[^:]*, )?-:" UF; "~^[01]:(?:[^:]*, )?502:(?:[^:]*, )?[0-9][^:,]*:(?:[^:]*, )?-::(?:[^:]*, )?0\\z" UC; "~^[01]:(?:[^:]*, )?502:(?:[^:]*, )?[0-9][^:,]*:(?:[^:]*, )?-:" UPE; "~^1:(?:[^:]*, )?504:(?:[^:]*, )?-:" URX,UF; "~^[01]:(?:[^:]*, )?504:(?:[^:]*, )?-:" UF; default ""; }`},
+			// and UPE when it sent an answer nginx could not read, as Envoy flags them. Each key reads the last try.
+			cut := `  map "$request_method:$pf_last_status:$pf_last_length:$upstream_http_content_length:$request_completion:$pf_log_upstream" $pf_log_cut { "~^HEAD:" ""; "~^[A-Z]+:(?:1[0-9][0-9]|204|304):" ""; "~^[A-Z]+:[0-9]+:[^:]*:[0-9]+::[^:]*_grpc\\z" UPE; "~_grpc\\z" ""; "~^[A-Z]+:[0-9]+:(?<pf_log_got>[0-9]+):(?!\\k<pf_log_got>:)[0-9]+:" UPE; default ""; }`
+			failure := `  map "$pf_log_retried:$pf_last_status:$pf_last_connect:$pf_last_header:$pf_log_cut:$pf_last_received" $pf_log_failure { "~:UPE:" UPE; "~^1:502:-:" URX,UF; "~^[01]:502:-:" UF; "~^[01]:502:[0-9][^:]*:-::0\\z" UC; "~^[01]:502:[0-9][^:]*:-:" UPE; `
+			connect, read := `"~^1:504:-:" URX,UF; "~^[01]:504:-:" UF; `, `"~^[01]:504:[0-9][^:]*:-:" UT; `
+			// In a file with a retried route the line is written by $pf_log_flags, which a request a retried route
+			// location took (a jump count in $pf_rt_cap, not the "" of -once or of a route with no retries) reads from
+			// $pf_log_retry_flags, and any other from $pf_log_failure, so the retry maps are read for the first alone
+			// (TestRetryLogReadsRetriesOnlyWhenRetried). $pf_log_retry_flags flags a request retries ran out on URX with
+			// its last try's flag: one whose last try sent the service nothing, with a body that fits, and no copy left
+			// to take the next. One the route's time ended is flagged as the timer that ended it: UT for the route's
+			// 15 s, and no line for the idle timer, as Envoy writes none for it. Any other request keeps the failure
+			// line's own flag.
+			picked := `  map $pf_rt_cap $pf_log_flags { "" $pf_log_failure; default $pf_log_retry_flags; }`
+			flags := `  map "$pf_rt_cap|$pf_rt_unsent$pf_rt_fits|$pf_rt_target|$pf_log_failure" $pf_log_retry_flags { `
+			ranOut := `"~^[0-6]\\|11\\|[^|]*\\|(?<pf_lf>[^|]+)\\z" URX,$pf_lf; default $pf_log_failure; }`
+			spent := `"~^[^|]*\\|[01][01]\\|rt_spent(?:-grpc)?\\|" `
+			for _, want := range []struct{ name, file, failure, flags string }{
+				{"no timeouts", notRetried(""), failure + connect + read + `default ""; }`, ""},
+				{"idle 2s", notRetried("{idle: 2s}"), failure + `default ""; }`, ""},
+				{"idle 10s", notRetried("{idle: 10s}"), failure + connect + `default ""; }`, ""},
+				{"retried, no timeouts", retriedShop(""), failure + connect + read + `default ""; }`, flags + spent + "UT; " + ranOut},
+				{"retried, idle 2s", retriedShop("{idle: 2s}"), failure + `default ""; }`, flags + spent + `""; ` + ranOut},
+				{"retried, idle 10s", retriedShop("{idle: 10s}"), failure + connect + `default ""; }`, flags + spent + `""; ` + ranOut},
+				{"retried, no timer", retriedShop("{request: none, idle: none}"), failure + connect + `default ""; }`, flags + ranOut},
 			} {
-				for _, line := range []string{format, want.failure, "  access_log /dev/stdout pf_upstream_failure if=$pf_log_failure;",
-					`  map "$request_method:$upstream_status:$upstream_response_length:$upstream_http_content_length:$request_completion:$pf_log_upstream" $pf_log_cut { "~^HEAD:" ""; "~^[A-Z]+:(?:[^:]*, )?(?:1[0-9][0-9]|204|304):" ""; "~^[A-Z]+:(?:[^:]*, )?[0-9]+:[^:]*:[0-9]+::[^:]*_grpc\\z" UPE; "~_grpc\\z" ""; "~^[A-Z]+:(?:[^:]*, )?[0-9]+:(?:[^:]*, )?(?<pf_log_got>[0-9]+):(?!\\k<pf_log_got>:)[0-9]+:" UPE; default ""; }`} {
+				written := "$pf_log_failure"
+				if want.flags != "" {
+					written = "$pf_log_flags"
+				} else if strings.Contains(want.file, "$pf_log_flags") {
+					return want.name + ": a file with no retried route names $pf_log_flags, which reads the retry maps it does not declare"
+				}
+				for _, line := range []string{
+					`  log_format pf_upstream_failure escape=json '{"event":"gateway_upstream_failure","flags":"` + written + `","route":"$pf_log_route","status":$pf_log_code,"upstream":"$pf_log_upstream"}';`,
+					"  access_log /dev/stdout pf_upstream_failure if=" + written + ";", want.failure, cut,
+				} {
 					if broken := missing(want.file, line); broken != "" {
-						return broken
+						return want.name + ": " + broken
+					}
+				}
+				if want.flags == "" {
+					continue
+				}
+				for _, line := range []string{picked, want.flags} {
+					if broken := missing(want.file, line); broken != "" {
+						return want.name + ": " + broken
 					}
 				}
 			}
@@ -1349,9 +1465,10 @@ func TestSecurityLines(t *testing.T) {
 
 // everyRouteLocation calls check on each route location of the environment servers of out, the ones that send the
 // request to a service, with the directive that sets a header there, and returns the first problem check names. The
-// battery file has 78 HTTP routes and three RPC methods in each of four environments, each with a second location but
-// the two HTTP routes with a rewrite, and each of the six locations of the RPC methods, which it retries, with a copy
-// that tries once: (78 * 2 - 2) * 4 = 616 HTTP and 6 * 2 * 4 = 48 gRPC locations. A row on fewer locations fails.
+// battery file has 80 HTTP routes and three RPC methods in each of four environments, each with a second location but
+// the two HTTP routes with a rewrite, each of the two retried HTTP routes with the two copies that try once and the
+// four that take a next try, and each of the six locations of the RPC methods, which it retries, with a copy that tries
+// once: (80 * 2 - 2 + 2 * 6) * 4 = 680 HTTP and 6 * 2 * 4 = 48 gRPC locations. A row on fewer locations fails.
 func everyRouteLocation(out string, check func(location []string, set string) string) string {
 	kinds := map[string]int{}
 	for _, server := range environmentServers(out) {
@@ -1371,10 +1488,21 @@ func everyRouteLocation(out string, check func(location []string, set string) st
 			}
 		}
 	}
-	if kinds["proxy_set_header"] != 616 || kinds["grpc_set_header"] != 48 {
-		return fmt.Sprintf("%d HTTP and %d gRPC route locations, want 616 and 48", kinds["proxy_set_header"], kinds["grpc_set_header"])
+	if kinds["proxy_set_header"] != 680 || kinds["grpc_set_header"] != 48 {
+		return fmt.Sprintf("%d HTTP and %d gRPC route locations, want 680 and 48", kinds["proxy_set_header"], kinds["grpc_set_header"])
 	}
 	return ""
+}
+
+// retryJump is the last line of a retried route's location and of each of its copies that take a next try: a try that
+// failed goes to the next copy, or to @pf_fail when none is left or the try reached the service.
+const retryJump = "      error_page 502 504 = @pf_$pf_rt_target;"
+
+// retryJumps reports whether location, a route location of server, is a retried route's location or one of its copies
+// that take a next try: a copy is named -rt or -rt<k>, and the location it copies has a copy named -rt in the server.
+func retryJumps(server, location []string) bool {
+	name := strings.TrimSuffix(location[0], " {")
+	return regexp.MustCompile(`-rt[0-9]*$`).MatchString(name) || slices.Contains(server, name+"-rt {")
 }
 
 // corsLine is the battery file's cors key, examples/full's.
@@ -1595,7 +1723,7 @@ func TestManyRoutes(t *testing.T) {
 		`  map "` + strings.Join(last, ":") + `:" $pf_g10` + group,
 		`  map "` + strings.Join(top, ":") + `:" $pf_g11` + group,
 		`  map "$pf_f_dotparam$pf_f_backslash$pf_f_control$pf_f_upgrade$pf_f_preflight:$pf_mode:$pf_g11" $pf_route {`,
-		"  variables_hash_max_size 2764;",
+		"  variables_hash_max_size 2788;",
 	} {
 		if broken := missing(out, line); broken != "" {
 			t.Error(broken)
@@ -1634,10 +1762,10 @@ func TestAcceptNamesCounted(t *testing.T) {
 		rpc  bool
 		want string
 	}{
-		// 802 variables, four times over: the 601 of the file without one, 200 _grpc maps and the RPC route's own.
-		{"with an RPC route", true, "  variables_hash_max_size 3208;"},
-		// 601 variables, four times over.
-		{"without one", false, "  variables_hash_max_size 2404;"},
+		// 808 variables, four times over: the 607 of the file without one, 200 _grpc maps and the RPC route's own.
+		{"with an RPC route", true, "  variables_hash_max_size 3232;"},
+		// 607 variables, four times over.
+		{"without one", false, "  variables_hash_max_size 2428;"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if broken := missing(generate(t, file(tc.rpc)), tc.want); broken != "" {
@@ -1802,10 +1930,29 @@ func TestLogStatuses(t *testing.T) {
 	}
 }
 
+// tried is what nginx writes for a request's tries, one value for each try: retried is $pf_log_retried, and status,
+// connect, header and received are $upstream_status, $upstream_connect_time, $upstream_header_time and
+// $upstream_bytes_received.
+type tried struct{ retried, status, connect, header, received string }
+
+// triedLog reads out's request log as nginx reads it for a request it tried as listed: each value list through the map
+// of its last try, then into the failure line's flag, and the header times into upstream_ms. Each answer the rows hold
+// came whole or not at all, so $pf_log_cut is "".
+func triedLog(t *testing.T, out string) (failure func(tried) string, upstreamMs func(header string) string) {
+	t.Helper()
+	status, connect, header, received := mapOf(t, out, "pf_last_status"), mapOf(t, out, "pf_last_connect"),
+		mapOf(t, out, "pf_last_header"), mapOf(t, out, "pf_last_received")
+	flag, ms := mapOf(t, out, "pf_log_failure"), mapOf(t, out, "pf_log_upstream_ms")
+	failure = func(c tried) string {
+		return flag(strings.Join([]string{c.retried, status(c.status), connect(c.connect), header(c.header), "", received(c.received)}, ":"))
+	}
+	return failure, func(times string) string { return ms(header(times)) }
+}
+
 // TestRetriedLog: a call to a retried RPC route is logged by the try that answered, the last of the values nginx writes
 // for each try, joined by ", ", and one whose last try was refused is flagged URX,UF, as the Envoy output flags a call
-// retries ran out on, also through the copy that tries once. Each key is what nginx 1.30.6 and 1.31.8 logged for such a
-// call, the variables of the map's source with the colons between them, and each value what Envoy 1.40.2 logged for it.
+// retries ran out on, also through the copy that tries once. Each row is what nginx 1.30.6 and 1.31.8 logged for such a
+// call, and each flag what Envoy 1.40.2 logged for it.
 func TestRetriedLog(t *testing.T) {
 	out := generate(t, "listen: 8000\nservices:\n  down: {grpc: 8081, addresses: [\"10.0.0.1\", \"10.0.0.2\"]}\n"+
 		"  app: {http: 8080}\norigins:\n  local: {hosts: [localhost]}\nroutes:\n"+
@@ -1824,35 +1971,135 @@ func TestRetriedLog(t *testing.T) {
 			t.Errorf("location %s sets $pf_log_retried 1: %t, want %t", c.location, got, c.marked)
 		}
 	}
-	failure := mapOf(t, out, "pf_log_failure")
-	for key, want := range map[string]string{
-		"1:502, 502:-, -:-, -::0, 0":           "URX,UF",
-		"1:502:-:-::0":                         "URX,UF",
-		"1:502, 200:-, 0.000:-, 0.006::0, 208": "",
-		"0:502:-:-::0":                         "UF",
-		"0:200:0.000:0.001::140":               "",
-		"0:502:0.000:-::0":                     "UC",
-		"0:502:0.000:-::40":                    "UPE",
-		"1:504, 504:-, -:-, -::0, 0":           "URX,UF",
-		"0:504:-:-::0":                         "UF",
+	failure, upstreamMs := triedLog(t, out)
+	for _, c := range []struct {
+		tried
+		want string
+	}{
+		{tried{"1", "502, 502", "-, -", "-, -", "0, 0"}, "URX,UF"},
+		{tried{"1", "502", "-", "-", "0"}, "URX,UF"},
+		{tried{"1", "502, 200", "-, 0.000", "-, 0.006", "0, 208"}, ""},
+		{tried{"0", "502", "-", "-", "0"}, "UF"},
+		{tried{"0", "200", "0.000", "0.001", "140"}, ""},
+		{tried{"0", "502", "0.000", "-", "0"}, "UC"},
+		{tried{"0", "502", "0.000", "-", "40"}, "UPE"},
+		{tried{"1", "504, 504", "-, -", "-, -", "0, 0"}, "URX,UF"},
+		{tried{"0", "504", "-", "-", "0"}, "UF"},
 	} {
-		if got := failure(key); got != want {
-			t.Errorf("$pf_log_failure of %q: %q, want %q", key, got, want)
+		if got := failure(c.tried); got != c.want {
+			t.Errorf("the failure line's flag of %+v: %q, want %q", c.tried, got, c.want)
 		}
 	}
-	upstream := mapOf(t, out, "pf_log_upstream_ms")
-	for key, want := range map[string]string{"-, 0.006": "6", "0.006": "6", "-, 1.250": "1250", "0.000": "0", "-, -": "null", "-": "null"} {
-		if got := upstream(key); got != want {
-			t.Errorf("$pf_log_upstream_ms of %q: %q, want %q", key, got, want)
+	for times, want := range map[string]string{"-, 0.006": "6", "0.006": "6", "-, 1.250": "1250", "0.000": "0", "-, -": "null", "-": "null"} {
+		if got := upstreamMs(times); got != want {
+			t.Errorf("upstream_ms of $upstream_header_time %q: %q, want %q", times, got, want)
 		}
 	}
 }
 
-// mapOf returns the map of out that sets $name, read as nginx reads it: its regular expressions in the order written,
-// each quoted string's \\ as one \, the first that matches giving its value with each $capture filled in, and default
-// when none does. A map with a key that is not a regular expression ends the test, as it would need nginx's exact
-// match first, and so does a key the function is asked about that reaches an expression Go's regexp cannot compile,
-// such as one with a lookahead or a backreference, which PCRE2 reads.
+// TestRetryLog: a request to a retried route is logged by its last try, the values after the last " : " nginx writes
+// across the locations the request went through, and the failure line is written by $pf_log_flags, read as nginx
+// reads it: by $pf_rt_cap from $pf_log_retry_flags or $pf_log_failure (TestRetryLogReadsRetriesOnlyWhenRetried). A request whose
+// last try sent its service nothing, with a body that fits, and that no copy took further is flagged URX with its last
+// try's flag, as the Envoy output flags a request retries ran out on, at a service of one backend too, which nginx does
+// not try again; one the route's time ended is flagged as the timer that ended it, UT for the route's 15 s and no line
+// for the idle timer, as Envoy writes none for it. A request the server's jump sent to -once, which nginx tries once,
+// and an RPC call keep their failure line's flag. Each row is what nginx 1.30.6 and 1.31.8 wrote for a request to
+// backends that refused, reset or did not take the connection: its tries, and $pf_rt_cap, $pf_rt_unsent with
+// $pf_rt_fits, and $pf_rt_target as the log read them.
+func TestRetryLog(t *testing.T) {
+	type row struct {
+		name string
+		tried
+		retry     string // $pf_rt_cap|$pf_rt_unsent$pf_rt_fits|$pf_rt_target
+		flags, ms string // the failure line's flags, "" for no line, and upstream_ms
+	}
+	two := `addresses: ["10.0.0.1", "10.0.0.2"]`
+	for _, file := range []struct {
+		name, timeouts string
+		rows           []row
+	}{
+		{"the route's 15 s", "", []row{
+			// Envoy 1.40.2: upstream_ms a number, no failure line.
+			{"refused, then served", tried{"0", "502 : 200", "- : 0.000", "- : 0.001", "0 : 70"}, "1|01|fail", "", "1"},
+			// Two backends refusing, retries 1 and 3; an HTTP/2 GET and a PUT with a length the same. Envoy: URX,UF.
+			{"every try refused", tried{"0", "502 : 502", "- : -", "- : -", "0 : 0"}, "1|11|fail", "URX,UF", "null"},
+			{"eight refusing, 6 jumps", tried{"0", "502 : 502 : 502 : 502 : 502 : 502 : 502", "- : - : - : - : - : - : -",
+				"- : - : - : - : - : - : -", "0 : 0 : 0 : 0 : 0 : 0 : 0"}, "6|11|fail", "URX,UF", "null"},
+			{"one backend refusing", tried{"0", "502", "-", "-", "0"}, "0|11|fail", "URX,UF", "null"},
+			// Envoy: UC, not tried again after the head.
+			{"refused, then reset after the head", tried{"0", "502 : 502", "- : 0.000", "- : -", "0 : 0"}, "1|01|fail", "UC", "null"},
+			// Four and eight backends whose connection attempts time out; a gRPC call too. Envoy: UT at 15 s.
+			{"the time spent", tried{"0", "504 : 504 : 504", "- : - : -", "- : - : -", "0 : 0 : 0"}, "3|11|rt_spent", "UT", "null"},
+			{"the time spent, a gRPC call", tried{"0", "504 : 504 : 504", "- : - : -", "- : - : -", "0 : 0 : 0"}, "6|11|rt_spent-grpc", "UT", "null"},
+			// -once tries once: a chunked PUT and a PUT over the bound, refused, are flagged by that try, where the Envoy
+			// output tried the chunked one again (URX,UF) and answered the other 507 with no line.
+			{"-once, a chunked PUT refused", tried{"0", "502", "-", "-", "0"}, "|11|fail", "UF", "null"},
+			{"-once, a PUT over the bound refused", tried{"0", "502", "-", "-", "0"}, "|10|fail", "UF", "null"},
+			{"-once, a PUT over the bound served", tried{"0", "200", "0.000", "0.002", "70"}, "|00|fail", "", "2"},
+			// An RPC call beside a retried route keeps its own flag. Envoy: URX,UF, and a number after a retry.
+			{"an RPC call, both refusing", tried{"1", "502, 502", "-, -", "-, -", "0, 0"}, "|11|fail", "URX,UF", "null"},
+			{"an RPC call, refused, then served", tried{"1", "502, 200", "-, 0.000", "-, 0.001", "0, 208"}, "|01|fail", "", "1"},
+		}},
+		{"idle 10s", "timeouts: {idle: 10s}\n", []row{
+			// Envoy: SI, no failure line, at 10 s.
+			{"the time spent", tried{"0", "504 : 504", "- : -", "- : -", "0 : 0"}, "3|11|rt_spent", "", "null"},
+		}},
+	} {
+		t.Run(file.name, func(t *testing.T) {
+			out := generate(t, capFile(two, "1")+file.timeouts)
+			failure, upstreamMs := triedLog(t, out)
+			read, flags := mapOf(t, out, "pf_log_flags"), mapOf(t, out, "pf_log_retry_flags")
+			for _, c := range file.rows {
+				flag := failure(c.tried)
+				// Each map's value is a variable nginx then reads, as the failure line does.
+				got, _, _ := strings.Cut(c.retry, "|")
+				if got = read(got); got == "$pf_log_retry_flags" {
+					got = flags(c.retry + "|" + flag)
+				}
+				if got == "$pf_log_failure" {
+					got = flag
+				}
+				if got != c.flags {
+					t.Errorf("%s: the failure line's flags %q, want %q", c.name, got, c.flags)
+				}
+				if got := upstreamMs(c.header); got != c.ms {
+					t.Errorf("%s: upstream_ms %q, want %q", c.name, got, c.ms)
+				}
+			}
+		})
+	}
+}
+
+// TestRetryLogReadsRetriesOnlyWhenRetried: the failure line's flags are picked by $pf_rt_cap, the jump count of the
+// retried route location that took the request, so a request with none, to a route with no retries, an RPC route or
+// -once, takes $pf_log_failure and nginx reads no retry map for it: a map evaluates the value it picks alone, and
+// $pf_log_retry_flags reads $pf_rt_target, whose copy name runs the script's retrySpent. Measured on nginx 1.30.6 and
+// 1.31.8 with a copy of the script that logs each call: no call for a request to a route with no retries in a file
+// with retried routes, and one at the log for each request to a retried route.
+func TestRetryLogReadsRetriesOnlyWhenRetried(t *testing.T) {
+	out := generate(t, retriedFile("  s: {http: 8080, addresses: [\"10.0.0.1\", \"10.0.0.2\"]}\n",
+		"  - {name: r1, prefix: /r1/, to: s, retries: 1}\n  - {name: r2, prefix: /r2/, to: s}\n", ""))
+	if line := `  map $pf_rt_cap $pf_log_flags { "" $pf_log_failure; default $pf_log_retry_flags; }`; !hasLine(out, line) {
+		t.Errorf("no line %q", line)
+	}
+	read := mapOf(t, out, "pf_log_flags")
+	for capped, want := range map[string]string{"": "$pf_log_failure", "0": "$pf_log_retry_flags", "1": "$pf_log_retry_flags",
+		"6": "$pf_log_retry_flags"} {
+		if got := read(capped); got != want {
+			t.Errorf("$pf_log_flags for $pf_rt_cap %q: %q, want %q", capped, got, want)
+		}
+	}
+}
+
+// mapOf returns the map of out that sets $name, read as nginx reads it (ngx_http_map_find): its key "", if written,
+// for an empty value, and its regular expressions in the order written for any other, as nginx tries none on an empty
+// value (measured on nginx 1.30.6 and 1.31.8: an empty $content_length took the default of a map whose expression
+// matches an empty text); each quoted string's \\ as one \, the first that matches giving its value with each
+// $capture filled in, and default when none does; volatile, which nginx reads before the keys, is no key. A map with
+// another key that is not a regular expression ends the test, as it would need nginx's exact match first, and so does
+// a key the function is asked about that reaches an expression Go's regexp cannot compile, such as one with a
+// lookahead or a backreference, which PCRE2 reads.
 func mapOf(t *testing.T, out, name string) func(key string) string {
 	t.Helper()
 	line := regexp.MustCompile(`(?m)^  map (?:"[^"]*"|\S+) \$` + name + ` \{ (.*) default (\S*); \}$`).FindStringSubmatch(out)
@@ -1864,7 +2111,11 @@ func mapOf(t *testing.T, out, name string) func(key string) string {
 		text, value string
 	}
 	var entries []entry
-	rest := line[1] + " "
+	rest := strings.TrimPrefix(line[1], "volatile; ") + " "
+	empty, emptyKey := regexp.MustCompile(`^"" (\S+); `).FindStringSubmatch(rest), false
+	if empty != nil {
+		rest, emptyKey = rest[len(empty[0]):], true
+	}
 	entryText := regexp.MustCompile(`^"~((?:[^"\\]|\\.)*)" (\S+); `)
 	for rest != "" {
 		found := entryText.FindStringSubmatch(rest)
@@ -1882,7 +2133,13 @@ func mapOf(t *testing.T, out, name string) func(key string) string {
 		return value
 	}
 	return func(key string) string {
+		if key == "" && emptyKey {
+			return unquoted(empty[1])
+		}
 		for _, e := range entries {
+			if key == "" {
+				break
+			}
 			if e.key == nil {
 				t.Fatalf("%q reaches %q in the map of $%s, which Go's regexp cannot compile", key, e.text, name)
 			}
@@ -1900,12 +2157,14 @@ func mapOf(t *testing.T, out, name string) func(key string) string {
 // because its body did not match its content-length, so the request did not complete, and never by
 // $upstream_response_length, which counts the frames there. The keys are the values nginx 1.30.6 and 1.31.8 wrote for a
 // Go service that sends content-length: 5 with the empty message (47 bytes of frames), and for one that sends 10 or 3
-// with it (35 bytes), beside Envoy 1.40.2, which flags the last two UPE and the first nothing.
+// with it (35 bytes), beside Envoy 1.40.2, which flags the last two UPE and the first nothing. Each key holds nginx's
+// own values in the order of the map's source, a status and a response length for each try, which the map reads
+// through the maps of the last try.
 func TestCutLog(t *testing.T) {
 	out := generate(t, "listen: 8000\nservices:\n  up: {grpc: 8081}\n  app: {http: 8080}\norigins:\n  local: {hosts: [localhost]}\n"+
 		"routes:\n  - rpc: {to: {\"*\": {service: up, name: up}}}\n  - {name: app, prefix: /, to: app}\n"+
 		"rpc:\n  methods:\n    - {service: example.v1.S, method: Call}\n")
-	cut := mapOf(t, out, "pf_log_cut")
+	cut, status, length := mapOf(t, out, "pf_log_cut"), mapOf(t, out, "pf_last_status"), mapOf(t, out, "pf_last_length")
 	for _, c := range []struct{ key, want string }{
 		{"POST:200:47:5:OK:up_grpc", ""},
 		{"POST:200:35:10::up_grpc", "UPE"},
@@ -1916,7 +2175,9 @@ func TestCutLog(t *testing.T) {
 		{"HEAD:200:0:5::app_http", ""},
 		{"GET:304:0:5::app_http", ""},
 	} {
-		if got := cut(c.key); got != c.want {
+		parts := strings.Split(c.key, ":")
+		parts[1], parts[2] = status(parts[1]), length(parts[2])
+		if got := cut(strings.Join(parts, ":")); got != c.want {
 			t.Errorf("$pf_log_cut of %q: %q, want %q", c.key, got, c.want)
 		}
 	}
@@ -2013,9 +2274,11 @@ func TestUpgradeMaps(t *testing.T) {
 			}
 		}
 	}
-	// 78 HTTP routes in each of four environments, each with a second location but the two with a rewrite.
-	if proxied != 616 {
-		t.Errorf("%d locations hold proxy_pass, want 616", proxied)
+	// 80 HTTP routes in each of four environments, each with a second location but the two with a rewrite, and for each
+	// of the two retried routes the two copies that try once and the four that take a next try:
+	// (80 * 2 - 2 + 2 * 6) * 4 = 680.
+	if proxied != 680 {
+		t.Errorf("%d locations hold proxy_pass, want 680", proxied)
 	}
 }
 
@@ -2130,7 +2393,7 @@ func TestPathModes(t *testing.T) {
 func TestScript(t *testing.T) {
 	file := rewritten(t, string(testsupport.ReadFile(t, authFile)), "client_address: connection\n", "client_address: forwarded\n")
 	file = rewritten(t, file, "  - {name: public, prefix: /public/, to: shop, auth: off}",
-		"  - {name: public, prefix: /public/, to: shop, auth: off, rate_limit: {requests: 20, per: 1s, by: client}}")
+		"  - {name: public, prefix: /public/, to: shop, auth: off, rate_limit: {requests: 20, per: 1s, by: client}, retries: 1}")
 	file = rewritten(t, file, `  catalog: {http: 8090, address: "10.0.2.21"}`,
 		`  catalog: {http: 8090, address: "10.0.2.21", balance: hash, hash: {header: x-session-id}}`)
 	config, script := generateFiles(t, file)
@@ -2138,15 +2401,15 @@ func TestScript(t *testing.T) {
 		t.Errorf("the script's first line is %q", first)
 	}
 	// Each function the configuration calls, once, in the order it first calls it: the client key, the rate limit's
-	// answer and the hash key in the http block, the handler on every checked route location and the relay in the
-	// stream block among them.
+	// answer, the retries' time spent and the hash key in the http block, the handler on every checked route location
+	// and the relay in the stream block among them.
 	var named []string
-	for _, m := range regexp.MustCompile(`(?m)^\s*js_(?:set \$\w+|content|header_filter|body_filter|access|filter) pf\.(\w+);$`).FindAllStringSubmatch(config, -1) {
+	for _, m := range regexp.MustCompile(`(?m)^\s*js_(?:set \$\w+|content|header_filter|body_filter|access|filter) pf\.(\w+)(?: nocache)?;$`).FindAllStringSubmatch(config, -1) {
 		if !slices.Contains(named, m[1]) {
 			named = append(named, m[1])
 		}
 	}
-	if want := []string{"headerNames", "forwardedProto", "origin", "clientKey", "limitedKind", "hashKey", "check", "relay"}; !slices.Equal(named, want) {
+	if want := []string{"headerNames", "forwardedProto", "origin", "clientKey", "limitedKind", "retrySpent", "hashKey", "check", "relay"}; !slices.Equal(named, want) {
 		t.Fatalf("the configuration names the functions %q, want %q", named, want)
 	}
 	// A header value holding a control byte other than a tab is refused: nginx passes one to the service, where Envoy

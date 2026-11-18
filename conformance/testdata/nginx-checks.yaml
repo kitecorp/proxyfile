@@ -1,8 +1,9 @@
 # The conformance battery's file for nginx with an auth check whose service has two addresses: two-checks.yaml with
 # remove_from_clients naming x-request-id alone, as the nginx generator refuses a name with a * prefix there. Its check is
 # asked under deny, at two addresses, only of a request with an x-api-key header, and send_request tells it the request,
-# so each row of an answer the check cannot give runs on nginx under deny as nginx-auth.yaml runs it under allow. Every
-# entry that runs it, Envoy's too, measures its literals on Envoy.
+# so each row of an answer the check cannot give runs on nginx under deny as nginx-auth.yaml runs it under allow. The
+# route retried to shop writes retries: 1 and is checked as the shop route is, so the rows of a retried request that is
+# checked run under deny too. Every entry that runs it, Envoy's too, measures its literals on Envoy.
 listen: 10000
 admin: 9901
 services:
@@ -34,6 +35,7 @@ routes:
   - {name: accounts-webhooks, path: /api/webhooks, method: POST, to: accounts, rewrite: /hooks/payments}
   - {name: catalog, prefix: /catalog/, to: catalog}
   - {name: hooks, prefix: /hooks/, to: accounts, rewrite: /in/}
+  - {name: retried, prefix: /retried/, to: shop, retries: 1}
   - {name: shop, prefix: /, to: shop}
 rpc:
   methods:

@@ -9,7 +9,9 @@ import (
 
 // TestOverLong: the scan Generate ends with finds the first token longer than nginx reads from its file, measured on
 // nginx 1.30.6 and 1.31.8: 4094 bytes between quotes, a word of 4095 bytes and a comment of 4095 bytes from its #, each
-// counted as the file writes it, a quote's backslash included.
+// counted as the file writes it, a quote's backslash included; a token a space follows, such as a map's key, one byte
+// less: 4093 bytes between quotes and a word of 4094 (each loaded wherever it met nginx's read buffer, and one byte
+// more refused).
 func TestOverLong(t *testing.T) {
 	cases := []struct {
 		name, text string
@@ -20,6 +22,11 @@ func TestOverLong(t *testing.T) {
 		{"an escaped quote counted as written", `x "` + strings.Repeat("a", 4093) + `\"";`, 1},
 		{"a word of 4095 bytes", "x " + strings.Repeat("a", 4095) + ";", 0},
 		{"a word of 4096 bytes", "x " + strings.Repeat("a", 4096) + ";", 1},
+		{"4093 bytes in quotes before a space", `x { "` + strings.Repeat("a", 4093) + `" 1; }`, 0},
+		{"4094 bytes in quotes before a space", `x { "` + strings.Repeat("a", 4094) + `" 1; }`, 1},
+		{"a word of 4094 bytes before a space", "x { " + strings.Repeat("a", 4094) + " 1; }", 0},
+		{"a word of 4095 bytes before a space", "x { " + strings.Repeat("a", 4095) + " 1; }", 1},
+		{"a word of 4095 bytes before a line break", "x\n" + strings.Repeat("a", 4095) + "\n;", 2},
 		{"a comment of 4095 bytes", "#" + strings.Repeat("a", 4094) + "\n", 0},
 		{"a comment of 4096 bytes", "#" + strings.Repeat("a", 4095) + "\n", 1},
 		{"a long token on a later line", "a;\n\"b\nc\";\nx " + strings.Repeat("a", 4096) + ";\n", 4},

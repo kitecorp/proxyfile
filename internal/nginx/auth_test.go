@@ -40,16 +40,17 @@ var removedByEnvoyBeforeTheCheck = []string{
 	`      proxy_set_header x-forwarded-client-cert "";`,
 }
 
-// checkStart is the start of every check location: a client's own request for its path is routed as any other, and
-// the handler's subrequest is sent to the relay with no body, the HTTP2-Settings the service receives, and the
-// question's host, method and path.
+// checkStart is the start of every check location of a file with a retried route, as both battery files with the check
+// are: a client's own request for its path is routed as any other, to the route location's copy that tries once when
+// the jump map sends it there, and the handler's subrequest is sent to the relay with no body, the HTTP2-Settings the
+// service receives, and the question's host, method and path.
 func checkStart(path string) []string {
 	return []string{
 		"    location = /.proxyfile/check {",
 		`      if ($pf_checking = "") {`,
 		"        return 418;",
 		"      }",
-		"      error_page 418 = @pf_r_$pf_route;",
+		"      error_page 418 = @pf_r_$pf_route$pf_rt_once;",
 		"      proxy_pass http://unix:/run/proxyfile-10000/check.sock;",
 		"      proxy_pass_request_body off;",
 		`      proxy_set_header Content-Length "";`,
@@ -334,8 +335,11 @@ func TestCheckLines(t *testing.T) {
 		}, absent: []string{"load_module modules/ngx_stream_js_module.so;", "    location = /.proxyfile/check {", "stream {",
 			"      js_access pf.check;", "    location @pf_r_dotparam {", authUnavailableLog[1], "  absolute_redirect off;"},
 			check: func() string {
-				if broken, count := everyLocationRemoves(off); broken != "" || count != 640 {
-					return fmt.Sprintf("%d route locations, want 640; %s", count, broken)
+				// 82 places of a route in each of four environments, each with a second location but the two with a
+				// rewrite, and the retried route's two copies that try once and its four that take a next try:
+				// (82 * 2 - 2 + 6) * 4 = 672.
+				if broken, count := everyLocationRemoves(off); broken != "" || count != 672 {
+					return fmt.Sprintf("%d route locations, want 672; %s", count, broken)
 				}
 				return ""
 			}},
@@ -370,7 +374,7 @@ func TestCheckLines(t *testing.T) {
 			{`      set $pf_action "read \"q\" ${pf_dollar}x";`, `      default_type "";`, "      js_access pf.check;"},
 		}},
 		{name: "the check path routes a client", out: checksOut, want: [][]string{
-			{"    location = /.proxyfile/check {", `      if ($pf_checking = "") {`, "        return 418;", "      }", "      error_page 418 = @pf_r_$pf_route;"},
+			{"    location = /.proxyfile/check {", `      if ($pf_checking = "") {`, "        return 418;", "      }", "      error_page 418 = @pf_r_$pf_route$pf_rt_once;"},
 		}},
 		{name: "the dot segment is asked", out: authOut, want: [][]string{
 			{`    "~^1" dotparam;`, `    "~^01" refused;`},
@@ -446,17 +450,78 @@ func TestCheckLines(t *testing.T) {
 
 // TestCheckedRouteLocations: no request reaches a service unless the check let it through, so on a file whose every
 // route is checked no route location goes without the handler, and on one with auth: off exactly those routes'
-// locations do. The locations are found by blocks, never listed by hand, and on a file with no auth the count of
-// locations without the handler is every route location's, so the count is seen to find what it counts.
+// locations do. A copy of a retried route's location that takes a next try (@pf_r_<n>-rt or -rt<k>, and their -uri
+// forms) holds no handler, so that a retried request is asked once: it counts as checked when its route location holds
+// the handler and no line leads to it but the jump of a checked route location and of its copies, whose target names
+// the request's own route. The locations are found by blocks, never listed by hand, and on a file with no auth the
+// count of locations without the handler is every route location's, so the count is seen to find what it counts.
 func TestCheckedRouteLocations(t *testing.T) {
+	copyOf := regexp.MustCompile(`^@pf_r_(.+)-rt[0-9]*$`)
+	// The value after each quoted key of a map on one line, and after its default.
+	mapValue := regexp.MustCompile(`(?:"(?:[^"\\]|\\.)*"|default) ([^ ;]+);`)
+	jump := regexp.MustCompile(`^ +(?:error_page [0-9 ]+= |try_files .* )(@[^ ;]+);$`)
+	name := func(location []string) string {
+		return strings.TrimSuffix(strings.TrimPrefix(location[0], "    location "), " {")
+	}
 	unchecked := func(out string) []string {
+		// The check location's jump goes to the route location or to its copy that tries once, never to one that takes
+		// a next try: every value of the jump map is one of those two suffixes.
+		maps := 0
+		for _, line := range lines(out) {
+			if !strings.HasPrefix(line, "  map ") || !strings.Contains(line, " $pf_rt_once { ") {
+				continue
+			}
+			maps++
+			for _, value := range mapValue.FindAllStringSubmatch(line, -1) {
+				if value[1] != `""` && value[1] != "-once" {
+					return []string{fmt.Sprintf("the jump map gives %q, a suffix that is neither \"\" nor -once: %q", value[1], line)}
+				}
+			}
+		}
+		if maps != 1 {
+			return []string{fmt.Sprintf("%d jump maps $pf_rt_once, want 1", maps)}
+		}
 		names := []string{}
 		for _, server := range environmentServers(out) {
+			checked := map[string]bool{}
 			for _, location := range blocks(server, "    location @pf_r_") {
-				if !slices.ContainsFunc(location, passes) || slices.Contains(location, "      js_access pf.check;") {
+				checked[name(location)] = slices.Contains(location, "      js_access pf.check;")
+			}
+			// Every line of the server that can jump to a copy: the retry's jump, whose target is a copy of the
+			// request's own route, in a route location or its copy, and nothing else. A copy of an unchecked route
+			// location is counted below as unchecked itself.
+			for _, location := range blocks(server, "    location ") {
+				for _, line := range location {
+					m := jump.FindStringSubmatch(line)
+					if m == nil {
+						continue
+					}
+					target, base := m[1], name(location)
+					if c := copyOf.FindStringSubmatch(base); c != nil {
+						base = "@pf_r_" + c[1]
+					}
+					_, routeLocation := checked[base]
+					switch {
+					case target == "@pf_$pf_rt_target" && routeLocation:
+					case target == "@pf_$pf_rt_target":
+						names = append(names, name(location)+" jumps to a copy and is no route location")
+					case target == "@pf_r_$pf_route$pf_rt_once":
+					case copyOf.MatchString(target):
+						names = append(names, name(location)+" jumps to the copy "+target)
+					case strings.Contains(target, "$") && strings.HasPrefix("@pf_r_", strings.Split(target, "$")[0]),
+						strings.Contains(target, "$") && strings.HasPrefix(strings.Split(target, "$")[0], "@pf_r_"):
+						names = append(names, name(location)+" jumps to "+target+", which may name a copy")
+					}
+				}
+			}
+			for _, location := range blocks(server, "    location @pf_r_") {
+				if !slices.ContainsFunc(location, passes) || checked[name(location)] {
 					continue
 				}
-				names = append(names, strings.TrimSuffix(strings.TrimPrefix(location[0], "    location "), " {"))
+				if c := copyOf.FindStringSubmatch(name(location)); c != nil && checked["@pf_r_"+c[1]] {
+					continue
+				}
+				names = append(names, name(location))
 			}
 		}
 		return names
@@ -468,10 +533,11 @@ func TestCheckedRouteLocations(t *testing.T) {
 	if got := unchecked(generate(t, string(testsupport.ReadFile(t, authFile)))); !slices.Equal(got, slices.Concat(perServer, perServer, perServer, perServer)) {
 		t.Errorf("nginx-auth.yaml: route locations with no handler %q, want %q in each of the four environment servers", got, perServer)
 	}
-	// nginx.yaml writes no auth: its 81 places of a route in each of four environments, each with a second location but
-	// the two with a rewrite, and a copy that tries once of each of the six locations of its three RPC methods, which it
-	// retries: (81 * 2 - 2 + 6) * 4 = 664.
-	if got := len(unchecked(generate(t, string(testsupport.ReadFile(t, batteryFile))))); got != 664 {
-		t.Errorf("nginx.yaml: %d route locations with no handler, want 664, every one", got)
+	// nginx.yaml writes no auth: its 83 places of a route in each of four environments, each with a second location but
+	// the two with a rewrite, a copy that tries once of each of the six locations of its three RPC methods, which it
+	// retries, and for each of its two retried routes the two copies that try once and the four that take a next try:
+	// (83 * 2 - 2 + 6 + 2 * 6) * 4 = 728.
+	if got := len(unchecked(generate(t, string(testsupport.ReadFile(t, batteryFile))))); got != 728 {
+		t.Errorf("nginx.yaml: %d route locations with no handler, want 728, every one", got)
 	}
 }

@@ -1,6 +1,7 @@
 package nginx
 
 import (
+	"iter"
 	"net"
 	"strconv"
 	"strings"
@@ -8,12 +9,12 @@ import (
 	"github.com/kitecorp/proxyfile/v2/internal/model"
 )
 
-// writeUpstream writes the upstream of one port of a service, named as the Envoy configuration names its cluster. Each
-// worker keeps up to 32 idle connections open for idle, timeouts.upstream_idle or Envoy's hour (timersOf); 32 is a
-// number chosen, not measured under load. keepalive follows the balance line, as nginx needs any balance but round robin
-// written before it (the upstream keepalive page).
-func writeUpstream(w *writer, v *values, service model.Service, port model.ServicePort, idle string, e edge) {
-	w.lines(upstreamLines(v, v.token(serviceKey, service.Pos, service.Cluster(port.Protocol)), service, port, e)...)
+// writeUpstream writes the upstream name of one port of a service: the Envoy configuration's cluster, or a group of one
+// of its backends (writeGroups). Each worker keeps up to 32 idle connections open for idle, timeouts.upstream_idle or
+// Envoy's hour (timersOf); 32 is a number chosen, not measured under load. keepalive follows the balance line, as nginx
+// needs any balance but round robin written before it (the upstream keepalive page).
+func writeUpstream(w *writer, v *values, name string, service model.Service, port model.ServicePort, idle string, e edge) {
+	w.lines(upstreamLines(v, name, service, port, e)...)
 	w.lines(
 		"    keepalive 32;",
 		"    keepalive_timeout "+idle+";",
@@ -43,7 +44,7 @@ func upstreamLines(v *values, name string, service model.Service, port model.Ser
 	}
 	for _, address := range service.Addresses {
 		server := net.JoinHostPort(address.Value, strconv.FormatInt(port.Number, 10))
-		lines = append(lines, "    server "+v.token(addressKey(&service), address.Pos, server)+resolve+" max_fails=0;")
+		lines = append(lines, "    server "+v.keyToken(addressKey(&service), address.Pos, server)+resolve+" max_fails=0;")
 	}
 	return lines
 }
@@ -96,18 +97,35 @@ func resolverLine(r *model.Resolver) string {
 // service hashes a header.
 func hashNames(v *values, services []model.Service) string {
 	var keys []string
-	for _, service := range services {
-		if service.Hash == nil || service.Hash.Header == "" {
-			continue
-		}
-		for _, port := range service.Ports {
-			keys = append(keys, service.Cluster(port.Protocol)+" "+v.token(hashHeaderKey, service.Hash.Pos, service.Hash.Header)+";")
-		}
+	for upstream, service := range hashedUpstreams(services) {
+		keys = append(keys, upstream+" "+v.token(hashHeaderKey, service.Hash.Pos, service.Hash.Header)+";")
 	}
 	if keys == nil {
 		return ""
 	}
 	return "  map $pf_log_upstream $pf_hash_name { " + strings.Join(keys, " ") + ` default ""; }`
+}
+
+// hashesHeader says whether service's balance hashes a header.
+func hashesHeader(service model.Service) bool {
+	return service.Hash != nil && service.Hash.Header != ""
+}
+
+// hashedUpstreams yields the keys of hashNames' map, the upstream of each port of a service whose balance hashes a
+// header, each with its service, so the map and the size of its table (mapHashSizes) read one list.
+func hashedUpstreams(services []model.Service) iter.Seq2[string, model.Service] {
+	return func(yield func(string, model.Service) bool) {
+		for _, service := range services {
+			if !hashesHeader(service) {
+				continue
+			}
+			for _, port := range service.Ports {
+				if !yield(service.Cluster(port.Protocol), service) {
+					return
+				}
+			}
+		}
+	}
 }
 
 // hashHeaderKey is the key a hashed header's name is refused by when nginx cannot read it.
