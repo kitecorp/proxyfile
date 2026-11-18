@@ -63,7 +63,7 @@ func TestRun(t *testing.T) {
 				"docs/haproxy.md lists them under \"Where HAProxy is less strict than the Envoy output\"\n"},
 		{name: "render for nginx counts the ways it is less strict", setup: func(t *testing.T, tmp string) { copyExample(t, tmp, "grpc") },
 			args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/nginx.conf --target nginx",
-			stderr: "proxyfile render: this nginx configuration is less strict than the Envoy output in 13 ways; " +
+			stderr: "proxyfile render: this nginx configuration is less strict than the Envoy output in 14 ways; " +
 				"docs/nginx.md lists them under \"Where nginx is less strict than the Envoy output\"\n"},
 		{name: "render for envoy counts nothing", setup: copyMinimal, args: "render <tmp>/yaml/proxyfile.yaml -o <tmp>/envoy.yaml"},
 		{name: "check for haproxy counts nothing", args: "check <ex>/minimal/yaml/proxyfile.yaml -o <ex>/minimal/yaml/haproxy.cfg --target haproxy"},
@@ -638,13 +638,14 @@ func TestGRPCHeaderTableForNginx(t *testing.T) {
 
 // A value whose nginx form is longer than nginx reads from its file is refused by its key, as a key nginx cannot carry
 // is, with exit 1 and no file written: nginx reads no value longer than 4094 bytes between its quotes, or 4095 bytes
-// without them (measured on nginx 1.30.6 and 1.31.8), and the form grows by key, by 12 bytes for each $ of a rewrite,
+// without them, and one byte less where a space follows it (measured on nginx 1.30.6 and 1.31.8;
+// TestValuesBeforeASpaceForNginx), and the form grows by key, by 12 bytes for each $ of a rewrite,
 // which nginx writes as a variable, and by 3 for each dot of a host in its origin check. A service's and an
 // environment's name of 5000 characters is written in HOCON, which takes a key that long.
 func TestLongValuesForNginx(t *testing.T) {
 	const words = " whose nginx form is longer than nginx reads is refused by --target nginx: nginx reads no value longer than " +
-		"4094 bytes between its quotes, or 4095 bytes without them; write a value whose nginx form is at most 4094 bytes, " +
-		"or render it for envoy\n"
+		"4094 bytes between its quotes, or 4095 bytes without them, and one byte less where a space follows it, as after " +
+		"a map's key; write a value whose nginx form is at most 4093 bytes, or render it for envoy\n"
 	host := strings.Repeat("a", 4795) + ".example"
 	name := strings.Repeat("s", 5000)
 	// yaml is a proxyfile whose service line, environment line and route are the ones given, on lines 3, 5 and 7.
@@ -678,6 +679,11 @@ func TestLongValuesForNginx(t *testing.T) {
 		{"a cors value in block style", "p.yaml", yaml(app, "local: {hosts: [localhost], origins: [\"https://www.example.com\"]}",
 			"{name: app, to: app, prefix: /}") + "cors:\n  allow_methods: GET\n  expose_headers: " + strings.Repeat("a", 5000) + "\n",
 			`<tmp>/p.yaml:10:3: "cors.expose_headers"` + words},
+		// only_with_header is refused at ask, the position the generator has for the check.
+		{"an only_with_header", "p.yaml", yaml("app: {http: 3000}\n  checks: {http: 9000}", local, "{name: app, to: app, prefix: /}") +
+			"auth: {ask: checks /auth, timeout: 1s, enabled: true, when_unavailable: deny, only_with_header: x-" +
+			strings.Repeat("a", 5000) + "}\n",
+			`<tmp>/p.yaml:9:13: "auth.only_with_header"` + words},
 		// A tls path is refused at the tls key, the position the generator has for its paths.
 		{"a tls path", "p.yaml", yaml(app, local, "{name: app, to: app, prefix: /}") +
 			"tls: {certificate: /" + strings.Repeat("a", 5000) + ", key: /k.pem}\n",
@@ -705,6 +711,98 @@ func TestLongValuesForNginx(t *testing.T) {
 				t.Errorf("stderr = %.400q, want %.400q", got, c.stderr)
 			}
 			absent(t, tmp, "nginx.conf", "proxyfile.js")
+		})
+	}
+}
+
+// nginx reads a value a space follows, such as a map's key or a header's name, one byte shorter than one before ;: 4093
+// bytes between its quotes where 4094 load before ; (measured on nginx 1.30.6 and 1.31.8, wherever the value met
+// nginx's read buffer). A value whose nginx form is one byte longer than that is refused by its key, with exit 1 and
+// no file written, and the value one character shorter renders. Each row's n is the most characters its value's
+// repeated part takes in a file that renders: the form's other bytes are what the row's comment counts.
+func TestValuesBeforeASpaceForNginx(t *testing.T) {
+	const words = " whose nginx form is longer than nginx reads is refused by --target nginx: nginx reads no value longer than " +
+		"4094 bytes between its quotes, or 4095 bytes without them, and one byte less where a space follows it, as after " +
+		"a map's key; write a value whose nginx form is at most 4093 bytes, or render it for envoy\n"
+	a, upper := func(n int) string { return strings.Repeat("a", n) }, func(n int) string { return strings.Repeat("A", n) }
+	// file is a proxyfile whose environment and route are the ones given, on lines 6 and 8, and rest after them.
+	file := func(environment, route, rest string) string {
+		return "listen: 8000\nservices:\n  app: {http: 3000}\n  checks: {http: 9000}\norigins:\n  " + environment +
+			"\nroutes:\n  - " + route + "\n" + rest
+	}
+	const local, app = "local: {hosts: [localhost]}", "{name: app, to: app, prefix: /}"
+	cases := []struct {
+		name      string
+		proxyfile func(n int) string
+		n         int
+		at        string // where the value one character longer is refused, and by its key
+	}{
+		// "~^/<prefix>", the prefix with its two slashes and 2 more bytes.
+		{"a prefix", func(n int) string { return file(local, "{name: app, to: app, prefix: /"+a(n)+"/}", "") }, 4089,
+			`<tmp>/p.yaml:8:34: "routes[].prefix"`},
+		// "~^/<path>\\z", 6 bytes more.
+		{"a path", func(n int) string { return file(local, "{name: app, to: app, path: /"+a(n)+"}", "") }, 4087,
+			`<tmp>/p.yaml:8:32: "routes[].path"`},
+		// "~^1:<method>\\z", 7 bytes more.
+		{"a method", func(n int) string { return file(local, "{name: app, to: app, prefix: /, method: "+upper(n)+"}", "") }, 4086,
+			`<tmp>/p.yaml:8:5: "routes[].method"`},
+		// The rewrite's replacement "/<rewrite>/$1", before break.
+		{"a rewrite", func(n int) string { return file(local, "{name: app, to: app, prefix: /, rewrite: /"+a(n)+"/}", "") }, 4089,
+			`<tmp>/p.yaml:8:46: "routes[].rewrite"`},
+		// The rewrite's "^/<prefix>/((?s).*)\\z", before its replacement, 14 bytes more.
+		{"a prefix with a rewrite", func(n int) string { return file(local, "{name: app, to: app, prefix: /"+a(n)+"/, rewrite: /b/}", "") },
+			4079, `<tmp>/p.yaml:8:34: "routes[].prefix"`},
+		// The origin check's "~^https?://<host>\\.example(:[0-9]+)?\\z", 34 bytes more.
+		{"a host", func(n int) string { return file("local: {hosts: ["+a(n)+".example]}", app, "") }, 4059,
+			`<tmp>/p.yaml:6:3: "origins.<environment name>.hosts"`},
+		// "~*^https://<origin>\\.example\\z", 24 bytes more.
+		{"an origin", func(n int) string {
+			return file(`local: {hosts: [localhost], origins: ["https://`+a(n)+`.example"]}`, app, "")
+		}, 4069, `<tmp>/p.yaml:6:3: "origins.<environment name>.origins"`},
+		// "~^https://.*\\.<pattern>\\.example\\z", 28 bytes more.
+		{"a pattern of origins", func(n int) string {
+			return file(`local: {hosts: [localhost], patterns: ["https://*.`+a(n)+`.example"]}`, app, "")
+		}, 4065, `<tmp>/p.yaml:6:3: "origins.<environment name>.patterns"`},
+		// The preflight answer's Access-Control-Allow-Methods "<value>", before always.
+		{"cors.allow_methods", func(n int) string { return file(local, app, "cors: {allow_methods: "+upper(n)+"}\n") }, 4093,
+			`<tmp>/p.yaml:9:8: "cors.allow_methods"`},
+		{"cors.allow_headers", func(n int) string { return file(local, app, "cors: {allow_headers: x"+a(n-1)+"}\n") }, 4093,
+			`<tmp>/p.yaml:9:8: "cors.allow_headers"`},
+		// proxy_set_header "x-<name>" and the value it sets.
+		{"an accepted header", func(n int) string {
+			return file(local, app, "auth: {ask: checks /auth, timeout: 1s, enabled: true, when_unavailable: deny, accept: [x-"+a(n)+"]}\n")
+		}, 4091, `<tmp>/p.yaml:9:88: "auth.accept"`},
+		{"a header removed from clients", func(n int) string { return file(local, app, "remove_from_clients: [x-"+a(n)+"]\n") }, 4091,
+			`<tmp>/p.yaml:9:23: "remove_from_clients"`},
+		// "~^/example\\.orders\\.v1\\.OrderService/Get<method>\\z", 46 bytes more.
+		{"an RPC method", func(n int) string {
+			return "listen: 8000\nservices:\n  orders: {grpc: 9000}\norigins:\n  all: {hosts: [localhost]}\nroutes:\n" +
+				"  - rpc: {to: {\"*\": orders}}\nrpc:\n  methods:\n    - {service: example.orders.v1.OrderService, method: Get" + a(n) + "}\n"
+		}, 4047, `<tmp>/p.yaml:10:7: "rpc.methods"`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for _, n := range []int{c.n, c.n + 1} {
+				tmp := t.TempDir()
+				testsupport.WriteFile(t, filepath.Join(tmp, "p.yaml"), c.proxyfile(n))
+				var stdout, stderr bytes.Buffer
+				exit := Run([]string{"render", filepath.Join(tmp, "p.yaml"), "-o", filepath.Join(tmp, "nginx.conf"), "--target", "nginx"},
+					&stdout, &stderr, "v9.9.9")
+				got := strings.ReplaceAll(stderr.String(), tmp, "<tmp>")
+				if n == c.n {
+					if exit != 0 {
+						t.Errorf("%d characters: exit = %d, want 0; stderr %.400q", n, exit, got)
+					}
+					continue
+				}
+				if exit != 1 {
+					t.Errorf("%d characters: exit = %d, want 1", n, exit)
+				}
+				if want := c.at + words; got != want {
+					t.Errorf("%d characters: stderr = %.400q, want %.400q", n, got, want)
+				}
+				absent(t, tmp, "nginx.conf", "proxyfile.js")
+			}
 		})
 	}
 }

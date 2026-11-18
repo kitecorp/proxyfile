@@ -5,8 +5,9 @@
 # writes them. Its other keys are nginx.yaml's but for the traffic keys, so the rows of the check run beside the forms
 # the generator writes for tls with clients, client_address connection, the pattern routes, cors and the request log.
 # Of the traffic keys it writes only the catalog route's limit, nginx.yaml's 20 requests a second with a burst of 10 by
-# client, so the rate limit rows that need the check run on an nginx file. Every entry that runs it, Envoy's too,
-# measures its literals on Envoy.
+# client, so the rate limit rows that need the check run on an nginx file, and retries: 1 on the route retried to shop,
+# checked as the shop route is, so the rows of a retried request that is checked run on an nginx file under allow.
+# Every entry that runs it, Envoy's too, measures its literals on Envoy.
 listen: 10000
 admin: 9901
 tls:
@@ -199,6 +200,7 @@ routes:
   - {name: k38, pattern: "/k38/(a|b)*a(a|b){12}c", to: catalog}
   - {name: k39, pattern: "/k39/(a|b)*a(a|b){12}c", to: catalog}
   - {name: k40, pattern: "/k40/(a|b)*a(a|b){12}c", to: catalog}
+  - {name: retried, prefix: /retried/, to: shop, retries: 1}
   - {name: shop, prefix: /, to: shop}
 rpc:
   methods:

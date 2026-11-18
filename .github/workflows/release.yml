@@ -20,8 +20,10 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test -count=1 ./...
-      # A release whose rendered configuration answers a scenario otherwise than the format says is not published.
-      - run: go test -tags conformance -count=1 ./conformance/...
+      # A release whose rendered configuration answers a scenario otherwise than the format says is not published. The
+      # battery is given 30 minutes, as in the pre-merge workflow, because a whole run comes close to go test's default
+      # of 10.
+      - run: go test -tags conformance -count=1 -timeout 30m ./conformance/...
       - run: scripts/build-release.sh "$GITHUB_REF_NAME"
       - name: The program reports the tag
         run: test "$(dist/proxyfile-linux-amd64 version)" = "proxyfile $GITHUB_REF_NAME"

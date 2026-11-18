@@ -18,7 +18,6 @@ examples/full/yaml/proxyfile.yaml:43:5: "auth.jwt.claims" is refused by --target
 examples/full/yaml/proxyfile.yaml:43:14: "auth.jwt.claims.<header name>" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
 examples/full/yaml/proxyfile.yaml:43:30: "auth.jwt.claims.<header name>" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
 examples/full/yaml/proxyfile.yaml:44:1: "remove_from_clients" holding a name with a * prefix is refused by --target nginx: nginx takes each header by name; write each name in full
-examples/full/yaml/proxyfile.yaml:73:39: "routes[].retries" 1 or more is refused by --target nginx: nginx sends a request again after a service read it when its method is not POST, LOCK or PATCH; write retries: 0, or render it for envoy
 examples/full/yaml/proxyfile.yaml:80:1: "tracing" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/yaml/proxyfile.yaml:81:3: "tracing.provider" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/yaml/proxyfile.yaml:82:5: "tracing.provider.otel" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

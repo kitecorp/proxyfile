@@ -340,6 +340,67 @@ func (w *world) logLines(id string, wait []string) map[string][]map[string]strin
 	}
 }
 
+// logMark returns how many lines the proxy has written to its stdout, where its log lines are, once two reads 250 ms
+// apart give the same count, for 2 s at most: the point a row's counted lines are read after (countedAfter). The wait
+// lets a line of the row before reach the log first, as the battery's Envoy writes its log every 100 ms.
+func (w *world) logMark() int {
+	deadline := time.Now().Add(2 * time.Second)
+	count := len(stdoutLines())
+	for {
+		time.Sleep(250 * time.Millisecond)
+		now := len(stdoutLines())
+		if now == count || time.Now().After(deadline) {
+			return now
+		}
+		count = now
+	}
+}
+
+// countedAfter returns the lines of c.event the proxy wrote to its stdout after its first mark lines whose c.find fields
+// all match, each the JSON text of each field's value by its name. It reads the log every 100 ms until want of them are
+// there, for 5 s at most, and then once more 300 ms later, so a line written after the ones wanted is counted too.
+func (w *world) countedAfter(mark int, c countedLines, want int) []map[string]string {
+	read := func() []map[string]string {
+		var found []map[string]string
+		lines := stdoutLines()
+		for _, text := range lines[min(mark, len(lines)):] {
+			var fields map[string]json.RawMessage
+			if json.Unmarshal([]byte(text), &fields) != nil || string(fields["event"]) != strconv.Quote(c.event) {
+				continue
+			}
+			line, matches := map[string]string{}, true
+			for name, value := range fields {
+				line[name] = string(value)
+			}
+			for name, pattern := range c.find {
+				value, ok := line[name]
+				matches = matches && ok && pattern.MatchString(value)
+			}
+			if matches {
+				found = append(found, line)
+			}
+		}
+		return found
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(read()) < want && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	time.Sleep(300 * time.Millisecond)
+	return read()
+}
+
+// stdoutLines returns the lines the proxy has written to its stdout, or none when Docker cannot read them, which fails
+// a row that wants lines. Reading stdout alone keeps the proxy's messages, on stderr, from moving a count of lines
+// between two reads.
+func stdoutLines() []string {
+	out, err := dockerStdout("logs", proxy)
+	if err != nil {
+		return nil
+	}
+	return strings.Split(out, "\n")
+}
+
 // dockerAPI is a client of the Docker daemon on the unix socket the docker command's current context names.
 var dockerAPI = sync.OnceValues(func() (*http.Client, error) {
 	out, err := docker("context", "inspect", "--format", "{{.Endpoints.docker.Host}}")
@@ -366,12 +427,25 @@ var dockerCPUs = sync.OnceValues(func() (int, error) {
 	return strconv.Atoi(strings.TrimSpace(out))
 })
 
-// docker runs one Docker command and returns its output. Every Docker call of the battery goes through it, so a
-// failure always names the command and what Docker answered.
+// docker runs one Docker command and returns its output, stdout and stderr together. Every Docker call of the battery
+// goes through it or dockerStdout, so a failure always names the command and what Docker answered.
 func docker(args ...string) (string, error) {
 	out, err := exec.Command("docker", args...).CombinedOutput()
 	if err != nil {
 		return string(out), fmt.Errorf("docker %s: %v\n%s", strings.Join(args, " "), err, bytes.TrimSpace(out))
+	}
+	return string(out), nil
+}
+
+// dockerStdout runs one Docker command and returns its stdout alone: docker logs writes a container's stdout to its own
+// stdout and the container's stderr to its own stderr, which a failure names.
+func dockerStdout(args ...string) (string, error) {
+	var stderr bytes.Buffer
+	command := exec.Command("docker", args...)
+	command.Stderr = &stderr
+	out, err := command.Output()
+	if err != nil {
+		return string(out), fmt.Errorf("docker %s: %v\n%s", strings.Join(args, " "), err, bytes.TrimSpace(stderr.Bytes()))
 	}
 	return string(out), nil
 }

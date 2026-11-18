@@ -1034,7 +1034,13 @@ var ownOriginKeys = []string{"origins.<environment name>.hosts", "origins.<envir
 // under deny, on two-checks, where it is answered 403: a body that breaks off, a 101st header line, a head or a trailer
 // section past 81,920 bytes and each kind of malformed answer, the last two of which HAProxy's reader answers 403 under
 // allow too (auth.when_unavailable). two-checks also holds
-// the check service at two addresses, one of which a row makes refuse connections.
+// the check service at two addresses, one of which a row makes refuse connections. A request to the route the nginx
+// battery files retry, retried, is checked once, before its first try, and a retry carries what the check answered:
+// with shop-2 refusing connections, each of 20 requests the check allows reaches shop-1 with the x-user-check the check
+// set; each of 6 it denies is answered 403 with no service; and each of 10 whose check answers 503 reaches shop-1 with
+// the unchecked mark under allow and is answered 403 under deny, on nginx-checks. That nginx asks the check once for
+// a retried request is held by the generator's tests, which find no handler in a copy that takes a next try, as the
+// stub's check counts no questions.
 var auth = scenario{name: "auth",
 	exchanges: []exchange{
 		{name: "no authorization header, so the check is not asked", keys: []string{"auth.ask", "auth.only_with_header"}, send: get("/products/1"), want: answer{status: 200, service: "shop"}},
@@ -1637,6 +1643,18 @@ var auth = scenario{name: "auth",
 			send: token("status-503"), want: answer{status: 200, service: "shop", marked: "true",
 				logged: map[string]map[string]*regexp.Regexp{"gateway_auth_unavailable": {"action": logText(""),
 					"failure_mode_allowed": logText("true"), "route": logText("shop"), "status": logNumber(200)}}}},
+		// A retried request is checked once, before its first try, and its retry carries what the check accepted.
+		{name: "a request whose first connection was refused is served with the check's accepted header",
+			keys: []string{"auth.ask", "auth.accept", "routes[].retries"}, send: tokenTo("allow", retriedPath), repeat: 20, every: true,
+			refusing: "shop-2", want: answer{status: 200, service: "shop", instance: "shop-1",
+				received: map[string]string{"x-user-check": "GET /retried/products/1 action= reports= country="}}},
+		{name: "a request the check denies is answered 403 while a backend refuses", keys: []string{"auth.ask", "routes[].retries"},
+			send: tokenTo("deny-403", retriedPath), repeat: 6, every: true, refusing: "shop-2", want: answer{status: 403}},
+		{name: "a request whose check is unavailable and whose first connection was refused carries the unchecked mark",
+			keys: []string{"auth.ask", "auth.when_unavailable", "routes[].retries"}, send: tokenTo("status-503", retriedPath), repeat: 10,
+			every: true, refusing: "shop-2", want: answer{status: 200, service: "shop", instance: "shop-1", marked: "true"},
+			// nginx-checks is deny.
+			on: map[string]literal{"nginx-checks": {want: answer{status: 403}}}},
 	}}
 
 // token is a GET of the shop route on localhost whose authorization header carries the given token of the stub's
@@ -1826,7 +1844,33 @@ var timeout = scenario{name: "timeout",
 // retries: 0 on the shop route, so there each request shop-2 draws is answered 502 by the proxy, with no service, and
 // tried on no other backend: 12 to 22 of the 40 in each of ten runs with the file's least_requests, and 20 in each of
 // ten with round robin (measured on Envoy 1.40.2), so there the row wants each answer to be that 502 or shop-1's, and
-// at least one of each, which a proxy that answered every request 502 would fail.
+// at least one of each, which a proxy that answered every request 502 would fail; nginx-auth and nginx-checks write no
+// retries on their shop routes either, so the row wants the same there.
+//
+// The rows that send to /retried/products/1 send to the route the nginx battery files retry once, retried, which the
+// Envoy entry's own files serve by their shop route, which retries. nginx reads the body of a request to a retried
+// route whole before the first try when its Content-Length is at most 1 MiB, when it has no body over HTTP/1.1 (neither
+// Content-Length nor Transfer-Encoding), or when a GET, HEAD, OPTIONS or DELETE over HTTP/2 has no content-length, and
+// sends any other body as it arrives, never trying it again, so the rows send bodies at and over that bound, chunked
+// and over HTTP/2 with no content-length. With shop-2 refusing connections: each of 40 requests is answered by
+// shop-1, and each of 40 POSTs with no body and no Content-Length; each of 40 GETs whose body of 180,000 bytes comes in
+// one-byte chunks reaches shop-1 whole, where nginx answers 502 each one shop-2 drew (routes[].retries), as chunk lines
+// count against the buffer it reads a retried body into; each of 40 PUTs of 1 MiB reaches shop-1 whole; of 40 PUTs of
+// one byte more, over Envoy's buffer of 1 MiB, at least one is answered 507, where the Envoy output cannot hold the
+// body for a retry, and nginx answers that one 502 (routes[].retries); a chunked PUT, and a PUT over HTTP/2 with no
+// content-length, are tried again by Envoy, at least one of 40 reaching shop-1 with its body, where nginx answers 502
+// (routes[].retries). A row that needs shop-2 drawn at least once, or each backend, sends 40 requests: where the
+// backend is drawn at random, as Envoy's workers each start their round robin at a random number, all 40 miss it with
+// a chance of 2^-40, about one in 10^12, where 10 requests missed it with a chance of one in 1,024. nginx-plain retries
+// no route of retriedPath, so its shop route serves the rows that send there and tries each request once
+// (onceOnPlain). A PUT whose
+// first try the service closed once it arrived is answered 502 and not tried again, over HTTP/1.1 and over HTTP/2,
+// which net/http's client sends with a content-length, as the raw reader does not decode the 502 Envoy codes with
+// Huffman. A request whose every backend refuses is answered 502 and writes one upstream-failure line with the flags
+// URX,UF, its route and the status 502, on Envoy and on both nginx versions: that line carries no request id, so the
+// row finds it by route and status among the lines written after the row began (countedLines), and no row beside it
+// in this scenario sends to the route. A PUT over 1 MiB with no backend refusing is served once, whole. Envoy also
+// answers, and no row asserts: the bodies of its 502 and 507.
 var retry = scenario{name: "retry",
 	exchanges: []exchange{
 		{name: "a first try closed after it reached the service is not tried again", keys: []string{"routes[].retries"}, send: request{proto: "http/1.1", method: "GET",
@@ -1843,7 +1887,8 @@ var retry = scenario{name: "retry",
 			want: answer{status: 200, grpcStatus: "14"}},
 		{name: "a retry after a connection failure reaches the other backend", keys: []string{"routes[].retries"}, send: get("/products/1"), repeat: 40, every: true,
 			refusing: "shop-2", want: answer{status: 200, service: "shop", instance: "shop-1"},
-			on: map[string]literal{"nginx-file": {want: answer{status: 502}, also: &answer{status: 200, service: "shop", instance: "shop-1"}}}},
+			on: onEach([]string{"nginx-file", "nginx-plain", "nginx-auth", "nginx-checks"},
+				literal{want: answer{status: 502}, also: &answer{status: 200, service: "shop", instance: "shop-1"}})},
 		{name: "a gRPC call retried after a connection failure reaches the other backend", keys: []string{"routes[].rpc.retries"},
 			send: rpc("/example.shop.v1.CartService/GetCart"), repeat: 40, every: true, refusing: "shop-2",
 			want: answer{status: 200, grpcStatus: "0", service: "shop", instance: "shop-1"}},
@@ -1857,7 +1902,107 @@ var retry = scenario{name: "retry",
 			want: answer{status: 200, service: "shop"},
 			on: map[string]literal{"nginx-plain": {want: answer{status: 200, grpcStatus: "14", atLeast: 9950 * time.Millisecond,
 				below: 10950 * time.Millisecond}}}},
+		// nginx-plain's route held retries once to the same two backends: the Envoy output answers 502 with no body when
+		// the second try's 5 s connect timeout ends (measured on Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8, 10.0 s by
+		// all three, each nginx try 5.0 s), the bound as the gRPC row's. nginx gives that answer only when the second
+		// try is made, in the copy it takes: a script that found the time spent after the first try answered 504 at
+		// 5 s, and a copy left out 500. The row does not hold the time left after a try: both tries end at the
+		// connect time, which every copy shares, so a script that counts no time and sends the second try with the
+		// route's whole time gives the same answer (measured on nginx 1.30.6 and 1.31.8: the row passes with it).
+		// Every other file sends the path to its shop route.
+		{name: "a retried request whose every try times out connecting is answered 502 after both tries", overlap: true,
+			keys: []string{"routes[].retries"}, send: get("/held/products/1"),
+			want: answer{status: 200, service: "shop"},
+			on: map[string]literal{"nginx-plain": {want: answer{status: 502, atLeast: 9950 * time.Millisecond,
+				below: 10950 * time.Millisecond}}}},
+		{name: "a request to a retried route whose first connection was refused reaches the other backend", keys: []string{"routes[].retries"},
+			send: get(retriedPath), repeat: 40, every: true, refusing: "shop-2",
+			want: answer{status: 200, service: "shop", instance: "shop-1"}, on: onceOnPlain(answer{status: 200, service: "shop", instance: "shop-1"})},
+		{name: "a POST with no body and no Content-Length whose first connection was refused reaches the other backend",
+			keys: []string{"routes[].retries"}, send: request{proto: "http/1.1", method: "POST", host: "localhost", path: retriedPath, raw: true},
+			repeat: 40, every: true, refusing: "shop-2", want: answer{status: 200, service: "shop", instance: "shop-1", method: "POST"},
+			on: onceOnPlain(answer{status: 200, service: "shop", instance: "shop-1", method: "POST"})},
+		{name: "a GET in one-byte chunks whose first connection was refused is not tried again", keys: []string{"routes[].retries"},
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: retriedPath, raw: true, unframed: true,
+				headers: map[string]string{"transfer-encoding": "chunked"}, body: oneByteChunks},
+			repeat: 40, every: true, refusing: "shop-2", want: answer{status: 200, service: "shop", instance: "shop-1", body: oneByteBody},
+			on: onceOnPlain(answer{status: 200, service: "shop", instance: "shop-1", body: oneByteBody}),
+			by: map[string]own{"nginx": {difference: "routes[].retries", literal: literal{want: answer{status: 502},
+				also: &answer{status: 200, service: "shop", instance: "shop-1", body: oneByteBody}}}}},
+		// The two rows of a PUT whose first try the service closed once it arrived send a body with a length of at most
+		// 1 MiB, which nginx's jump map sends to the retried route's location, the one that reads the body whole and may
+		// try it again: they hold that a try that reached the service is not repeated only while they reach it. Sent to
+		// the copy that tries once, or to a route that does not retry, as nginx-plain's shop route serving retriedPath,
+		// they are answered 502 whatever that location would do.
+		{name: "a PUT whose first try was closed after it reached the service is not tried again", keys: []string{"routes[].retries"},
+			send: putTo(retriedPath, "hello", map[string]string{"content-length": "5", "x-stub-fail-first": "shop-put-once"}),
+			want: answer{status: 502}},
+		{name: "a PUT over HTTP/2 whose first try was closed after it reached the service is not tried again", keys: []string{"routes[].retries"},
+			send: request{proto: "h2", method: "PUT", host: "localhost", path: retriedPath, body: "hello",
+				headers: map[string]string{"x-stub-fail-first": "shop-put-once-h2"}},
+			want: answer{status: 502}},
+		{name: "a PUT of 1 MiB whose first connection was refused reaches the other backend whole", keys: []string{"routes[].retries"},
+			send: putTo(retriedPath, mebibyte, map[string]string{"content-length": "1048576"}), repeat: 40, every: true, refusing: "shop-2",
+			want: answer{status: 200, service: "shop", instance: "shop-1", body: mebibyte},
+			on:   onceOnPlain(answer{status: 200, service: "shop", instance: "shop-1", body: mebibyte})},
+		{name: "a request whose every backend refuses is answered 502 and logged URX,UF", keys: []string{"routes[].retries", "log"},
+			send: get(retriedPath), refusing: "shop-1,shop-2", want: answer{status: 502, counted: refusedEverywhere("retried")},
+			on: map[string]literal{"full": {want: answer{status: 502, counted: refusedEverywhere("shop")}}}},
+		{name: "a PUT over 1 MiB whose first connection was refused is not tried again", keys: []string{"routes[].retries"},
+			send: putTo(retriedPath, overMebibyte, map[string]string{"content-length": "1048577"}), repeat: 40, refusing: "shop-2",
+			want: answer{status: 507}, on: map[string]literal{"nginx-plain": {want: answer{status: 502}}},
+			by: map[string]own{"nginx": {difference: "routes[].retries", literal: literal{want: answer{status: 502}}}}},
+		{name: "a chunked PUT whose first connection was refused is not tried again", keys: []string{"routes[].retries"},
+			send:   request{proto: "http/1.1", method: "PUT", host: "localhost", path: retriedPath, raw: true, body: "hello"},
+			repeat: 40, refusing: "shop-2", want: answer{status: 200, service: "shop", instance: "shop-1", body: "hello"},
+			by: map[string]own{"nginx": {difference: "routes[].retries", literal: literal{want: answer{status: 502}}}}},
+		{name: "a PUT over HTTP/2 with no content-length whose first connection was refused is not tried again", keys: []string{"routes[].retries"},
+			send:   request{proto: "h2", method: "PUT", host: "localhost", path: retriedPath, raw: true, body: "hello"},
+			repeat: 40, refusing: "shop-2", want: answer{status: 200, service: "shop", instance: "shop-1", body: "hello"},
+			by: map[string]own{"nginx": {difference: "routes[].retries", literal: literal{want: answer{status: 502}}}}},
+		{name: "a PUT over 1 MiB is served once whole", keys: []string{"routes[].retries"},
+			send: putTo(retriedPath, overMebibyte, map[string]string{"content-length": "1048577"}),
+			want: answer{status: 200, service: "shop", attempt: 1, body: overMebibyte}},
 	}}
+
+// onceOnPlain is the literal on nginx-plain of a row that sends to retriedPath with shop-2 refusing connections and
+// wants served from shop-1 every time: nginx-plain retries no route of that path, so its shop route serves it and tries
+// each request once, and each request shop-2 draws is answered 502 by the proxy, with no service (measured on Envoy
+// 1.40.2).
+func onceOnPlain(served answer) map[string]literal {
+	return map[string]literal{"nginx-plain": {want: answer{status: 502}, also: &served}}
+}
+
+// refusedEverywhere is the upstream-failure line of a request of route whose every try was refused, answered 502: it
+// carries no request id, so the row finds it by its route and status (countedLines).
+func refusedEverywhere(route string) *countedLines {
+	return &countedLines{event: "gateway_upstream_failure", find: map[string]*regexp.Regexp{"route": logText(route), "status": logNumber(502)},
+		fields: map[string]*regexp.Regexp{"flags": logText("URX,UF")}}
+}
+
+// retriedPath is a path of the route the nginx battery files retry once, retried, which only the rows of a retried
+// request send to, in the retry and auth scenarios: on the Envoy entry's own files the shop route, which retries,
+// serves it.
+const retriedPath = "/retried/products/1"
+
+// mebibyte and overMebibyte are bodies of 1 MiB, the most the nginx output reads whole and may try again, and of one
+// byte more.
+var (
+	mebibyte     = strings.Repeat("x", 1048576)
+	overMebibyte = strings.Repeat("x", 1048577)
+)
+
+// oneByteBody is a body of 180,000 bytes, and oneByteChunks the same body as chunks of one byte, 1,080,005 bytes on the
+// wire: more than the 1,025 KiB nginx's retried route location reads a body into, chunk lines included.
+var (
+	oneByteBody   = strings.Repeat("x", 180000)
+	oneByteChunks = strings.Repeat("1\r\nx\r\n", 180000) + "0\r\n\r\n"
+)
+
+// putTo is a PUT of body to path over HTTP/1.1, sent by hand with headers and the body as it is, so the headers frame it.
+func putTo(path, body string, headers map[string]string) request {
+	return request{proto: "http/1.1", method: "PUT", host: "localhost", path: path, raw: true, unframed: true, headers: headers, body: body}
+}
 
 // gRPC: every value measured on Envoy 1.40.2. The question the check is told, x-gateway-action and
 // x-gateway-reports, is for the check alone, so the service receives neither. A gRPC service's X-Accel-Redirect
@@ -2267,7 +2412,15 @@ func allowed(path string) request {
 // catalog route as examples/full does, and nginx-plain limits only its route limited (clientKeys). examples/portable's
 // route holds 20 (20 requests a second and no burst), so there the first 20 are admitted; the bucket refills one
 // request every 50 ms, so its 429 is missed only when the 40 requests after the first 20 take about 2 s, and on one
-// arm64 Mac, over two sets of 30 runs, the 60 took 0.02 to 0.04 s.
+// arm64 Mac, over two sets of 30 runs, the 60 took 0.02 to 0.04 s. nginx-file's route retried-limited admits 10 requests
+// a minute for all and retries once: with shop-2 refusing connections, the first 10 of 40 requests are answered 200 and
+// a later one 429, so a request whose first try was refused spends one token, never two and never none. It is the only
+// row that sends to that route, 40 requests of which 10 are admitted, and its bucket refills one request every 6 s, so
+// a row added later on the route waits for it (refill). full, nginx-auth and nginx-plain, which have no such route,
+// serve the path by their shop routes, so there the row wants an answer from shop-1, which a shop route that tries
+// once, as nginx-auth's and nginx-plain's do, gives at least one of the 40 unless each draws shop-2: a chance of
+// 2^-40 where the backend is drawn at random, about one in 10^12, where the 14 requests the row sent before gave one
+// in 16,384.
 var rateLimit = scenario{name: "rate limit",
 	quiet: 2500 * time.Millisecond,
 	exchanges: []exchange{
@@ -2306,6 +2459,9 @@ var rateLimit = scenario{name: "rate limit",
 		// not charged, every answer would be 401.
 		{name: "a request the check denies spends a token", keys: []string{"routes[].rate_limit", "auth.ask"}, send: deniedOnCatalog,
 			refill: 2 * time.Second, repeat: 40, want: answer{status: 429}},
+		{name: "a limited route whose first connections were refused charges each request once", keys: []string{"routes[].rate_limit", "routes[].retries"},
+			send: get("/retried-limited/products/1"), repeat: 40, admitted: 10, refusing: "shop-2", want: answer{status: 429},
+			on: onEach([]string{"full", "nginx-auth", "nginx-plain"}, literal{want: answer{status: 200, service: "shop", instance: "shop-1"}})},
 	}}
 
 // burstKeys are what the rows that find the catalog route's bucket spent depend on: the limit with its burst, which the

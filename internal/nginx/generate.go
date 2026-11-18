@@ -35,12 +35,21 @@ type route struct {
 	questions []string
 	// limit is the rate limit of the route's entry of routes, nil without one, and bucket its number among the limited
 	// entries, from 1, which names its zone (limitZones), 0 without one; retries are the rpc entry's retries, 0 on a
-	// plain route, whose retries nginx's declaration refuses but for 0. tryOnce is a retried route's copy that tries
-	// each call once (retryOnce), whose call the Envoy output retries all the same.
+	// plain route. tryOnce is a retried route's copy that tries each request once (retryOnce), whose request the Envoy
+	// output retries all the same.
 	limit   *model.RateLimit
 	bucket  int
 	retries int64
 	tryOnce bool
+	// service is the service the route goes to. jumps is how many times a plain route's request goes on to a next
+	// backend (retryJumps): 0 for a retried route to a service of one backend, -1 for a route not retried, an RPC
+	// route's among them. retry is the copy of a retried plain route's location that takes a try after the first
+	// (retryCopies), nil for every other location; timers are the timer lines of a retried plain route's location or
+	// copy, written before its body lines (retryTimers, retryCopies).
+	service *model.Service
+	jumps   int
+	retry   *retryCopy
+	timers  []string
 }
 
 // edge is what the gateway does with a client's own headers before it routes the request. connection is true when the
@@ -224,6 +233,11 @@ type timers struct {
 	// the route's timeout, or "" where Envoy's idle timer ends the request first, which Envoy flags SI and writes no
 	// such line for.
 	connectFlag, readFlag string
+	// time is the route's time in milliseconds, which the Envoy output counts across every try of a request and nginx
+	// for each try (retryCopies), 0 where no timer ends a silent request; connectMillis is the connect time, and text
+	// is the answer of the timer that ends the request, "" for none.
+	time, connectMillis int64
+	text                string
 }
 
 // timersOf returns the timers of the file's timeouts. The service's answer is read for the shortest of the times Envoy
@@ -238,30 +252,29 @@ type timers struct {
 func timersOf(v *values, t model.Timeouts) timers {
 	const idleKey, requestKey = "timeouts.idle", "timeouts.request"
 	tm := timers{read: nginxTime(routeTimeout), connect: nginxTime(connectTimeout), idle: nginxTime(streamIdle), upstream: "1h",
-		connectFlag: "UF"}
+		connectFlag: "UF", connectMillis: connectTimeout}
 	idle := t.Idle != nil && t.Idle.Millis != 0
 	if t.Idle != nil {
 		tm.idle = v.token(idleKey, t.Idle.Pos, nginxTime(t.Idle.Millis))
 	}
 	if idle && t.Idle.Millis < connectTimeout {
-		tm.connect, tm.connectFlag = tm.idle, ""
+		tm.connect, tm.connectFlag, tm.connectMillis = tm.idle, "", t.Idle.Millis
 	}
 	if t.UpstreamIdle != nil {
 		tm.upstream = v.token("timeouts.upstream_idle", t.UpstreamIdle.Pos, nginxTime(t.UpstreamIdle.Millis))
 	}
-	text := ""
 	switch {
 	case idle && (t.Request != nil || t.Idle.Millis < routeTimeout):
-		tm.read, text = tm.idle, "stream timeout"
+		tm.read, tm.text, tm.time = tm.idle, "stream timeout", t.Idle.Millis
 	case t.Request == nil:
-		text, tm.readFlag = "upstream request timeout", "UT"
+		tm.text, tm.readFlag, tm.time = "upstream request timeout", "UT", routeTimeout
 	case t.Idle == nil:
-		tm.read, text = v.token(requestKey, t.Request.Pos, nginxTime(streamIdle)), "stream timeout"
+		tm.read, tm.text, tm.time = v.token(requestKey, t.Request.Pos, nginxTime(streamIdle)), "stream timeout", streamIdle
 	default:
 		// idle and request none: nothing ends a silent request, as in the Envoy output.
 		tm.read = tm.idle
 	}
-	tm.answer = timeoutAnswer(text, tm.connectFlag != "")
+	tm.answer = timeoutAnswer(tm.text, tm.connectFlag != "")
 	return tm
 }
 
@@ -275,14 +288,15 @@ func timersOf(v *values, t model.Timeouts) timers {
 // under 5 s the connect time is timeouts.idle, and Envoy's idle timer ends the request at the same time with the same
 // text. Measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2: the texts at 2 s, 15 s and 5 minutes, the 502 and
 // the gRPC answer at 5 s with idle: 10s and with no timeouts, and every other answer unchanged. The check reads the
-// last try's connect time (lastTry): a retried call whose every try timed out connecting holds one - for each, such as
-// "-, -", which the Envoy output answers as it answers a call whose retries were refused, 200 with grpc-status 14
-// after 10 s with one retry (measured).
+// last try's connect time, the value after the last space: nginx lists one for each try, joined by ", " within an
+// upstream and by " : " across the copies a retried route's request goes through (retryCopies). A retried call whose
+// every try timed out connecting holds one - for each, such as "-, -", which the Envoy output answers as it answers a
+// call whose retries were refused, 200 with grpc-status 14 after 10 s with one retry (measured).
 func timeoutAnswer(text string, connect bool) []string {
 	answer := []string{"    location @pf_504 {"}
 	if connect {
 		answer = append(answer, "      error_page 502 = @pf_502$pf_grpc_call;",
-			"      if ($upstream_connect_time ~ "+quoted(`^`+lastTry+`-\z`)+") {", "        return 502;", "      }")
+			"      if ($upstream_connect_time ~ "+quoted(`(?:^| )-\z`)+") {", "        return 502;", "      }")
 	}
 	if text == "" {
 		return append(answer, "      return 504;", "    }")
@@ -338,7 +352,7 @@ func headerLines(v *values, limits model.Limits) []string {
 	return []string{
 		"  max_headers " + counted + ";",
 		"  client_header_buffer_size " + strconv.Itoa(firstHeaderBuffer) + ";",
-		"  large_client_header_buffers " + v.token(headerSizeKey, sizePos, strconv.Itoa(buffers)) + " " +
+		"  large_client_header_buffers " + v.keyToken(headerSizeKey, sizePos, strconv.Itoa(buffers)) + " " +
 			v.token(headerSizeKey, sizePos, strconv.Itoa(rest/buffers)) + ";",
 		`  map "" $pf_header_count { default ` + counted + "; }",
 	}
@@ -405,6 +419,12 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		"}",
 		"http {",
 	)
+	// The map hash is sized before the first map, as nginx builds each map's table when it reads the map.
+	var hashed []string
+	for upstream := range hashedUpstreams(g.Services) {
+		hashed = append(hashed, upstream)
+	}
+	w.lines(mapHashSizes(jumpKeys(routes), groupKeys(&v, g, routes), hashed)...)
 	w.lines(headerLines(&v, g.Limits)...)
 	w.lines(
 		// nginx refuses a request body over 1 MiB by default (the core module page); the Envoy configuration writes no
@@ -457,7 +477,7 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		"  grpc_pass_header Server;",
 	)
 	w.lines(hashSizes(in)...)
-	writeLog(&w, g.Log, tm, g.Auth)
+	writeLog(&w, g.Log, tm, g.Auth, retried(routes))
 	writeTLS(&w, &v, g.TLS)
 	w.lines(
 		"",
@@ -526,15 +546,20 @@ func Generate(in generator.Input) ([]generator.File, error) {
 	writeRouteChoice(&w, routes, asked(g) != nil)
 	once := retryOnce(routes)
 	w.lines(once...)
+	w.lines(retryMaps(&v, g, routes, tm)...)
 	if names := hashNames(&v, g.Services); names != "" {
 		w.lines(names, "  js_set $pf_hash_key pf.hashKey;")
 	}
 	if g.Resolver != nil {
 		w.lines("  " + resolverLine(g.Resolver))
 	}
-	for _, service := range g.Services {
+	for i := range g.Services {
+		service := &g.Services[i]
 		for _, port := range service.Ports {
-			writeUpstream(&w, &v, service, port, tm.upstream, e)
+			writeUpstream(&w, &v, v.keyToken(serviceKey, service.Pos, service.Cluster(port.Protocol)), *service, port, tm.upstream, e)
+			if port.Protocol == model.HTTP {
+				writeGroups(&w, &v, service, routes, port, tm.upstream, e)
+			}
 		}
 	}
 	w.lines("")
@@ -577,7 +602,7 @@ func Generate(in generator.Input) ([]generator.File, error) {
 	w.lines(badRequest("pf_default-bad-request", nil)...)
 	w.lines(upgradeRequired("pf_default-upgrade-required", nil)...)
 	w.lines("  }", "")
-	locations := routeLocations(routes, &v, e)
+	locations := routeLocations(routes, &v, e, tm)
 	grpc := slices.ContainsFunc(routes, func(r route) bool { return r.grpc })
 	for place, environment := range in.Origins.Environments {
 		server, preflight := corsLines(&v, place+1, environment, in.Origins.CORS, e, grpc)
@@ -590,7 +615,13 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		}
 		hosts := make([]string, len(environment.Hosts))
 		for i, host := range environment.Hosts {
-			hosts[i] = v.token(hostsKey, environment.Pos, quoted(host))
+			// server_name's last host is followed by ;, every other by a space.
+			hosts[i] = quoted(host)
+			if i < len(hosts)-1 {
+				v.keyToken(hostsKey, environment.Pos, hosts[i])
+			} else {
+				v.token(hostsKey, environment.Pos, hosts[i])
+			}
 		}
 		// The name is written as it is: a comment ends at the end of its line, and no file proxyfile reads lets a
 		// name hold a line break, because input.CheckedWith refuses every control character but tab.
@@ -668,6 +699,7 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		w.lines(answerLocation("pf_r_no-route", slices.Concat(own, untyped), `return 404 "$pf_empty";`)...)
 		w.WriteString(locations)
 		w.lines(tm.answer...)
+		w.lines(retryAnswers(routes, tm, server)...)
 		// The Envoy output answers a service that failed 502 with no body and no Content-Type, where nginx would send
 		// default_type, text/plain, or the type of the path's extension (measured on nginx 1.30.6 and 1.31.8 beside
 		// Envoy 1.40.2).
@@ -698,8 +730,8 @@ func Generate(in generator.Input) ([]generator.File, error) {
 // time is $time_iso8601, the moment nginx writes the line in whole seconds, where Envoy writes the request's start in
 // milliseconds; bytes_out is $body_bytes_sent, which counts the chunk lines of an answer nginx sends chunked over
 // HTTP/1.1, where Envoy counts the body alone; bytes_in is the whole request, where Envoy counts its body; upstream_ms
-// counts from the opening of the service connection of the try that answered, where Envoy counts from the request's
-// start; and nginx has no response flags or details to write.
+// counts from the opening of the service connection, the last try's for a request nginx tried again (lastTryMaps),
+// where Envoy counts from the request's start; and nginx has no response flags or details to write.
 const requestLogFormat = `'{"bytes_in":$request_length,"bytes_out":$body_bytes_sent,"duration_ms":$pf_log_duration,` +
 	`"host":"$pf_log_host","method":"$request_method","protocol":"$pf_log_protocol","request_id":"$pf_log_request_id",` +
 	`"route":"$pf_log_route","status":$pf_log_code,"time":"$time_iso8601","upstream":"$pf_log_upstream",` +
@@ -720,7 +752,11 @@ const requestLogFormat = `'{"bytes_in":$request_length,"bytes_out":$body_bytes_s
 // a preflight, the check switched off (measured on Envoy 1.40.2). escape=json escapes a quote a variable holds, so the
 // line is written by one of two formats, by whether the handler set $pf_authz_us. A request that went on with the
 // unchecked mark writes a third line, gateway_auth_unavailable, with the Envoy output's fields; with deny none does.
-func writeLog(w *writer, log *model.Log, tm timers, auth *model.Auth) {
+//
+// Each line reads a request's last try, as the Envoy output logs the try that answered (lastTryMaps). With
+// retriedRoute, a file with a retried plain route, the upstream-failure line writes the flags retryFlags gives, which
+// read retry maps that only such a file declares, as nginx refuses a file that names a variable it does not declare.
+func writeLog(w *writer, log *model.Log, tm timers, auth *model.Auth, retriedRoute bool) {
 	// A request id or Host holding a byte above 0x7F is logged empty, so every line stays UTF-8; nginx logs the
 	// requests it refuses too, Host and all.
 	aboveASCII := regexKey(`[\x80-\xFF]`) + ` "";`
@@ -728,8 +764,11 @@ func writeLog(w *writer, log *model.Log, tm timers, auth *model.Auth) {
 		"  map $pf_request_id $pf_log_request_id { "+aboveASCII+" default $pf_request_id; }",
 		"  map $pf_authority $pf_log_host { "+aboveASCII+" default $pf_authority; }",
 		"  map $server_protocol $pf_log_protocol { HTTP/2.0 HTTP/2; default $server_protocol; }",
-		milliseconds("$request_time", "", "$pf_log_duration", "pf_log_d", "0"),
-		milliseconds("$upstream_header_time", lastTry, "$pf_log_upstream_ms", "pf_log_u", "null"),
+		milliseconds("$request_time", "$pf_log_duration", "pf_log_d", "0"),
+	)
+	w.lines(lastTryMaps()...)
+	w.lines(
+		milliseconds("$pf_last_header", "$pf_log_upstream_ms", "pf_log_u", "null"),
 		// $status has three digits, so nginx writes 009 for an answer it reads with no status line, which Envoy logs
 		// as the status the service wrote (2000) or 502, and 000 for an HTTP/2 stream a client cut in its headers,
 		// which Envoy logs 0 (measured on Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8); a JSON number has no leading
@@ -757,10 +796,10 @@ func writeLog(w *writer, log *model.Log, tm timers, auth *model.Auth) {
 		// Envoy flags it UPE, while one whose body matches completes and Envoy flags nothing (measured on Envoy
 		// 1.40.2 beside nginx 1.30.6 and 1.31.8). $pf_log_upstream ends in _grpc for a gRPC port alone, as a service's
 		// name holds no _.
-		`  map "$request_method:$upstream_status:$upstream_response_length:$upstream_http_content_length:$request_completion:$pf_log_upstream" $pf_log_cut { ` +
-			regexKey(`^HEAD:`) + ` ""; ` + regexKey(`^[A-Z]+:`+lastTry+`(?:1[0-9][0-9]|204|304):`) + ` ""; ` +
-			regexKey(`^[A-Z]+:`+lastTry+`[0-9]+:[^:]*:[0-9]+::[^:]*_grpc\z`) + ` UPE; ` + regexKey(`_grpc\z`) + ` ""; ` +
-			regexKey(`^[A-Z]+:`+lastTry+`[0-9]+:`+lastTry+`(?<pf_log_got>[0-9]+):(?!\k<pf_log_got>:)[0-9]+:`) + ` UPE; default ""; }`,
+		`  map "$request_method:$pf_last_status:$pf_last_length:$upstream_http_content_length:$request_completion:$pf_log_upstream" $pf_log_cut { ` +
+			regexKey(`^HEAD:`) + ` ""; ` + regexKey(`^[A-Z]+:(?:1[0-9][0-9]|204|304):`) + ` ""; ` +
+			regexKey(`^[A-Z]+:[0-9]+:[^:]*:[0-9]+::[^:]*_grpc\z`) + ` UPE; ` + regexKey(`_grpc\z`) + ` ""; ` +
+			regexKey(`^[A-Z]+:[0-9]+:(?<pf_log_got>[0-9]+):(?!\k<pf_log_got>:)[0-9]+:`) + ` UPE; default ""; }`,
 	)
 	condition := ""
 	if log != nil && log.SamplePercent < 100 {
@@ -768,8 +807,8 @@ func writeLog(w *writer, log *model.Log, tm timers, auth *model.Auth) {
 			// 009 is an answer nginx read with no status line, which the Envoy output logs whatever status_from says: one
 			// whose status has four digits as its status, and one with no status line as the 502 it flags UPE.
 			"  map $status $pf_log_status { "+regexKey(`^(?:`+statusesFrom(log.StatusFrom)+`|009)\z`)+" 1; default 0; }",
-			`  map "$upstream_header_time:$status:$pf_log_cut" $pf_log_flagged { `+regexKey(`:UPE\z`)+" 1; "+
-				regexKey(`^`+lastTry+`[0-9][^:,]*:(?!499:)`)+" 0; "+regexKey(`^:(?:200|403):`)+" 0; default 1; }",
+			`  map "$pf_last_header:$status:$pf_log_cut" $pf_log_flagged { `+regexKey(`:UPE\z`)+" 1; "+
+				regexKey(`^[0-9][^:]*:(?!499:)`)+" 0; "+regexKey(`^:(?:200|403):`)+" 0; default 1; }",
 		)
 		reads := []string{"$pf_log_status", "$pf_log_flagged"}
 		if log.SamplePercent > 0 {
@@ -808,28 +847,32 @@ func writeLog(w *writer, log *model.Log, tm timers, auth *model.Auth) {
 	// connection closed with nothing sent UC (measured on Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8). A call to a
 	// retried RPC route whose last try was refused is flagged URX,UF, the flag of a call retries ran out on, as the
 	// Envoy output flagged one at a service of one backend and one at a service of two (measured on Envoy 1.40.2): the
-	// route's locations set $pf_log_retried (writeLocation). Each key reads the try that answered (lastTry).
-	failures := []string{regexKey(`:UPE:`) + " UPE;", regexKey(`^1:`+lastTry+`502:`+lastTry+`-:`) + " URX,UF;",
-		regexKey(`^[01]:`+lastTry+`502:`+lastTry+`-:`) + " UF;",
-		regexKey(`^[01]:`+lastTry+`502:`+lastTry+`[0-9][^:,]*:`+lastTry+`-::`+lastTry+`0\z`) + " UC;",
-		regexKey(`^[01]:`+lastTry+`502:`+lastTry+`[0-9][^:,]*:`+lastTry+`-:`) + " UPE;"}
+	// route's locations set $pf_log_retried (writeLocation). Each key reads the last try (lastTryMaps).
+	failures := []string{regexKey(`:UPE:`) + " UPE;", regexKey(`^1:502:-:`) + " URX,UF;", regexKey(`^[01]:502:-:`) + " UF;",
+		regexKey(`^[01]:502:[0-9][^:]*:-::0\z`) + " UC;", regexKey(`^[01]:502:[0-9][^:]*:-:`) + " UPE;"}
 	if tm.connectFlag != "" {
 		// A retried call whose last try timed out connecting is flagged as one whose last try was refused: Envoy
 		// counts both as a connection failure (measured on Envoy 1.40.2, URX,UF after two tries of 5 s).
-		failures = append(failures, regexKey(`^1:`+lastTry+`504:`+lastTry+`-:`)+" URX,"+tm.connectFlag+";",
-			regexKey(`^[01]:`+lastTry+`504:`+lastTry+`-:`)+" "+tm.connectFlag+";")
+		failures = append(failures, regexKey(`^1:504:-:`)+" URX,"+tm.connectFlag+";", regexKey(`^[01]:504:-:`)+" "+tm.connectFlag+";")
 	}
 	if tm.readFlag != "" {
-		failures = append(failures, regexKey(`^[01]:`+lastTry+`504:`+lastTry+`[0-9][^:,]*:`+lastTry+`-:`)+" "+tm.readFlag+";")
+		failures = append(failures, regexKey(`^[01]:504:[0-9][^:]*:-:`)+" "+tm.readFlag+";")
+	}
+	flags := "$pf_log_failure"
+	if retriedRoute {
+		flags = "$pf_log_flags"
 	}
 	w.lines(
-		`  log_format pf_upstream_failure escape=json '{"event":"gateway_upstream_failure","flags":"$pf_log_failure",`+
+		`  log_format pf_upstream_failure escape=json '{"event":"gateway_upstream_failure","flags":"`+flags+`",`+
 			`"route":"$pf_log_route","status":$pf_log_code,"upstream":"$pf_log_upstream"}';`,
 		`  map "" $pf_log_retried { default 0; }`,
-		`  map "$pf_log_retried:$upstream_status:$upstream_connect_time:$upstream_header_time:$pf_log_cut:$upstream_bytes_received" $pf_log_failure { `+
+		`  map "$pf_log_retried:$pf_last_status:$pf_last_connect:$pf_last_header:$pf_log_cut:$pf_last_received" $pf_log_failure { `+
 			strings.Join(failures, " ")+` default ""; }`,
-		"  access_log /dev/stdout pf_upstream_failure if=$pf_log_failure;",
 	)
+	if retriedRoute {
+		w.lines(retryFlags(tm)...)
+	}
+	w.lines("  access_log /dev/stdout pf_upstream_failure if=" + flags + ";")
 	if checked {
 		w.lines(
 			`  log_format pf_auth_unavailable escape=json '{"action":"$pf_action","event":"gateway_auth_unavailable",`+
@@ -839,10 +882,20 @@ func writeLog(w *writer, log *model.Log, tm timers, auth *model.Auth) {
 	}
 }
 
-// lastTry is what a log map's key reads before the last value of an $upstream_ variable: nginx writes one value for
-// each try of a request it tried again, joined by ", " (the upstream module page), and the Envoy output logs the try
-// that answered. No value holds a colon, which ends each part of a key.
-const lastTry = `(?:[^:]*, )?`
+// lastTryMaps are the maps of the last try's value of each $upstream_ variable the request log reads, as the Envoy
+// output logs the try that answered: nginx writes one value for each try of a request it tried again, joined by ", "
+// within an upstream and by " : " across the locations a retried route's request goes through (the upstream module
+// page), and no value holds a space. The maps share one capture, as nginx sets it on each match and a map reads it
+// for its own value at once.
+func lastTryMaps() []string {
+	var lines []string
+	for _, v := range []struct{ source, name string }{
+		{"status", "status"}, {"connect_time", "connect"}, {"header_time", "header"}, {"bytes_received", "received"}, {"response_length", "length"},
+	} {
+		lines = append(lines, "  map $upstream_"+v.source+" $pf_last_"+v.name+" { "+regexKey(`(?:^| )(?<pf_l1>[^ ]+)\z`)+` $pf_l1; default ""; }`)
+	}
+	return lines
+}
 
 // withAuthz is the request log line with authz_us written as authz, its first key as Envoy sorts them.
 func withAuthz(authz string) string {
@@ -850,13 +903,12 @@ func withAuthz(authz string) string {
 }
 
 // milliseconds is the map that writes source, nginx's seconds with three decimals, as Envoy writes a time: whole
-// milliseconds with no leading zero. before is what the key reads before the time, lastTry for a source that holds one
-// for each try. captures names the map's named captures, and none, the value of a source in another form, - or empty
-// when no service answered.
-func milliseconds(source, before, variable, captures, none string) string {
+// milliseconds with no leading zero. captures names the map's named captures, and none, the value of a source in
+// another form, - or empty when no service answered.
+func milliseconds(source, variable, captures, none string) string {
 	first, seconds, thousandths := captures+"1", captures+"2", captures+"3"
-	return "  map " + source + " " + variable + " { " + regexKey(`^`+before+`0\.0*(?<`+first+`>[0-9]+)\z`) + " $" + first + "; " +
-		regexKey(`^`+before+`(?<`+seconds+`>[0-9]+)\.(?<`+thousandths+`>[0-9]{3})\z`) + " $" + seconds + "$" + thousandths + "; default " + none + "; }"
+	return "  map " + source + " " + variable + " { " + regexKey(`^0\.0*(?<`+first+`>[0-9]+)\z`) + " $" + first + "; " +
+		regexKey(`^(?<`+seconds+`>[0-9]+)\.(?<`+thousandths+`>[0-9]{3})\z`) + " $" + seconds + "$" + thousandths + "; default " + none + "; }"
 }
 
 // statusesFrom is a regular expression of every status of three digits from status to 999, as the Envoy output logs
@@ -1335,7 +1387,7 @@ func routesOf(in generator.Input, v *values) ([]route, error) {
 				if q, ok := questions[method.Path()]; ok && checked {
 					r.questions = questionLines(v, q, method.Pos)
 				}
-				r.key = v.token("rpc.methods", method.Pos, regexKey("^"+regexp.QuoteMeta(method.Path())+`\z`))
+				r.key = v.keyToken("rpc.methods", method.Pos, regexKey("^"+regexp.QuoteMeta(method.Path())+`\z`))
 				// The model keeps no position of the name, so the refusal names the rpc entry's to.
 				r.name = v.token("routes[].rpc.to.<package pattern>.name", entry.RPC.ToPos, quoted(method.Name))
 				r.limit, r.bucket, r.retries = limit, number, entry.RPC.Retries
@@ -1351,11 +1403,12 @@ func routesOf(in generator.Input, v *values) ([]route, error) {
 		if err != nil {
 			return nil, err
 		}
-		r.key = v.token(matchKey(entry), entry.Value.Pos, regexKey(written))
+		r.key = v.keyToken(matchKey(entry), entry.Value.Pos, regexKey(written))
 		if entry.Method != "" {
-			r.method = v.token("routes[].method", entry.Pos, regexKey(`^1:`+regexp.QuoteMeta(entry.Method)+`\z`))
+			r.method = v.keyToken("routes[].method", entry.Pos, regexKey(`^1:`+regexp.QuoteMeta(entry.Method)+`\z`))
 		}
 		r.rewrite = rewriteLine(v, entry)
+		r.jumps = retryJumps(r.service, entry.Retries)
 		r.name = v.token("routes[].name", entry.Name.Pos, quoted(entry.Name.Value))
 		r.checked = checked
 		r.limit, r.bucket = limit, number
@@ -1389,7 +1442,7 @@ func toService(v *values, service *model.Service, protocol model.Protocol, what 
 	}
 	cluster := service.Cluster(protocol)
 	return route{pass: v.token(serviceKey, service.Pos, scheme+cluster), grpc: protocol == model.GRPC, host: host,
-		upstream: v.token(serviceKey, service.Pos, quoted(cluster))}, nil
+		upstream: v.token(serviceKey, service.Pos, quoted(cluster)), service: service, jumps: -1}, nil
 }
 
 // serviceKey and hostsKey are the keys of a service's name, which its upstreams are named by, and of an
@@ -1444,8 +1497,8 @@ func rewriteLine(v *values, r *model.Route) string {
 		return ""
 	}
 	replacement := dollars(r.Rewrite.Value) + "$1"
-	return "rewrite " + v.token(matchKey(r), r.Value.Pos, quoted("^"+regexp.QuoteMeta(r.Value.Value)+`((?s).*)\z`)) + " " +
-		v.token("routes[].rewrite", r.Rewrite.Pos, quoted(replacement)) + " break;"
+	return "rewrite " + v.keyToken(matchKey(r), r.Value.Pos, quoted("^"+regexp.QuoteMeta(r.Value.Value)+`((?s).*)\z`)) + " " +
+		v.keyToken("routes[].rewrite", r.Rewrite.Pos, quoted(replacement)) + " break;"
 }
 
 // dollars is text with each $ written ${pf_dollar}: nginx reads a $ in a rewrite, an add_header value and a map's
@@ -1584,7 +1637,7 @@ func writeOriginCheck(w *writer, v *values, n int, environment origins.Environme
 		keys = regexKey(",") + " 1; "
 	}
 	for _, host := range environment.Hosts {
-		keys += v.token(hostsKey, environment.Pos, regexKey(strings.TrimSuffix(origins.SameOriginRegex(host), "$")+`\z`)) + " 0; "
+		keys += v.keyToken(hostsKey, environment.Pos, regexKey(strings.TrimSuffix(origins.SameOriginRegex(host), "$")+`\z`)) + " 0; "
 	}
 	if long := longOriginKey(v, environment); long != "" {
 		keys += long + " 1; "
@@ -1612,7 +1665,7 @@ func longOriginKey(v *values, environment origins.Environment) string {
 	if len(environment.Patterns) == 0 {
 		return ""
 	}
-	return v.token("origins.<environment name>.patterns", environment.Pos, regexKey(fmt.Sprintf(`(?s)\A.{%d}`, longestMatchedOrigin+1)))
+	return v.keyToken("origins.<environment name>.patterns", environment.Pos, regexKey(fmt.Sprintf(`(?s)\A.{%d}`, longestMatchedOrigin+1)))
 }
 
 // listKeys are the map keys of the environment's lists: an exact origin compared ignoring case, as the Envoy output
@@ -1624,10 +1677,10 @@ func longOriginKey(v *values, environment origins.Environment) string {
 func listKeys(v *values, environment origins.Environment) []string {
 	var keys []string
 	for _, origin := range environment.Origins {
-		keys = append(keys, v.token("origins.<environment name>.origins", environment.Pos, quoted("~*^"+regexp.QuoteMeta(origin)+`\z`)))
+		keys = append(keys, v.keyToken("origins.<environment name>.origins", environment.Pos, quoted("~*^"+regexp.QuoteMeta(origin)+`\z`)))
 	}
 	for _, pattern := range environment.Patterns {
-		keys = append(keys, v.token("origins.<environment name>.patterns", environment.Pos,
+		keys = append(keys, v.keyToken("origins.<environment name>.patterns", environment.Pos,
 			regexKey(strings.TrimSuffix(origins.PatternPCRE(pattern), "$")+`\z`)))
 	}
 	return keys
@@ -1666,7 +1719,7 @@ func writeCORSMaps(w *writer, v *values, n int, environment origins.Environment,
 	)
 	if cors.ExposeHeaders != "" {
 		w.lines(fmt.Sprintf(`  map $pf_cors%d $pf_aceh%d { 1 %s; default $upstream_http_access_control_expose_headers; }`, n, n,
-			corsValue(v, "cors.expose_headers", cors, cors.ExposeHeaders)))
+			v.token("cors.expose_headers", cors.KeyPos["cors.expose_headers"], corsValue(cors.ExposeHeaders))))
 	}
 }
 
@@ -1710,7 +1763,8 @@ func corsLines(v *values, n int, environment origins.Environment, cors origins.C
 		if value == "*" {
 			return mapSource(e.read(asked))
 		}
-		return corsValue(v, key, cors, value)
+		// The value is followed by always.
+		return v.keyToken(key, cors.KeyPos[key], corsValue(value))
 	}
 	if cors.AllowMethods != "" {
 		answer = append(answer, "      add_header Access-Control-Allow-Methods "+
@@ -1722,7 +1776,7 @@ func corsLines(v *values, n int, environment origins.Environment, cors origins.C
 	}
 	if cors.MaxAge != "" {
 		// The format takes digits alone for max_age.
-		answer = append(answer, "      add_header Access-Control-Max-Age "+v.token("cors.max_age", cors.KeyPos["cors.max_age"], cors.MaxAge)+" always;")
+		answer = append(answer, "      add_header Access-Control-Max-Age "+v.keyToken("cors.max_age", cors.KeyPos["cors.max_age"], cors.MaxAge)+" always;")
 	}
 	if list && expose {
 		answer = append(answer, fmt.Sprintf("      add_header Access-Control-Expose-Headers $pf_aceh%d always;", n))
@@ -1733,10 +1787,10 @@ func corsLines(v *values, n int, environment origins.Environment, cors origins.C
 	return server, preflight
 }
 
-// corsValue is a cors value as nginx reads it back, in quotes with each $ written ${pf_dollar}, refused at its own
-// key when its form is longer than nginx reads.
-func corsValue(v *values, key string, cors origins.CORS, value string) string {
-	return v.token(key, cors.KeyPos[key], quoted(dollars(value)))
+// corsValue is a cors value as nginx reads it back, in quotes with each $ written ${pf_dollar}, which its caller
+// refuses at its own key when its form is longer than nginx reads.
+func corsValue(value string) string {
+	return quoted(dollars(value))
 }
 
 // untyped are the lines of a location whose answer carries no Content-Type, as the Envoy output's empty answers carry
@@ -1794,8 +1848,14 @@ func answerLocation(name string, headers []string, answer string) []string {
 // one; nginx sends content-length: 0 and its Server header besides, as it does on a service's own answer with no
 // message.
 func grpcUnavailable(cors []string) []string {
-	return slices.Concat([]string{"    location @pf_502-grpc {", "      default_type application/grpc;"}, serverHeaders(cors),
-		[]string{"      add_header grpc-status 14 always;", `      return 200 "$pf_empty";`, "    }"})
+	return grpcAnswer("pf_502-grpc", cors)
+}
+
+// grpcAnswer is the named location name, which answers a gRPC call 200 with grpc-status 14, UNAVAILABLE, and the
+// lines given after it, as grpcUnavailable's answer.
+func grpcAnswer(name string, cors []string, lines ...string) []string {
+	return slices.Concat([]string{"    location @" + name + " {", "      default_type application/grpc;"}, serverHeaders(cors),
+		[]string{"      add_header grpc-status 14 always;"}, lines, []string{`      return 200 "$pf_empty";`, "    }"})
 }
 
 // tlsCiphers are the TLS 1.2 ciphers the Envoy output offers, Envoy's default list (measured on Envoy 1.40.2: with an
@@ -1851,21 +1911,37 @@ func tlsServerLines(tls *model.TLS, headers []string) []string {
 
 // routeLocations is the named locations of each route, the same in every environment (writeRouteChoice): one that
 // sends the target as written and one that sends $uri for a route with no rewrite, and one with the rewrite for a route
-// with one. A retried RPC route also has a copy of each that tries once, -once, for a call that is not a POST
-// (retryOnce); an RPC route has no rewrite.
-func routeLocations(routes []route, v *values, e edge) string {
+// with one. A retried route also has a copy of each that tries once, -once, for a call that is not a POST or a request
+// whose body its headers do not bound (retryOnce); an RPC route has no rewrite. A retried plain route's location is
+// followed by its copies, which take the tries after the first (retryCopies): each passes the path the route location
+// set, so it holds no rewrite of the route's, and a -uri copy keeps the -uri rewrite, which gives the same path again
+// (measured on nginx 1.30.6 and 1.31.8).
+func routeLocations(routes []route, v *values, e edge, tm timers) string {
 	var w writer
 	for i, r := range routes {
 		name := fmt.Sprintf("@pf_r_%d", i+1)
+		locations := []struct{ suffix, path string }{{"", ""}, {"-uri", keepPath}}
 		if r.rewrite != "" {
-			writeLocation(&w, v, name, r.rewrite, r, e)
-			continue
+			locations = []struct{ suffix, path string }{{"", r.rewrite}}
 		}
 		once := r
 		once.tryOnce = true
-		for _, location := range []struct{ suffix, path string }{{"", ""}, {"-uri", keepPath}} {
-			writeLocation(&w, v, name+location.suffix, location.path, r, e)
-			if r.retries > 0 {
+		located := r
+		if r.jumps >= 0 {
+			located.timers = retryTimers(tm)
+		}
+		for _, location := range locations {
+			writeLocation(&w, v, name+location.suffix, location.path, located, e)
+			path := location.path
+			if path == r.rewrite {
+				path = ""
+			}
+			for _, c := range retryCopies(r, tm) {
+				copied := r
+				copied.retry, copied.timers = &c, c.timers
+				writeLocation(&w, v, name+location.suffix+c.suffix, path, copied, e)
+			}
+			if r.retries > 0 || r.jumps >= 0 {
 				writeLocation(&w, v, name+location.suffix+"-once", location.path, once, e)
 			}
 		}
@@ -1885,7 +1961,10 @@ func routeLocations(routes []route, v *values, e edge) string {
 // them empty, where the Envoy output logs them null. On a checked route the handler runs in the access phase, after
 // the rewrite and before the request is passed on, and the location sets each accepted name and the unchecked mark
 // from it; no line of the location answers before it. A limited route's location charges its bucket (limitLines),
-// and a retried RPC route's tries a call on the next backend (retryLines).
+// and a retried RPC route's tries a call on the next backend (retryLines). A retried plain route's location reads the
+// request's body whole and sends nginx's 502 and 504 to the target the retry maps pick (retryMaps); its copy, which
+// takes a request the location has charged and checked, charges and asks nothing again, and sets the accepted names
+// and the mark from what the handler set, which a jump keeps (measured on nginx 1.30.6 and 1.31.8).
 func writeLocation(w *writer, v *values, name, path string, r route, e edge) {
 	w.lines(
 		"    location "+name+" {",
@@ -1897,14 +1976,16 @@ func writeLocation(w *writer, v *values, name, path string, r route, e edge) {
 		// too: Envoy retried a PUT call refused at connect URX,UF (measured on Envoy 1.40.2).
 		w.lines("      set $pf_log_retried 1;")
 	}
-	if r.limit != nil {
-		w.lines(limitLines(r.limit, r.bucket, e)...)
+	if r.retry == nil {
+		if r.limit != nil {
+			w.lines(limitLines(r.limit, r.bucket, e)...)
+		}
+		w.lines(r.questions...)
 	}
-	w.lines(r.questions...)
 	if path != "" {
 		w.lines("      " + path)
 	}
-	if r.checked {
+	if r.checked && r.retry == nil {
 		w.lines(handlerLines...)
 	}
 	h := locationHeaders{w: w, set: "proxy_set_header", sent: map[string]bool{}}
@@ -1927,12 +2008,22 @@ func writeLocation(w *writer, v *values, name, path string, r route, e edge) {
 	}
 	h.fromClients(v, e)
 	h.done(v)
-	if r.grpc {
+	switch {
+	case r.grpc:
 		if r.retries > 0 && !r.tryOnce {
 			w.lines(retryLines(r.retries)...)
 		}
 		w.lines("      grpc_pass " + r.pass + ";")
-	} else {
+	case r.jumps >= 0 && !r.tryOnce:
+		w.lines(r.timers...)
+		w.lines(bodyLines...)
+		pass := r.pass
+		if r.retry != nil {
+			pass = "http://$pf_rt_group"
+		}
+		w.lines("      proxy_pass "+pass+";", "      error_page 502 504 = @pf_$pf_rt_target;", "    }")
+		return
+	default:
 		w.lines("      proxy_pass " + r.pass + ";")
 	}
 	w.lines(
@@ -1962,24 +2053,35 @@ type values struct {
 }
 
 // token returns written, the nginx form of a value of key at pos, and keeps the value's refusal when nginx would not
-// read written from its file.
+// read written from its file. A value the file writes with a space or a line break after it goes through keyToken.
 func (v *values) token(key string, pos model.Pos, written string) string {
 	if overLong(written) != 0 {
 		v.Refuse(pos, key, "whose nginx form is longer than nginx reads", "nginx",
-			"nginx reads no value longer than 4094 bytes between its quotes, or 4095 bytes without them; write a value whose nginx form is at most 4094 bytes, or render it for envoy")
+			"nginx reads no value longer than 4094 bytes between its quotes, or 4095 bytes without them, and one byte less "+
+				"where a space follows it, as after a map's key; write a value whose nginx form is at most 4093 bytes, or render it for envoy")
 	}
 	return written
 }
 
+// keyToken is token for a value the file writes with a space or a line break after it, such as a map's key, an
+// upstream's name, a header's name or a directive's first value, which nginx reads with that byte (longestToken).
+func (v *values) keyToken(key string, pos model.Pos, written string) string {
+	v.token(key, pos, written+" ")
+	return written
+}
+
 // longestToken is the most bytes nginx reads from its file for one token with the byte that ends it, the size of its
-// buffer for a file (NGX_CONF_BUFFER, 4096): a value of 4094 bytes between its quotes, a word of 4095 bytes before a
-// space or ;, and a comment of 4095 bytes from its # before the end of its line (measured with nginx -t on nginx
-// 1.30.6 and 1.31.8, which refuses a longer one with "too long parameter").
+// buffer for a file (NGX_CONF_BUFFER, 4096): a value of 4094 bytes between its quotes and a word of 4095 bytes before
+// ;, and a comment of 4095 bytes from its # before the end of its line. A space or a line break after a token is read
+// with it, so a token one follows, such as a map's key, is one byte shorter: 4093 bytes between quotes, a word of
+// 4094 (measured with nginx -t on nginx 1.30.6 and 1.31.8, wherever the token met the buffer's end, which refuses a
+// longer one with "too long parameter").
 const longestToken = 4096
 
 // overLong returns the line of the first token in text that nginx would not read, or 0: a value in double or single
 // quotes counted from its opening quote to its closing one, a word up to the space, ;, { or } after it, and a comment
-// from its # to the end of its line, each as text writes it, a backslash included.
+// from its # to the end of its line, each as text writes it, a backslash included, and a value or a word with the
+// space or line break after it.
 func overLong(text string) int {
 	line := 1
 	for i := 0; i < len(text); {
@@ -2014,6 +2116,10 @@ func overLong(text string) int {
 		length := end - start
 		if text[start] != '"' && text[start] != '\'' {
 			// A word or a comment is read with the byte that ends it.
+			length++
+		}
+		if text[start] != '#' && end < len(text) && strings.IndexByte(" \t\r\n", text[end]) >= 0 {
+			// The space or line break after a value or a word is read with it (longestToken).
 			length++
 		}
 		if length > longestToken {

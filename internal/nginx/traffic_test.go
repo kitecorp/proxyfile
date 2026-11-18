@@ -3,7 +3,9 @@ package nginx
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -419,5 +421,45 @@ func TestRetriedCallsArePostOnly(t *testing.T) {
 	}
 	if line := "      error_page 418 = @pf_r_$pf_route;"; !slices.Contains(namedLocation(once, "/"), line) {
 		t.Errorf("location / is %q, want %q in it", namedLocation(once, "/"), line)
+	}
+}
+
+// manyCalls is a file whose rpc entry, retried once, has methods methods to one service of two backends, each its own
+// route, numbered from 1 in the written order.
+func manyCalls(methods int) string {
+	text := "listen: 8000\nservices:\n  shop: {grpc: 8081, addresses: [\"10.0.1.11\", \"10.0.1.12\"]}\norigins:\n  local: {hosts: [localhost]}\n" +
+		"routes:\n  - rpc: {to: {\"*\": shop}, retries: 1}\nrpc:\n  methods:\n"
+	for n := 1; n <= methods; n++ {
+		text += fmt.Sprintf("    - {service: example.shop.v1.S, method: M%d}\n", n)
+	}
+	return text
+}
+
+// TestManyRetriedCalls: the key that sends a retried call that is not a POST to -once names its routes in pieces of
+// groupSize, each its own key, in the routes' order, so a file of any count of retried methods writes keys nginx
+// reads: one key of 1,100 routes is 4,419 bytes, past the 4,093 nginx reads before a space. A file of few
+// methods keeps one key.
+func TestManyRetriedCalls(t *testing.T) {
+	for _, c := range []struct {
+		methods, keys int
+	}{{3, 1}, {64, 1}, {65, 2}, {1100, 18}, {4096, 64}} {
+		out := configOf(t, manyCalls(c.methods))
+		line := regexp.MustCompile(`(?m)^  map "\$pf_route:\$request_method" \$pf_rt_once \{ (.*) default ""; \}$`).FindStringSubmatch(out)
+		if line == nil {
+			t.Fatalf("%d methods: no map sets $pf_rt_once from the route and the method", c.methods)
+		}
+		keys := regexp.MustCompile(`"~\^\(\?:([0-9|]+)\)\(\?:-uri\)\?:\(\?!POST\\\\z\)" -once;`).FindAllStringSubmatch(line[1], -1)
+		var routes []string
+		for _, key := range keys {
+			piece := strings.Split(key[1], "|")
+			if len(piece) > 64 {
+				t.Errorf("%d methods: a key names %d routes, want at most 64", c.methods, len(piece))
+			}
+			routes = append(routes, piece...)
+		}
+		if len(keys) != c.keys || len(routes) != c.methods || routes[0] != "1" || routes[len(routes)-1] != strconv.Itoa(c.methods) {
+			t.Errorf("%d methods: %d keys naming %d routes from %q to %q, want %d keys naming routes 1 to %d", c.methods, len(keys),
+				len(routes), routes[0], routes[len(routes)-1], c.keys, c.methods)
+		}
 	}
 }

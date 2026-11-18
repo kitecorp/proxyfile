@@ -24,27 +24,12 @@ Envoy reads it, with `hash.header` it reads the lines of the hashed header, and 
 answer a request over the limit gets ([Rate limits](#rate-limits), [Backends: balance, hash and DNS
 names](#backends-balance-hash-and-dns-names)).
 
-This version writes routing, CORS with the origin lists, the client's address, header removal, TLS, the header limits,
-the two idle times, the admin port's paths, the request log, the auth check, rate limits, RPC retries, balance, hash and
-services found by DNS name: the listener, the admin port with `/ready`, `/stats` and `/server_info`, `tls` with the
-clients CA, `client_address`, `limits.request_headers`, `timeouts.idle` and `timeouts.upstream_idle`, `log`, `auth` with
-`ask`, `timeout`, `enabled`, `when_unavailable`, `only_with_header`, `send`, `accept` and `send_request`, a route's
-`auth: off` and an rpc method's `action` and `reports`, the services with their HTTP and gRPC ports, their addresses (IP
-addresses with no zone, or a DNS name with `dns.resolver`), `balance`, `hash` and `host_header`, `dns`,
-`remove_from_clients` by name, `cors`, each environment's hosts (none that starts or ends with a dot) with its origins
-and patterns and the refusal of a browser origin on none of them, the routes by prefix and path (any character but `%`,
-one Envoy escapes before it picks a route, `"` `<` `>` `^` `` ` `` `{` `|` `}`, and one outside ASCII), pattern and
-method with their rewrites, `rate_limit` and `retries: 0`, and the rpc entry with its methods, its `rate_limit` and its
-`retries`. It refuses every other core key a file writes, naming the key where it is written, so a file that needs one
-is never rendered as if the key were not there: `limits.connections` is one, `timeouts.request` with a time is another
-([What nginx writes with no key](#what-nginx-writes-with-no-key) and [The timeouts](#the-timeouts) say why), and
-`auth.jwt` is a third, because nginx open source has no token verification. It refuses four forms of the keys above in
-the same way: a route's `retries` of 1 or more ([Retries](#retries)), a rate that makes no whole number of requests a
-second or a minute ([Rate limits](#rate-limits)), a DNS name with no `dns.resolver` and `hash` on the check's service
-([Backends: balance, hash and DNS names](#backends-balance-hash-and-dns-names)). It also refuses, by its key, a value
-whose nginx form is longer than nginx reads: 4094 bytes between quotes, or 4095 without them (measured on nginx 1.30.6
-and 1.31.8). nginx's column in [Portability](portability.md#support-by-proxy-from-the-generators) says how it writes
-each key and, for a key it refuses, what to write instead.
+nginx's column in the generated table on [Portability](portability.md#support-by-proxy-from-the-generators) says how
+this version writes each key and, for a key it refuses, what to write instead. A key it does not write for nginx, or a
+value of a form it does not write, is refused at render by the key's name where the file writes it, so a file that needs
+one is never rendered as if the key were not there. A value is refused in the same way, by its key, when its nginx form
+is longer than nginx reads: 4094 bytes between quotes, or 4095 without them, and one byte less where a space follows the
+value, as after a map's key or a header's name (measured on nginx 1.30.6 and 1.31.8).
 
 ## The path a route is matched on
 
@@ -411,11 +396,22 @@ same body from either proxy:
   2.00 s.
 - A request body that stops for longer than `idle` is ended with no answer, where the Envoy output answers `408`.
 
+A service that takes the connection and does not read the request's body: a retried route's location, which reads a
+body of at most 1 MiB whole before its first try, writes its own `proxy_send_timeout`, the read time, and each of its
+copies the time left, so a `PUT` of 1 MiB to such a service is answered `504` after 15.0 s by the Envoy output and by
+both nginx versions, to a service that reads one byte every 20 s as well, and through a retried route of three
+backends whose first two took no connection (three runs of each, 15.0 to 15.1 s). A location that streams the body,
+a route's with no retries or the copy of a retried route that tries once, sends it with the send time of the table;
+what that answers, and the line tried in its place, is in [the list
+below](#where-nginx-is-less-strict-than-the-envoy-output). A client that stops its body for 20 s while the service
+reads is served by all three.
+
 `timeouts.request` with a time is refused for nginx. Its time limits count the time between two reads or two writes, so
 no directive holds a time for a whole request; write `timeouts.request: none`, or render the file for Envoy. Without the
 key nginx answers `504` to a service silent for 15 s after the request, as the Envoy output does, and with `none` it
 ends a request after 5 minutes with nothing read or written, as Envoy does. An answer that keeps arriving runs past the
-15 s at which Envoy ends a request, a difference in [the list below](#where-nginx-is-less-strict-than-the-envoy-output).
+15 s at which Envoy ends a request, and so does a request body its service keeps reading slowly, on a retried route
+too: differences in [the list below](#where-nginx-is-less-strict-than-the-envoy-output).
 What nginx answers when the connect time passes is in [What nginx writes with no
 key](#what-nginx-writes-with-no-key).
 
@@ -508,15 +504,160 @@ both. A call whose method is not `POST`, such as a `GET` or a `PUT` with gRPC's 
 copy of its route's location without those two lines, because nginx sent such a call again after the service had read
 it. nginx declares two differences on `routes[].rpc.retries` in these words: a call whose method is not POST is not
 tried again; a service with one backend is not tried again, where the Envoy output tries the same backend. A third is
-on [the list of ways nginx is less strict](#where-nginx-is-less-strict-than-the-envoy-output): a retried call is sent
-again at once and with no limit on retries at the same time.
+on [the list of ways nginx is less strict](#where-nginx-is-less-strict-than-the-envoy-output): a retried request or
+call is sent again at once and with no limit on retries at the same time.
 
-A route's `retries` is written for `0` alone, as `proxy_next_upstream off`, which every file writes in its `http`
-block, so each request is tried once, as the Envoy output tries it. `routes[].retries` of 1 or more is refused by
-`--target nginx`: nginx sends a request again after a service read it when its method is not POST, LOCK or PATCH; write
-retries: 0, or render it for envoy. Measured with one of two backends resetting or closing the connection after it read
-a `GET` or a `PUT`: the Envoy output delivered each request once and answered `502`, where nginx with
-`proxy_next_upstream error timeout` delivered it twice.
+A route's `retries` of 1 or more tries a request again only when nothing of it reached a service, the requests the
+Envoy output's `connect-failure` and `reset-before-request` conditions try again, and nginx never sends a service a
+request twice. nginx's own retry stays off, as `proxy_next_upstream off` in every file's `http` block, because it sends
+a request again after a service read it, for every method but `POST`, `LOCK` and `PATCH`: with one of two backends
+resetting or closing the connection after it read a `GET` or a `PUT`, the Envoy output delivered each request once and
+answered `502`, where nginx with `proxy_next_upstream error timeout` delivered it twice. A retried route is written
+instead in this form:
+
+- The route's location reads the request's body whole before the first try (`proxy_request_buffering on`), so each try
+  sends the same bytes, and reads it into memory: a body of at most 1 MiB (`client_max_body_size 1m`), in a buffer one
+  kilobyte larger (`client_body_buffer_size 1025k`). It takes a request with no `Transfer-Encoding` whose
+  `Content-Length` is at most 1 MiB, whatever its method; over HTTP/1.x one with neither header, which has no body (RFC
+  9112, section 6.3), whatever its method; and over HTTP/2 a `GET`, `HEAD`, `OPTIONS` or `DELETE` with no
+  `content-length`, which it answers `413` when the body passes 1 MiB. Two forms were tried before this one. With a
+  buffer of 1 MiB nginx wrote an HTTP/2 body of unknown length to a temporary file. With this buffer and a body sent in
+  chunks taken too, it wrote a `GET` whose 300,000 bytes came in one-byte chunks to a temporary file, as nginx counts
+  the chunk lines against the buffer. nginx has no setting that keeps a body it reads whole off its disk, so the
+  location takes no request whose bytes could pass the buffer.
+- The location's `error_page 502 504` goes to the target a map picks from the tries so far: when the last try sent the
+  service 0 bytes and ended `502` or `504`, a jump is left and a backend the request has not tried is left, a copy of
+  the location that sends the request to an upstream of that backend alone, the next one in the order the service
+  lists them; once the route's time is spent, the answer the route's timer gives; otherwise the answer the route
+  location gives a failed try. A copy is a named location that only that `error_page` reaches, so the check is asked
+  and the rate limit charged once for a request, whatever its tries, and each copy sets the headers its route sets.
+- The route's time counts across the tries, as the Envoy output counts it from the complete request: the route's
+  location sends and reads for the route's read time, each copy for the time left ([The timeouts](#the-timeouts)), one
+  copy for each second of tries, and `proxyfile.js`'s `retrySpent` picks it from the tries' own times as nginx lists
+  them (`$upstream_response_time`), so a request whose tries fail, or whose service answers or stays silent, ends
+  within half a second of the Envoy output's time. One whose service reads its body slowly, taking a write within the
+  send time each time, runs past it, as [The timeouts](#the-timeouts) says.
+- Every other request takes a copy of the route's location that tries once and sends the body as it arrives, as a route
+  with no retries does: one with a `Content-Length` over 1 MiB, one with a `Transfer-Encoding` in any letter case, a
+  body sent in chunks whatever its method, and over HTTP/2 one with no `content-length` and a method other than those
+  four.
+
+Measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2, with one to eight backends that refused the connection, did
+not answer ARP or did not take it in time: each request was served or answered as through the Envoy output, within
+half a second of its time, but in the cases below, and no service read a request twice. The check was asked once for
+each request, every second try included, and the accepted headers and the unchecked mark reached the service on it;
+under a limit of 10 requests a minute, 10 of 14 requests were served and 4 answered `429`, as through the Envoy
+output, the request a retry served charged once. A `host_header`, a `rewrite`, a target sent as written, IPv6
+backends in either way of writing them, a WebSocket upgrade after a refused first try and a gRPC call with a
+`content-length` on an HTTP route were each served as through the Envoy output, and an RPC route on the same service
+kept its own lines.
+
+The differences, which nginx's `routes[].retries` row declares in these words: a request is tried again only when its
+last try sent the service nothing, at once and with no limit on retries at the same time, which the less strict list
+names, on the next backend in the service's order rather than one the balance or the hash picks, at most as many times
+as the service has other backends and never more than 6; a service with one backend is not tried again, where the Envoy
+output tries the same backend; a service found by a DNS name is tried again on the same name, where nginx may pick the
+backend that failed; a request is tried again only when it has no Transfer-Encoding and a Content-Length of at most 1
+MiB, when it has neither header over HTTP/1.x, which gives it no body, or when it is a GET, HEAD, OPTIONS or DELETE over
+HTTP/2 with no content-length, and nginx reads its body into memory before the first try, so the service gets it only
+once all of it arrived, and with a slow client a request whose tries fail ends up to the upload's time later than
+through the Envoy output, which tries while the body arrives, and can be answered 504 where the Envoy output answers 502
+or serves it; such a GET, HEAD, OPTIONS or DELETE over HTTP/2 with more than 1 MiB of body is answered 413, where the
+Envoy output serves it; any other request, a body longer than 1 MiB, a body sent in chunks whatever its method, or one
+of another method over HTTP/2 with no content-length, a gRPC call's among them, is sent as it arrives and never tried
+again, and a first try of it that fails is answered as on a route with no retries, where the Envoy output tries again a
+body of unknown length under its bound of 1 MiB, holds up to 16 MiB over HTTP/2, and answers 507 to a client that sent a
+longer body quickly and serves one still sending; a request nginx wrote on a kept-alive connection the service had
+closed is not tried again, where the Envoy output tries it again on another backend. Each as measured on nginx 1.30.6
+and 1.31.8 beside Envoy 1.40.2:
+
+- The cap: nginx follows 10 internal redirects of a request, and the chain of one whose every try fails takes the
+  `418` to the route's location, each jump, the answer of the last try and the `502` or `504` location, so 7 jumps were
+  answered `500`. With seven backends refusing and one serving, `retries: 7` was answered `502` after 7 tries, where the
+  Envoy output, which may try a backend again, served it.
+- A service found by DNS name: 40 of 40 requests sent one at a time were served, nginx trying the address that
+  refused and then the other each time, and at 200 requests a second for 5 s nginx served 1,001 of 1,001, where the
+  Envoy output served 898 and answered 103 `502`, held by its retry budget (the less strict list below).
+- The body: an HTTP/2 `GET` whose headers end the stream, an HTTP/2 `PUT` with a `content-length` of 1,048,576, a
+  `HEAD`, an `OPTIONS` and a `DELETE` over HTTP/2 with no length, a `GET` carrying 1,048,576 bytes with no length over
+  HTTP/2, a `PATCH` and a `PUT` of 1,048,576 bytes, and a `POST`, `PUT`, `PATCH`, `LOCK` and `PROPFIND` over HTTP/1.1
+  with neither `Content-Length` nor `Transfer-Encoding` were each tried again and served, as through the Envoy output.
+  An HTTP/2 `GET` carrying 2 MiB with no length was answered `413` before any try, where the Envoy output served it. A
+  `GET` sent in chunks over HTTP/1.1, of 300,000 one-byte chunks or of 2 MiB, a `DELETE`, `HEAD` and `OPTIONS` of
+  200,000 one-byte chunks, a body under `Transfer-Encoding` written `Chunked` or `CHUNKED`, an HTTP/2 `PUT` of 102,400
+  bytes with no `content-length`, a chunked `PUT` and every body over 1 MiB with a length (up to a slow `PUT` of 24 MiB)
+  were sent once and never tried again, answered `502` when that try was refused, the chunked ones with no temporary
+  file, where the Envoy output tried a body of unknown length again, answered a fast client's body over its bound `507`
+  (the 2 MiB `GET` three times of four) and served the others. 100 `PUT`s of 1,048,576 bytes at once, and 20 HTTP/2
+  `GET`s of 1,048,576 bytes with no length at once, were all served with no temporary file, and each service read every
+  body whole.
+- A slow upload: a `PUT` of 524,288 bytes sent in parts over about 11 s, to four backends that each fail late, to four
+  whose connection attempts time out, and to one that times out then one that answers 12 s after the request. The
+  Envoy output tried the backends while the body arrived: it answered the first `502`, the second `502` once its four
+  tries had failed, and served each request of the third. nginx tried them only after the whole body: it answered the
+  first `502` about the upload's time later, and the second and each request of the third `504` when the route's
+  15 s, which it counts from the complete request as the Envoy output does, ran out.
+- A kept-alive connection the service had closed: of 10 such requests, nginx answered 8 `502` and tried none again,
+  where the Envoy output answered 1 `502` and served the others; no service read a request twice on either.
+
+Four forms that would start the first try before the body is whole were measured on nginx 1.30.6 and 1.31.8, and none
+holds, so the body is read first:
+
+- The jump with `proxy_request_buffering off` in the retried route's locations: when the first try failed while the
+  body was still arriving, the copy that took the next try sent the service only the part of the body nginx had read,
+  under the request's whole `Content-Length`, and never the rest, so the service waited and the request was answered
+  `504` when the route's 15 s ran out, where the Envoy output served it. Of 100 `PUT`s of 1,048,576 bytes at once, about
+  half were answered so, each one whose first try was refused.
+- The same in every copy as well, and that with `proxy_http_version 1.1` written in each of those locations: the same.
+- nginx's own retry with the body sent as it arrives (`proxy_next_upstream error timeout`, `proxy_next_upstream_tries`
+  and `proxy_next_upstream_timeout`, no jump): a slow `PUT` whose first backend refused was served whole, at the Envoy
+  output's time, but a `PUT` of 100 bytes that the first service had read whole before it closed with no answer was
+  sent to the second service as well, 8 of 8, and nginx has no setting that tells the two apart.
+
+What the form costs in the file and in memory, measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2 on mains
+power with no other container busy. A retried route writes copies of its route location: the one that tries once,
+and one for each second the tries before a try can take, as a location's read time is fixed and nginx counts it for
+each try. With the default timers and `retries: 1` to two backends, a route wrote 14 more locations; with
+`retries: 4294967295`, eight backends and `timeouts: {request: none}`, whose tries can take 30 s, 64 more; and a file
+with a retried route 3 more, which its routes share. The lines,
+locations and bytes of each file are given with `retries: 0` and then with its retries; the memory, the median of 3
+runs with their range, is that of the proxy at rest with the retries:
+
+| File | Lines | Locations | Bytes | Idle memory, nginx 1.30.6 / 1.31.8 | Envoy output |
+|---|---|---|---|---|---|
+| 100 routes, 99 of them `retries: 1`, to two backends | 7,118 to 58,955 | 226 to 1,615 | 336,758 to 2,704,622 | 65.7 MiB (65.2 to 65.7) / 65.6 MiB (65.3 to 65.7) | 23.7 MiB (23.3 to 23.9) |
+| 100 routes, each `retries: 4294967295`, to eight backends, `request: none` | 7,124 to 247,020 | 226 to 6,629 | 336,973 to 11,315,021 | 228.9 MiB (228.9 to 229.0) / 227.9 MiB (227.9 to 228.0) | 24.6 MiB (24.6 to 26.3) |
+| 4,096 such routes | 278,914 to 10,101,218 | 8,218 to 270,365 | 13,258,655 to 463,512,002 | 8.368 GiB (8.368 to 8.368) / 8.335 GiB (8.335 to 8.335) | 67.7 MiB (67.7 to 70.1) |
+
+So a retried route took about 0.45 MiB of nginx's memory with the default timers and about 2 MiB with the longest
+tries, beside about 20 MiB for a 100-route file and 284 MiB for the 4,096-route file with no retries. nginx loaded
+each file with no warning, and `nginx -t` read the 4,096-route file in 11.1 s on 1.30.6 (11.0 to 12.2) and 11.4 s on
+1.31.8 (11.3 to 11.6), the medians of five runs. Copies at a coarser step than a second would cost less and end a
+request up to that step earlier than the Envoy output.
+
+Reading the body first holds it in memory while it arrives, measured on mains power as medians with each proxy restarted
+before each case, of five runs each but where a figure names its own count. A `PUT` of 1,048,576 bytes alone took 1.96
+ms on nginx 1.30.6 and 1.67 ms on 1.31.8 through a retried route, 1.35 and 1.18 ms through a route with no retries, and
+1.40 ms through the Envoy output's retried route; the runs ranged from 1.07 to 2.29 ms, so no proxy was faster. 100 such
+`PUT`s at once, each sent in 64 KiB parts 100 ms apart, were all served: at their peak nginx held 97.6 MiB more than at
+rest on both versions (95.0 to 104.8) and about 11 MiB more 5 s later, where the Envoy output held 111.0 MiB more (109.4
+to 111.6) and still held it 5 s later, and nginx opened no temporary file. 20 `PUT`s of 64 MiB at once, which the copy
+that tries once sends as they arrive, were all served with nginx holding about 10 MiB more at the peak (6.7 to 16.5, of
+four runs on 1.30.6 and five on 1.31.8), as on a route with no retries, where the Envoy output held 24.8 MiB more (24.6
+to 25.1).
+
+At 1,000 requests a second for 60 s on kept-alive connections, nginx served every request at that rate through a
+retried route with every first try served, at a median of 10.9% of a CPU on 1.30.6 and 10.0% on 1.31.8, and with
+every first try refused, at 13.8% and 12.8%, holding at most 27 MiB; the Envoy output used 8.1% with every first try
+served and 12.6% with every first try refused, and at most 30 MiB (medians of three to five runs, the runs another
+container was busy for left out). With every first try refused, nginx's 99th percentile was 0.49 ms on 1.30.6 and
+0.45 ms on 1.31.8, where the Envoy output's was 24.4 ms (24.2 to 24.6), as it waits before a retry and answered 502
+the requests over its limit of retries at the same time
+([the less strict list](#where-nginx-is-less-strict-than-the-envoy-output)).
+
+A reload runs the new workers beside the old ones until the old ones have ended their requests, so it needs room for
+about twice the memory the file holds at rest: reloading the 4,096-route file on nginx 1.30.6 at 1,000 requests a
+second passed a limit of 20 GiB and the kernel stopped the container (one run, on mains power).
 
 ## Backends: balance, hash and DNS names
 
@@ -1342,9 +1483,11 @@ that starts with 0 logs its number without the zeros (`050` as 50), one with spa
 `status_from` or above or `sample` takes the request, where the Envoy output writes 502 whatever `status_from` says;
 `bytes_in` counts the whole request, not its body; `upstream_ms` counts from the opening of the service connection of
 the try that answered, not from the request's start; `authz_us` counts the check's time in whole milliseconds, `0`, `1000`, `2000` and so on, where
-the Envoy output counts microseconds; there are no `flags` and `details` fields; a value the Envoy output writes `null`
-is written empty, but `upstream_ms`; a request the origin or upgrade check refuses logs `route` and `upstream` empty,
-where the Envoy output names them; a request refused for a dot segment with a `;` parameter logs `route` empty on each
+the Envoy output counts microseconds; there are no `flags` and `details` fields; a request of a retried route that is
+not tried again because of its body, longer than 1 MiB or of a length nginx does not know, writes the upstream-failure
+flag `UF` after its one try failed, where the Envoy output, which tries it again, writes `URX,UF`; a value the Envoy
+output writes `null` is written empty, but `upstream_ms`; a request the origin or upgrade check refuses logs `route`
+and `upstream` empty, where the Envoy output names them; a request refused for a dot segment with a `;` parameter logs `route` empty on each
 of its lines, where the Envoy output names the route that refuses it, `refused:dot-segment-with-parameter`; a request
 Envoy refuses as it reads it logs its host, method, request id and protocol, which
 Envoy writes `null` and `HTTP/1.1`; a request id or `Host` holding a byte above 0x7F is logged empty.
@@ -1356,8 +1499,14 @@ for an answer cut short of its `Content-Length`, for a gRPC answer whose body is
 writes them. A call to an RPC route with `retries` whose last try was refused, or did not take the connection within
 5 s, gets `URX,UF`, the flags Envoy writes for a call its retries ran out on, after one try at a service of one backend,
 which nginx tries no second time, after two at a service of two, and after the one try nginx gives a call that is not a
-`POST`; the request line of a call holds the `upstream_ms` of the try that answered (measured on nginx 1.30.6 and 1.31.8
-beside Envoy 1.40.2). A gRPC answer whose body matches its `Content-Length` gets no second line, as with Envoy, though
+`POST`. On a route with `retries` the line reads the last try too: `URX,UF` when every try was refused, at a service
+of one, two or eight backends, over HTTP/1.1 and HTTP/2 and for a `PUT` with a length; `UT` when the route's 15 s ran
+out, a gRPC call's too; no line when the idle time ended the request, as Envoy writes none for it; `UC` for a try
+reset after the head that followed a refused one; and no line for a request a retry served. A request the copy that
+tries once sent, a body over 1 MiB or of a length nginx does not know, gets `UF` when its one try was refused, where
+the Envoy output, which tries such a request again, wrote `URX,UF`, or answered one over its bound `507` with no line.
+The request line holds the `upstream_ms` of the try that answered (each measured on nginx 1.30.6 and 1.31.8 beside
+Envoy 1.40.2). A gRPC answer whose body matches its `Content-Length` gets no second line, as with Envoy, though
 nginx counts the frames of a gRPC answer, not its body, in `$upstream_response_length`; a `HEAD` request gets none, and
 a request the idle time ended gets none, as with Envoy. A service's answer whose head nginx refuses is answered `502`,
 as Envoy answers it, for each of a space before a header's colon, a NUL in a header value, a `Content-Length` that is
@@ -1528,9 +1677,10 @@ ends, sends a service or a client what the Envoy output would not, or leaves out
 - **a service's answer with a malformed header line or a malformed status line reaches the client**: A service's answer holding a header line with no colon reaches the client with it as a header with an empty value (`nocolon: `), and one whose header name holds `@` (`x@bad: 1`) or whose header value holds the byte 0x01 reaches the client with that header as the service wrote it, where Envoy answers `502` and writes an upstream-failure line with the flag `UPE`, which nginx does not write. A malformed status line reaches the client too. A status of three digits that starts with 0, `050`, `000` or `099`, reaches it as that status over HTTP/1.1 and HTTP/2, with the headers nginx writes. A status with spaces between its digits, `HTTP/1.1 2 0 0 X`, reaches an HTTP/2 client as `200` and an HTTP/1.1 client with the status line `HTTP/1.1 0 0 X`, and one with a fraction, `HTTP/1.1 403.1 X`, reaches an HTTP/2 client as `403` and an HTTP/1.1 client as the service wrote it: nginx reads three digits with spaces among them, and takes a `.` after them. A status of one or two digits, such as `5`, `20` or `99`, one of four digits, `HTTP/1.1 2000 OK`, and an answer with no status line at all, such as `hello` and a line end, reach an HTTP/1.1 client byte for byte as the service wrote them, with none of the headers nginx writes, such as `x-request-id` and `Vary`, and an HTTP/2 client as the body of an answer with the status `000`: nginx reads such an answer as one with no head and passes it whole. Envoy answers each of these `502` and writes an upstream-failure line with the flag `UPE`, but the status of four digits, which it passes as `2000` with its own headers; nginx writes no upstream-failure line for any of them, and has no setting that refuses them. nginx stores a line with no colon as it stores `nocolon:`, which Envoy passes too, so `proxyfile.js` cannot tell the two apart.
 - **over HTTP/2, empty frames in a row are served**: An HTTP/2 request whose HEADERS frame is followed by two empty CONTINUATION frames, or whose body comes after two empty DATA frames, is served, where Envoy takes one frame with no payload in a row and closes the connection at the second: nginx sets no such limit, and neither `nginx.conf` nor `proxyfile.js` sees a frame.
 - **without timeouts.request, an answer that keeps arriving runs past 15 s**: Without `timeouts.request`, an answer that keeps coming runs past the 15 s at which the Envoy output ends a request: nginx counts its limits between two reads or writes.
+- **without timeouts.request, a request body its service does not read, or reads slowly, runs past 15 s**: On a route with no retries, and for a request a retried route sends on as it arrives, nginx sends the body with its send time, which counts between two writes and is 5 minutes without `timeouts.idle`. A `PUT` of 1 MiB to a service that takes the connection and does not read it, or reads one byte every 20 s, is answered `504` after 300.1 s (300.0 to 300.2 in three runs), where the Envoy output answers `504` after 15.0 s; a `PUT` of 2 MiB or of 64 MiB, or of 2 MiB in chunks, gets nginx's `504` after 300.1 s too, where the Envoy output answers `408` after 300.0 s (on a retried route, in one of three runs, `504` after 15.0 s). Tried: a send time of the read time, 15 s, in each location that streams a body. It answered every one of those `PUT`s `504` after 15.1 s (15.0 to 15.1), those the Envoy output answers `408` after 300 s among them, to the service that reads one byte every 20 s too, so it is not written; a client that stopped its body for 20 s was served by all three with it and without it. Not written either: reading a body of at most 1 MiB whole before sending it, on every route as a retried route does. That answers such a `PUT` as the Envoy output does, `504` after 15.0 s, as the retried route's location answered it, but a route with no retries would then hold each such body in memory, and its service would get nothing of an upload until all of it had arrived. A service that reads a body slowly but takes a write within the send time each time is sent all of it, on every route, and the send time does not end its try; a retried route's location sends the body it read whole with the route's read time as its send time. A `PUT` of 1 MiB to a service that reads 65,536 bytes every 1.5 s, in three runs of each, is answered `504` after 27.0 s by nginx 1.30.6 and 27.1 s by 1.31.8 on a retried route (27.0 to 27.1) and after 18.1 s by both on a route with no retries (18.1 in every run), where the Envoy output answers `504` after 15.0 s on both (15.0 in every run). The retried route's send time of 15 s did not end it, and no setting ends such a try at the route's time, as none ends an answer that keeps arriving: nginx has no time for a whole try.
 - **with allow, a check service that does not close its connection right after its answer leaves requests unchecked past about 470 checks a second**: When the check service does not close its connection right after its answer (measured: 20 ms or more after it, or not at all), nginx closes it first, so each check holds one of nginx's local ports in `TIME_WAIT` for 60 s: with the 28,232 local ports of 32768 to 60999 that is about 470 checks a second to one check address, past which nginx cannot open a connection to the check, and with `allow` the request is then served with the unchecked mark, where the Envoy output keeps its connections to the check open and goes on asking. `proxy_half_close on` does not change which side closes first.
 - **with allow, a worker with none of its 8192 connections left serves requests unchecked**: Each checked request in flight holds four of a worker's connections, and every other connection of the worker, a client's or a service's, counts against the same 8192 (`worker_connections`). A worker with none left cannot ask the check, and with `allow` the request is then served with the unchecked mark, where the Envoy output's check has its own 1,024 connections whatever else the proxy carries. With 1024 connections a worker, 231 and 234 of 800 requests sent at once to 2 workers were served unasked (nginx 1.30.6 and 1.31.8), where the Envoy output served none; with 8192, none were, up to 4,000 at once with nothing else open.
 - **a request whose client closes its connection during the check can still reach the service**: When a client closes its connection while its check is asked, with a close, a reset or a half-close, and the check then allows the request, nginx can still send the request to the service, where the Envoy output ends the request when its client goes and sends the service nothing. Of 30 clients, one after another, that each sent a request and closed 50 ms into a check that allowed it after 300 ms, the service received 16 to 21 `GET` requests and 17 to 29 `POST` requests with their bodies, 12 and 17 after a reset and 17 and 23 after a half-close, once nginx had served other requests to it and so held idle connections to it; from a just-started nginx it received none, and through the Envoy output none in any round. `proxy_ignore_client_abort` is off, nginx's default.
-- **a retried call is sent again at once and with no limit on retries at the same time**: A call whose first connection was refused is sent to the next backend at once, where the Envoy output waits 25 ms, and every such call is retried, where the Envoy output retries at most 3 at the same time and fails the others (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2).
+- **a retried request or call is sent again at once and with no limit on retries at the same time**: A call whose first connection was refused is sent to the next backend at once, where the Envoy output waits 25 ms, and every such call is retried, where the Envoy output retries at most 3 at the same time and fails the others. A request of a retried route is retried at once and with no limit too: at 1,000 requests a second for 60 s, each first try refused, nginx served every one of the 60,000 or 60,001 requests on a second try in each of ten runs, where the Envoy output served 13,452 to 13,765 and answered the others 502, and nginx's 99th percentile was 0.49 ms on 1.30.6 and 0.45 ms on 1.31.8, where the Envoy output's was 24.4 ms (the medians of four and five runs on mains power; measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2).
 - **a chunked answer its service cuts short writes no upstream-failure line**: A service that closes its connection after the first chunk of a chunked `200` answer reaches the client as it does through the Envoy output, which then writes the request line with the flag `UPE`, whatever `log` says, and a `gateway_upstream_failure` line; nginx writes no upstream-failure line, and the request line only when `log` takes the request by its status or its share: nginx records the answer as complete, and with no content-length there is no length to compare the bytes it received to. An answer cut short before its content-length is logged as the Envoy output logs it.
 <!-- /keys -->

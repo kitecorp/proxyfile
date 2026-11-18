@@ -143,7 +143,8 @@ type request struct {
 	raw  bool
 	line string
 	// body and trailers, on a raw request, are sent as a chunked body that ends with these trailers, over http/1.1
-	// with Transfer-Encoding: chunked, and over h2 as a DATA frame and a second HEADERS frame.
+	// with Transfer-Encoding: chunked, and over h2 as a DATA frame and a second HEADERS frame. On a request that is
+	// not raw, body is sent by net/http, framed by its length, and no trailers are sent.
 	body     string
 	trailers map[string]string
 	// unframed, on a raw http/1.1 request, writes body after the headers as it is, with no Transfer-Encoding of the
@@ -215,6 +216,18 @@ type answer struct {
 	// value matched by the regular expression; a nil entry wants no line of that event. The lines are found by the
 	// request id the answer carries, x-request-id, which every proxy writes as the line's request_id (logLines).
 	logged map[string]map[string]*regexp.Regexp
+	// counted, on a row sent in sequence, wants lines of the proxy's log of an event that carries no request id, which
+	// logged cannot find, such as gateway_upstream_failure (sendRepeated reads them).
+	counted *countedLines
+}
+
+// countedLines are the lines of event a row wants among the lines the proxy wrote after the row began: those whose find
+// fields match are the row's, exactly one for each request it sent, and each must match fields too. Each value is
+// matched against the JSON text of the field's value, as logged is. The lines are told from another row's only by what
+// find reads, so a row that wants them sends to a route no row beside it sends to.
+type countedLines struct {
+	event        string
+	find, fields map[string]*regexp.Regexp
 }
 
 // compare returns each way got differs from want, in a fixed order, so a failing row reads the same on every run.
@@ -223,6 +236,9 @@ func compare(want answer, got result, mark string) []string {
 	var e echo
 	if got.echo != nil {
 		e = *got.echo
+	}
+	if got.unread != "" {
+		return []string{got.unread}
 	}
 	if want.refused {
 		if !reflect.DeepEqual(want, answer{refused: true}) {

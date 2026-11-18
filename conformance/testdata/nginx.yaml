@@ -10,8 +10,10 @@
 # refuses full's names with a * prefix. So are its traffic keys: catalog found by its DNS name through dns.resolver and
 # balanced by the hash of x-session-id, the catalog route limited to 20 requests a second with a burst of 10 by client,
 # the rpc entry's retries and its limit of 100 a second for all, and shop balanced by least requests; but the shop route
-# writes retries: 0, as the generator refuses 1 or more, and a service sessions at shop's two addresses, balanced by the
-# hash of x-session-id, takes the route /sessions/, so the hash rows send to a route with no rate limit. It writes
+# writes retries: 0, so master's rows, those that send a body among them, keep the form nginx streams and tries once,
+# and two routes of their own to shop write retries: 1, retried and retried-limited, the second limited to 10 requests a
+# minute for all, which the rows that need a retry send to; and a service sessions at shop's two addresses, balanced by
+# the hash of x-session-id, takes the route /sessions/, so the hash rows send to a route with no rate limit. It writes
 # Envoy's own header limits, 60 KiB and 100 fields, an idle time of 2 s, so a row sees a silent service ended without
 # waiting long, an upstream idle time of 3 s, and examples/full's log, so the battery runs every form of those keys the
 # generator writes. Every entry runs it, Envoy's too, so its literals are Envoy's answers.
@@ -203,6 +205,8 @@ routes:
   - {name: k39, pattern: "/k39/(a|b)*a(a|b){12}c", to: catalog}
   - {name: k40, pattern: "/k40/(a|b)*a(a|b){12}c", to: catalog}
   - {name: sessions, prefix: /sessions/, to: sessions}
+  - {name: retried, prefix: /retried/, to: shop, retries: 1}
+  - {name: retried-limited, prefix: /retried-limited/, to: shop, retries: 1, rate_limit: {requests: 10, per: 1m, by: all}}
   - {name: shop, prefix: /, to: shop, retries: 0}
 rpc:
   methods:

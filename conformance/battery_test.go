@@ -34,7 +34,7 @@ import (
 // proxy runs on it among the stubs, reached over plain HTTP when the file writes no tls; each row that runs on the
 // file (runsOn) is sent and must get its literal for the target and the file (literalFor). It needs Docker, so it is
 // built only with the tag conformance:
-// go test -tags conformance ./conformance/...
+// go test -tags conformance -count=1 -timeout 30m ./conformance/...
 func TestBattery(t *testing.T) {
 	// No unit test checks the battery's own rows, because the battery is the test, so it checks them here, before any
 	// container starts: each row names core keys of the format, the keys a target's declaration speaks of; each
@@ -242,6 +242,13 @@ func sendRepeated(w *world, e exchange, l literal) []string {
 			panic(fmt.Sprintf("exchange %q wants no %s line and no request log line, so it cannot tell when the proxy has written its lines", e.name, event))
 		}
 	}
+	mark := 0
+	if l.want.counted != nil {
+		if e.overlap {
+			panic(fmt.Sprintf("exchange %q counts lines a row beside it could write too, so it must not overlap", e.name))
+		}
+		mark = w.logMark()
+	}
 	for i := 1; i <= count; i++ {
 		r := e.send
 		if e.alternate != nil && i%2 == 0 {
@@ -259,6 +266,8 @@ func sendRepeated(w *world, e exchange, l literal) []string {
 			instances[instance]++
 		}
 		switch {
+		case i <= l.admitted && got.unread != "":
+			differences = append(differences, fmt.Sprintf("answer %d: %s", i, got.unread))
 		case i <= l.admitted && got.err != nil:
 			differences = append(differences, fmt.Sprintf("answer %d: error: %v", i, got.err))
 		case i <= l.admitted && got.status != http.StatusOK:
@@ -285,6 +294,20 @@ func sendRepeated(w *world, e exchange, l literal) []string {
 		}
 	}
 	differences = append(differences, last...)
+	if c := l.want.counted; c != nil {
+		lines := w.countedAfter(mark, *c, count)
+		if len(lines) != count {
+			differences = append(differences, fmt.Sprintf("logged %s: got %d lines that find matches, want %d, one for each request: %q",
+				c.event, len(lines), count, lines))
+		}
+		for _, line := range lines {
+			for _, name := range slices.Sorted(maps.Keys(c.fields)) {
+				if value, ok := line[name]; !ok || !c.fields[name].MatchString(value) {
+					differences = append(differences, fmt.Sprintf("logged %s %s: got %q, want a value %s matches", c.event, name, value, c.fields[name]))
+				}
+			}
+		}
+	}
 	if l.also != nil && !sawWant {
 		differences = append(differences, "no answer after the first admitted was what want asks")
 	}

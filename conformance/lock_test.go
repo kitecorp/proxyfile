@@ -14,15 +14,11 @@ import (
 	"time"
 )
 
-// lockWait is the longest a run waits for the lock another run holds: room for the worlds of many runs, a run of every
-// entry's files, five worlds, taking about 19 s on one arm64 Mac.
-const lockWait = 5 * time.Minute
-
-// runTime is what a run keeps for its worlds after the wait, under go test's -timeout: a run of every entry's files,
-// five worlds, took about 19 s on one arm64 Mac, and a first run also pulls the proxies' images. -timeout ends the test
-// binary in a panic that removes no world, so the wait stops in time for the run to say why itself and remove what it
-// made.
-const runTime = 2 * time.Minute
+// runTime is what a run keeps for its worlds after waiting for the lock, under go test's -timeout: a run of every
+// entry's files took 394 to 466 s in four runs on one arm64 Mac, so 12 minutes leaves room for a slower machine and
+// for a first run, which also pulls the proxies' images. -timeout ends the test binary in a panic that removes no
+// world, so the wait stops in time for the run to say why itself and remove what it made.
+const runTime = 12 * time.Minute
 
 // lockPath is the lock's file, one path for every run on the machine. It is not in the temporary folder, because that
 // folder comes from TMPDIR, which differs between two users (macOS gives each its own) and can differ between two runs
@@ -34,9 +30,10 @@ const lockPath = "/tmp/proxyfile-conformance.lock"
 // world of the run, waiting while another run holds it; t is the test that needs the lock now, which fails when it
 // cannot be had. The battery's Docker names and subnet are fixed, so two runs on one machine would remove each
 // other's containers; each run claims its worlds under the lock instead, and a second run waits for the first. A run
-// takes it once and gives it back once, so it waits once, for at most lockWait and never past go test's -timeout less
-// runTime. The lock is an exclusive flock on lockPath, made when absent and never removed: a run that removed it would
-// let a third run lock a new file of the same name while a second still held the old one. The kernel gives back the
+// takes it once and gives it back once, so it waits once, until go test's -timeout less runTime, or with no -timeout
+// as long as the lock is held: a second run started under -timeout 30m waits out a first that ends within 18 minutes.
+// The lock is an exclusive flock on lockPath, made when absent and never removed: a run that removed it would let a
+// third run lock a new file of the same name while a second still held the old one. The kernel gives back the
 // lock of a process that dies, so the run after a killed one takes it at once, and its claimWorld removes what the
 // killed run left. Every world is claimed in a subtest of owner, so it is removed before the lock is given back
 // (cleanups run when a test and all its subtests end).
@@ -45,10 +42,8 @@ func lockWorld(t, owner *testing.T) {
 	if err != nil {
 		t.Fatalf("opening the conformance lock: %v", err)
 	}
-	wait := lockWait
-	if deadline, ok := t.Deadline(); ok {
-		wait = max(min(wait, time.Until(deadline)-runTime), 0)
-	}
+	deadline, bounded := t.Deadline()
+	wait := max(time.Until(deadline)-runTime, 0)
 	start := time.Now()
 	waited := false
 	for {
@@ -64,10 +59,11 @@ func lockWorld(t, owner *testing.T) {
 			t.Logf("waiting for the conformance lock %s, which another run on this machine holds", lockPath)
 			waited = true
 		}
-		if time.Since(start) >= wait {
+		if bounded && time.Since(start) >= wait {
 			f.Close()
 			t.Fatalf("another conformance run on this machine has held %s for %s, as long as this run may wait under go test's "+
-				"-timeout; wait for it to end, or end it", lockPath, wait.Round(time.Second))
+				"-timeout less the %s it keeps for its own worlds; wait for it to end, end it, or give -timeout more", lockPath,
+				wait.Round(time.Second), runTime)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
