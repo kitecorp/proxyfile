@@ -76,14 +76,10 @@ refuse a hand edit or a missed render:
 ```sh
 proxyfile render -o envoy.yaml                    # the default target, envoy: a complete Envoy configuration
 proxyfile check -o envoy.yaml                     # in the build: renders again, fails when envoy.yaml differs
-proxyfile render --target nginx -o nginx.conf     # routing, CORS, the client's address, header removal, TLS, header
-                                                  # limits, idle times, admin paths, the request log, the auth check,
-                                                  # rate limits, RPC retries, balance, hash and DNS names, and
-                                                  # proxyfile.js beside it; other keys are refused, and a line on
-                                                  # standard error counts where it is less strict than Envoy
-proxyfile render --target haproxy -o haproxy.cfg  # HAProxy 3.2 or 3.4: routing, TLS, CORS and the auth check; other
-                                                  # keys refused by name, and the same line counts where it is less
-                                                  # strict than Envoy
+proxyfile render --target nginx -o nginx.conf     # nginx 1.30 or 1.31: nginx.conf, and proxyfile.js beside it
+proxyfile render --target haproxy -o haproxy.cfg  # HAProxy 3.2 or 3.4: haproxy.cfg, and proxyfile.lua beside it
+                                                  # each refuses by name a key it does not write, and a line on
+                                                  # standard error counts where its output is less strict than Envoy
 ```
 
 The `envoy.yaml` it writes has the listener on 8000, a cluster for `app` on 3000, the route and the CORS filter for the
