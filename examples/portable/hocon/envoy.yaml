@@ -2,13 +2,6 @@
 admin:
   address: {socket_address: {address: 127.0.0.1, port_value: 9901}}
   allow_paths: [{exact: /ready}, {exact: /stats}, {exact: /server_info}]
-overload_manager:
-  refresh_interval: 0.25s
-  resource_monitors:
-  - name: envoy.resource_monitors.global_downstream_max_connections
-    typed_config:
-      "@type": type.googleapis.com/envoy.extensions.resource_monitors.downstream_connections.v3.DownstreamConnectionsConfig
-      max_active_downstream_connections: 4096
 static_resources:
   listeners:
   - name: public
@@ -445,7 +438,6 @@ static_resources:
     load_assignment:
       cluster_name: "shop_http"
       endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: "10.0.1.11", port_value: 8080}}}}, {endpoint: {address: {socket_address: {address: "10.0.1.12", port_value: 8080}}}}]}]
-    circuit_breakers: {thresholds: [{max_connections: 4096, max_pending_requests: 4096, max_requests: 4096}]}
     typed_extension_protocol_options:
       envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
         "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
@@ -457,7 +449,6 @@ static_resources:
     load_assignment:
       cluster_name: "shop_grpc"
       endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: "10.0.1.11", port_value: 8081}}}}, {endpoint: {address: {socket_address: {address: "10.0.1.12", port_value: 8081}}}}]}]
-    circuit_breakers: {thresholds: [{max_connections: 4096, max_pending_requests: 4096, max_requests: 4096}]}
     typed_extension_protocol_options:
       envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
         "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
@@ -468,7 +459,6 @@ static_resources:
     load_assignment:
       cluster_name: "accounts_grpc"
       endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: "127.0.0.1", port_value: 7070}}}}]}]
-    circuit_breakers: {thresholds: [{max_connections: 4096, max_pending_requests: 4096, max_requests: 4096}]}
     typed_extension_protocol_options:
       envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
         "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
@@ -479,7 +469,6 @@ static_resources:
     load_assignment:
       cluster_name: "accounts_http"
       endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: "127.0.0.1", port_value: 7070}}}}]}]
-    circuit_breakers: {thresholds: [{max_connections: 4096, max_pending_requests: 4096, max_requests: 4096}]}
     typed_extension_protocol_options:
       envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
         "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
@@ -500,7 +489,6 @@ static_resources:
     load_assignment:
       cluster_name: "catalog_http"
       endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: "catalog.internal.example", port_value: 8090}}}}]}]
-    circuit_breakers: {thresholds: [{max_connections: 4096, max_pending_requests: 4096, max_requests: 4096}]}
     typed_extension_protocol_options:
       envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
         "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions

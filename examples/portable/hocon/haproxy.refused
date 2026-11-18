@@ -1,7 +1,6 @@
 examples/portable/hocon/Proxyfile: dns: "dns" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/portable/hocon/Proxyfile: dns.resolver: "dns.resolver" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/portable/hocon/Proxyfile: limits: "limits" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/portable/hocon/Proxyfile: limits.connections: "limits.connections" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/portable/hocon/Proxyfile: limits.request_headers: "limits.request_headers" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/portable/hocon/Proxyfile: limits.request_headers.count: "limits.request_headers.count" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/portable/hocon/Proxyfile: limits.request_headers.size: "limits.request_headers.size" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy

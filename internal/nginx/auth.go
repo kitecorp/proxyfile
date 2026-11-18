@@ -2,7 +2,6 @@ package nginx
 
 import (
 	"fmt"
-	"net"
 	"slices"
 	"strconv"
 	"strings"
@@ -69,7 +68,7 @@ func relaySocket(listen int64) string {
 
 // checkLines returns the auth check's lines of the http block and the stream block, both nil when the check is not
 // asked.
-func checkLines(in generator.Input, v *values) (http, stream []string) {
+func checkLines(in generator.Input, v *values, e edge) (http, stream []string) {
 	a := asked(in.Gateway)
 	if a == nil {
 		return nil, nil
@@ -90,7 +89,8 @@ func checkLines(in generator.Input, v *values) (http, stream []string) {
 	// The handler sets an accepted header the check sent empty as one space, which nginx sends, where it sends no
 	// header whose value is empty. A gRPC location sends it as nothing: over HTTP/2 a value that starts with a space is
 	// malformed (RFC 9113, section 8.2.1), and a server may reset the call for it, where Envoy sends the value empty.
-	rpc := slices.ContainsFunc(in.Gateway.Routes, func(r model.Route) bool { return r.RPC != nil })
+	// An RPC route's locations send each accepted header through its _grpc map.
+	rpc := in.Gateway.RPCEntry() != nil
 	for n := range handlerAccepts(a) {
 		http = append(http, fmt.Sprintf("  js_var $pf_accept_%d;", n))
 		if rpc {
@@ -128,11 +128,14 @@ func checkLines(in generator.Input, v *values) (http, stream []string) {
 	service := in.Gateway.Service(a.Service.Value)
 	port, _ := service.Port(model.HTTP)
 	listen := strconv.FormatInt(in.Gateway.Listen.Number, 10)
-	// The relay's js_import is read from the configuration's folder in the stream block too (measured).
-	stream = []string{"stream {", "  js_engine njs;", "  js_import pf from " + scriptName + ";", "  upstream proxyfile_" + listen + "_check {"}
-	for _, address := range service.Addresses {
-		stream = append(stream, "    server "+v.token(addressKey(service), address.Pos, net.JoinHostPort(address.Value, strconv.FormatInt(port.Number, 10)))+" max_fails=0;")
+	// The relay's js_import is read from the configuration's folder in the stream block too (measured). The stream
+	// block reads no line of the http block, so a check's service by DNS name is looked up through its own resolver
+	// line, and its upstream is the service's, balanced and looked up again as the service's own upstreams are.
+	stream = []string{"stream {", "  js_engine njs;", "  js_import pf from " + scriptName + ";"}
+	if in.Gateway.Resolver != nil {
+		stream = append(stream, "  "+resolverLine(in.Gateway.Resolver))
 	}
+	stream = append(stream, upstreamLines(v, "proxyfile_"+listen+"_check", *service, port, e)...)
 	ms := strconv.FormatInt(a.Timeout.Millis, 10)
 	// The relay writes the path send_request tells the check as Envoy tells it, in the header $pf_check_uri names, the
 	// proxy's own, and every other header as Envoy sends one; without send_request a client's own copy of that name is
@@ -204,8 +207,9 @@ func sendPos(a *model.Auth) model.Pos {
 }
 
 // writeCheck writes the auth check's lines of an environment server: the values the handler reads, the check
-// location, which proxies the handler's subrequest to the relay, and the location its failures go to.
-func writeCheck(w *writer, v *values, a *model.Auth, listen int64, e edge) {
+// location, which proxies the handler's subrequest to the relay and sends a client's own request for its path on to
+// target, the named location location / sends every request to, and the location its failures go to.
+func writeCheck(w *writer, v *values, a *model.Auth, listen int64, e edge, target string) {
 	unavailable := "deny"
 	if a.Allow {
 		unavailable = "allow"
@@ -230,7 +234,7 @@ func writeCheck(w *writer, v *values, a *model.Auth, listen int64, e edge) {
 		`      if ($pf_checking = "") {`,
 		"        return 418;",
 		"      }",
-		"      error_page 418 = @pf_r_$pf_route;",
+		"      error_page 418 = "+target+";",
 		"      proxy_pass http://unix:"+relaySocket(listen)+";",
 		"      proxy_pass_request_body off;",
 	)
@@ -298,10 +302,10 @@ func dotparamLocation(own []string) []string {
 
 // handlerLines are the lines of a location the handler checks. A refusal the handler writes with no body carries no
 // Content-Type, as the Envoy output's carries none: nginx gives an answer it writes with no type of its own the type of
-// the path's extension in its default types (text/html for .html) or else default_type, text/plain, so the location
-// empties both, and the handler writes text/plain itself for a body the check sent with no type (measured on nginx
+// the path's extension in its types, which the http block empties, or else default_type, text/plain, which the
+// location empties, and the handler writes text/plain itself for a body the check sent with no type (measured on nginx
 // 1.30.6 and 1.31.8 beside Envoy 1.40.2).
-var handlerLines = []string{`      default_type "";`, "      types {}", "      js_access pf.check;"}
+var handlerLines = slices.Concat(untyped, []string{"      js_access pf.check;"})
 
 // questionLines are the lines of a checked route location of an RPC method with a question, which the check location
 // sends in the question headers, each value from the file through quoted and $pf_dollar.

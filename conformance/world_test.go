@@ -34,11 +34,15 @@ const (
 // proxy while accounts still shares its network namespace succeeds, and accounts runs on until it is removed too.
 var containers = []string{accounts, proxy, "proxyfile-conformance-shop-1", "proxyfile-conformance-shop-2",
 	"proxyfile-conformance-catalog", "proxyfile-conformance-check-1", "proxyfile-conformance-check-2",
-	"proxyfile-conformance-resolver", hold}
+	"proxyfile-conformance-resolver", hold, hold2}
 
-// hold is the backend that takes no connection (stub hold), at holdAddress:8095, the address nginx-plain's hold
-// service names: a client's connect to it waits until the client's own time runs out.
-const hold, holdAddress = "proxyfile-conformance-hold", "10.0.2.30"
+// hold and hold2 are the backends that take no connection (stub hold), at holdAddress:8095 and hold2Address:8095, the
+// addresses nginx-plain's hold service and its held service name: a client's connect to either waits until the
+// client's own time runs out. held has both, so a retried call meets one on each try.
+const (
+	hold, holdAddress   = "proxyfile-conformance-hold", "10.0.2.30"
+	hold2, hold2Address = "proxyfile-conformance-hold-2", "10.0.2.31"
+)
 
 // runFolder holds all a run writes to disk: the rendered file in config, the stub's build in stub, and the TLS files
 // with the server's key in tls and jwt. The battery names it as it names its Docker objects, so a run killed before
@@ -109,9 +113,9 @@ func claimWorld(t *testing.T) {
 // 10.0.0.2 answering catalog.internal.example with 10.0.2.21, and accounts on 127.0.0.1:7070, which only a container in
 // the proxy's own network namespace can answer; the two backends of the check service of
 // conformance/testdata/two-checks.yaml, check-1 at 10.0.3.31 and check-2 at 10.0.3.32, each the stub's accounts on
-// 7070, so a row can make one of them refuse connections; and, for a file that names it (held), the hold backend at
-// holdAddress, which nginx-plain's hold service names, as no other file's rows send to it and its start waits for its
-// queue to fill. 10.0.0.0/22 is the smallest block holding every one of them. The collector at 10.0.3.40, which only
+// 7070, so a row can make one of them refuse connections; and, for a file that names it (held), the hold backends at
+// holdAddress and hold2Address, which nginx-plain's hold and held services name, as no other file's rows send to them
+// and the start of each waits for its queue to fill. 10.0.0.0/22 is the smallest block holding every one of them. The collector at 10.0.3.40, which only
 // examples/full names, is left unreachable: no request waits for it. The ports 10000 and 9901 and the folders /config,
 // /etc/gateway/tls and /etc/gateway/jwt are the examples' listen, admin and tls keys and examples/full's auth.jwt.ca,
 // the same for every target. plain says the rendered file's listener speaks plain HTTP, so the clients do too.
@@ -145,9 +149,12 @@ func startWorld(t *testing.T, tg target, config string, plain, held bool) *world
 	if held {
 		// The queue of a listener holds one past its backlog, which net.core.somaxconn caps, so at 1 it fills with two
 		// of the stub's own connections. The sysctl is the network namespace's own, which docker run sets.
-		mustDocker(t, "run", "-d", "--name", hold, "--network", network, "--ip", holdAddress, "--sysctl", "net.core.somaxconn=1",
-			image, "hold", "-port", "8095")
-		waitHeld(t)
+		for name, ip := range map[string]string{hold: holdAddress, hold2: hold2Address} {
+			mustDocker(t, "run", "-d", "--name", name, "--network", network, "--ip", ip, "--sysctl", "net.core.somaxconn=1",
+				image, "hold", "-port", "8095")
+		}
+		waitHeld(t, hold)
+		waitHeld(t, hold2)
 	}
 	// The listener is published on a port Docker picks, so a run never meets a port another program holds.
 	mustDocker(t, append([]string{"run", "-d", "--name", proxy, "--network", network, "--ip", "10.0.0.10",
@@ -205,17 +212,17 @@ func waitPorts(t testing.TB, container, ports string, open bool) {
 	}
 }
 
-// waitHeld waits until the hold backend says its queue is full, every 100 ms for 10 s at most: until then a connection
-// to it is taken, and a row that wants none would read the proxy's answer to a connection that never answers.
-func waitHeld(t testing.TB) {
+// waitHeld waits until the hold backend name says its queue is full, every 100 ms for 10 s at most: until then a
+// connection to it is taken, and a row that wants none would read the proxy's answer to a connection that never answers.
+func waitHeld(t testing.TB, name string) {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		logs, err := docker("logs", hold)
+		logs, err := docker("logs", name)
 		if err == nil && strings.Contains(logs, "stub holds") {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("%s did not fill its queue within 10s; its log:\n%s", hold, logs)
+			t.Fatalf("%s did not fill its queue within 10s; its log:\n%s", name, logs)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

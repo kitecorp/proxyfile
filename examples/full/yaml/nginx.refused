@@ -1,5 +1,4 @@
 examples/full/yaml/proxyfile.yaml:11:3: "limits.connections" is refused by --target nginx: nginx counts its own listening sockets and every connection to a service against one limit, and closes a client's idle connection to take a new one, so no nginx setting holds client connections to a number; remove limits.connections, or render it for envoy
-examples/full/yaml/proxyfile.yaml:22:5: "services.<service name>.balance" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/yaml/proxyfile.yaml:23:5: "services.<service name>.health" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
 examples/full/yaml/proxyfile.yaml:23:14: "services.<service name>.health.path" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
 examples/full/yaml/proxyfile.yaml:23:30: "services.<service name>.health.grpc" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
@@ -7,12 +6,6 @@ examples/full/yaml/proxyfile.yaml:23:42: "services.<service name>.health.interva
 examples/full/yaml/proxyfile.yaml:23:57: "services.<service name>.health.timeout" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
 examples/full/yaml/proxyfile.yaml:23:70: "services.<service name>.health.healthy" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
 examples/full/yaml/proxyfile.yaml:23:82: "services.<service name>.health.unhealthy" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
-examples/full/yaml/proxyfile.yaml:25:25: "services.<service name>.address" a DNS name is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:25:60: "services.<service name>.balance" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:25:75: "services.<service name>.hash" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:25:82: "services.<service name>.hash.header" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:26:1: "dns" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:26:7: "dns.resolver" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/yaml/proxyfile.yaml:34:3: "auth.accept" holding a name with a * prefix is refused by --target nginx: nginx sets a request header only by a name its configuration writes; write each name in full
 examples/full/yaml/proxyfile.yaml:36:3: "auth.jwt" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
 examples/full/yaml/proxyfile.yaml:37:5: "auth.jwt.issuer" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
@@ -25,17 +18,7 @@ examples/full/yaml/proxyfile.yaml:43:5: "auth.jwt.claims" is refused by --target
 examples/full/yaml/proxyfile.yaml:43:14: "auth.jwt.claims.<header name>" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
 examples/full/yaml/proxyfile.yaml:43:30: "auth.jwt.claims.<header name>" is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy
 examples/full/yaml/proxyfile.yaml:44:1: "remove_from_clients" holding a name with a * prefix is refused by --target nginx: nginx takes each header by name; write each name in full
-examples/full/yaml/proxyfile.yaml:66:7: "routes[].rpc.retries" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:67:7: "routes[].rpc.rate_limit" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:67:20: "routes[].rpc.rate_limit.requests" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:67:35: "routes[].rpc.rate_limit.per" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:67:44: "routes[].rpc.rate_limit.by" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:72:53: "routes[].rate_limit" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:72:66: "routes[].rate_limit.requests" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:72:80: "routes[].rate_limit.per" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:72:89: "routes[].rate_limit.burst" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:72:100: "routes[].rate_limit.by" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:73:39: "routes[].retries" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:73:39: "routes[].retries" 1 or more is refused by --target nginx: nginx sends a request again after a service read it when its method is not POST, LOCK or PATCH; write retries: 0, or render it for envoy
 examples/full/yaml/proxyfile.yaml:80:1: "tracing" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/yaml/proxyfile.yaml:81:3: "tracing.provider" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
 examples/full/yaml/proxyfile.yaml:82:5: "tracing.provider.otel" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

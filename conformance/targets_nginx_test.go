@@ -10,9 +10,12 @@ import (
 // versions, so a row one of them answers differently fails in that entry alone. The validator reads the same file, so
 // an nginx upgrade changes one line for both, and scripts/pinned-images.sh, which the validator reads it with, holds
 // the rule pinnedImages holds, so the file the two read is refused by both or by neither. Each entry runs the
-// battery's two files for nginx, one with pattern routes and one with none, then its two files with the auth check,
-// one asked under deny at two check addresses and one under allow beside every other key the generator writes, then
-// examples/full, whose committed nginx.refused is checked by its render alone.
+// battery's two files for nginx, one with pattern routes and examples/full's traffic keys (rate limits, retries, a
+// service found by DNS, balance and hash) and one with no pattern route, whose clients are in front of the proxy, with
+// a route limited by client; then its two files with the auth check, one asked under deny at two check addresses and
+// one under allow beside the other keys the generator writes and a limited route; then examples/full, whose committed
+// nginx.refused is checked by its render alone, and examples/portable, the full example's world with only the keys
+// every generator is to render alike, which Envoy's entry runs too.
 // The admin listener answers /ready on 127.0.0.1 only, as Envoy's does.
 func nginxEntries(t testing.TB) []target {
 	nginx, _ := render.TargetNamed("nginx")
@@ -27,6 +30,7 @@ func nginxEntries(t testing.TB) []target {
 				{label: "nginx-checks", proxyfile: "testdata/nginx-checks.yaml"},
 				{label: "nginx-auth", proxyfile: "testdata/nginx-auth.yaml"},
 				{label: "full", proxyfile: "../examples/full/hocon/Proxyfile"},
+				{label: "portable", proxyfile: "../examples/portable/hocon/Proxyfile"},
 			},
 			image: p.image,
 			// The image's entrypoint runs its arguments as the command, so they start with the program; daemon off

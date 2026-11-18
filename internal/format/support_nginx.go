@@ -4,8 +4,10 @@ import (
 	"net/netip"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
+	"github.com/kitecorp/proxyfile/v2/internal/model"
 	"github.com/kitecorp/proxyfile/v2/internal/tree"
 )
 
@@ -26,6 +28,59 @@ var (
 	// in upstream", measured on nginx 1.30.6 and 1.31.8).
 	nginxNoZone = "nginx reads no zone in a backend's address; give the service an address without one"
 )
+
+// nginxNameWithoutResolver refuses a service's DNS name in a file with no dns.resolver: nginx looks a name up while it
+// runs only through its resolver directive, never through the host's configuration, and refuses to load an upstream
+// that resolves a name with none ("no resolver defined to resolve names at run time", measured on nginx 1.30.6 and
+// 1.31.8).
+var nginxNameWithoutResolver = Refusal{Form: "a DNS name with no dns.resolver",
+	Instead: "nginx looks a name up only through the name server it is given; write dns.resolver",
+	Applies: func(value, proxyfile *tree.Node) bool {
+		_, err := netip.ParseAddr(value.Text)
+		return err != nil && proxyfile.Get("dns").Get("resolver") == nil
+	}}
+
+// nginxHashOnCheck refuses balance: hash on the service auth.ask names, whose upstream the relay in the stream block
+// uses too. The variables a hash on a header or on the script's client key reads are the http block's, so nginx refuses
+// to load either there ("unknown variable"); under client_address connection it loads, but the relay's client is nginx
+// itself on a socket file, not the request's client (measured on nginx 1.30.6 and 1.31.8). It is refused whether auth
+// is enabled or not, so a file stays valid when the check is turned on.
+var nginxHashOnCheck = Refusal{Form: "hash on the service auth.ask names",
+	Instead: "nginx's check relay cannot read the check's headers to hash them; write another balance on the service",
+	Applies: func(value, proxyfile *tree.Node) bool {
+		checked, _, _ := strings.Cut(proxyfile.Get("auth").GetText("ask"), " ")
+		return value.Text == "hash" && checked != "" && proxyfile.Get("services").Get(checked).Get("balance") == value
+	}}
+
+// nginxNoWholeRate refuses a rate limit whose requests in per make no whole number a second or a minute: the rate of
+// limit_req_zone is a whole number of requests a second or a minute, in no other unit (nginx.org,
+// ngx_http_limit_req_module), and a rate rounded to one would admit other requests than the Envoy output. The rate
+// depends on requests too, which Applies reads in the rate limit that holds this per.
+var nginxNoWholeRate = Refusal{Form: "giving no whole number of requests a second or a minute",
+	Instead: "nginx's rate is a whole number of requests a second or a minute; write requests and per so that one of them is whole",
+	Applies: func(value, proxyfile *tree.Node) bool {
+		requests, err := strconv.ParseInt(rateLimitHolding(value, proxyfile).GetText("requests"), 10, 64)
+		millis, ok := model.ParseTime(value.Text)
+		_, _, whole := model.WholeRate(requests, millis)
+		return err == nil && ok && millis > 0 && !whole
+	}}
+
+// rateLimitHolding returns the rate limit of an entry of routes, or of its rpc, whose per is the node per, nil when
+// none is: a refusal is given one key's value, and the rate a per gives depends on requests beside it.
+func rateLimitHolding(per, proxyfile *tree.Node) *tree.Node {
+	routes := proxyfile.Get("routes")
+	if routes == nil {
+		return nil
+	}
+	for _, entry := range routes.Items {
+		for _, limit := range []*tree.Node{entry.Get("rate_limit"), entry.Get("rpc").Get("rate_limit")} {
+			if limit.Get("per") == per {
+				return limit
+			}
+		}
+	}
+	return nil
+}
 
 // nginxPathAlone is what a prefix or a path may not hold on nginx: %, a character Envoy escapes before it picks a route,
 // in upper case hex, and one outside ASCII. nginx matches a path holding such a character on the path it has decoded
@@ -157,7 +212,7 @@ var nginxTarget = Target{Name: "nginx", Title: "nginx", Keys: map[string]Support
 	// Measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2: /ready answered as Envoy answers it, a query and every
 	// other path 404 where Envoy answers 403, each method on each path as Envoy answers it but TRACE, and no log line
 	// for an admin request from either.
-	"admin": {Level: Partial, Note: "/stats is nginx's seven counters (active connections, accepts, handled, requests, reading, writing and waiting) and /server_info its version, not Envoy's; any other path or a query is answered 404, where the Envoy output answers 403; TRACE is answered 405 with no body, where the Envoy output answers it as GET"},
+	"admin": {Level: Partial, Note: "/stats is nginx's seven counters (active connections, accepts, handled, requests, reading, writing and waiting) and /server_info its version, not Envoy's; any other path or a query is answered 404, where the Envoy output answers 403; TRACE is answered 405 with no body, where the Envoy output answers it as GET; an absolute target is answered as the path it names, or 400 when nginx or the public listener's checks refuse it, as one with an empty port, user information or a query right after its host, where the Envoy output answers 404"},
 
 	// nginx answers what fails at the TLS level after the handshake, where Envoy ends the connection or the handshake.
 	// From the same TLS 1.2 ciphers and key exchange groups it chose others than Envoy for one offer: for openssl
@@ -229,21 +284,29 @@ var nginxTarget = Target{Name: "nginx", Title: "nginx", Keys: map[string]Support
 	"services.<service name>.grpc": {Level: Partial,
 		Note: "a call whose service resets its stream, or answers in HTTP/1.1, is answered 200 with grpc-status 14 and no grpc-message, where the Envoy output adds the grpc-message upstream connect error or disconnect/reset before headers. reset reason: remote reset, or for the HTTP/1.1 answer reset reason: protocol error; a request that is not a gRPC call is answered 502 with no body in both cases, where the Envoy output answers the stream reset 503 and the HTTP/1.1 answer 502, each with that text as text/plain"},
 	"services.<service name>.host_header": {Level: Supported},
-	// nginx looks a name up again while it runs only through the server's resolve parameter and a resolver directive
-	// (nginx.org, ngx_http_upstream_module), which this version does not write yet, so it takes an IP address alone.
-	// The reader takes an address as an IP address exactly when netip.ParseAddr reads it, so that parser decides here.
-	"services.<service name>.address": {Level: Partial, Note: "an IP address with no zone",
-		Refuses: []Refusal{{Form: "a DNS name", Instead: nginxNotWritten.Note,
-			Applies: func(value, _ *tree.Node) bool { _, err := netip.ParseAddr(value.Text); return err != nil }},
+	// A name's upstream keeps the addresses the name gives in a zone of 1 MiB, which held 1,000 addresses and not 2,000
+	// ("memory exhausted" in nginx's log); a name's addresses added, removed, answered no more and answered again were
+	// used or left within the 5 s refresh by both, with IPv4 and IPv6 addresses, and every request was served with the
+	// last answer while the name server was down (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2). The reader
+	// takes an address as an IP address exactly when netip.ParseAddr reads it, so that parser decides here.
+	"services.<service name>.address": {Level: Partial, Note: "a name gives at most about 1,000 addresses for each port",
+		Refuses: []Refusal{nginxNameWithoutResolver,
 			{Form: "a zoned IPv6 address", Instead: nginxNoZone, Applies: func(value, _ *tree.Node) bool { return zoned(value.Text) }}}},
 	"services.<service name>.addresses": {Level: Partial, Note: "IP addresses with no zone",
 		Refuses: []Refusal{{Form: "holding a zoned IPv6 address", Instead: nginxNoZone, Applies: func(value, _ *tree.Node) bool {
 			return slices.ContainsFunc(value.Items, func(item *tree.Node) bool { return zoned(item.Text) })
 		}}}},
-	"services.<service name>.balance":          nginxNotWritten,
-	"services.<service name>.hash":             nginxNotWritten,
-	"services.<service name>.hash.header":      nginxNotWritten,
-	"services.<service name>.hash.client":      nginxNotWritten,
+	// round_robin is nginx's own default, least_requests random two least_conn and random random, which spread 900
+	// requests on three backends as Envoy does, another draw of the same kind (measured on nginx 1.30.6 and 1.31.8
+	// beside Envoy 1.40.2).
+	"services.<service name>.balance": {Level: Partial, Note: "hash on the check's service is refused", Refuses: []Refusal{nginxHashOnCheck}},
+	// A hash puts each header value, or each client address as client_address reads it, on one backend, as Envoy
+	// does, on another ring of its own: the header's lines are joined in sorted order, as Envoy joins them, an empty
+	// header is hashed and an absent one goes round robin, and no backend that refuses is tried again (measured on
+	// nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2 with 300 values over HTTP/1.1 and HTTP/2).
+	"services.<service name>.hash":             {Level: Supported},
+	"services.<service name>.hash.header":      {Level: Supported},
+	"services.<service name>.hash.client":      {Level: Supported},
 	"services.<service name>.health":           nginxNoHealth,
 	"services.<service name>.health.path":      nginxNoHealth,
 	"services.<service name>.health.grpc":      nginxNoHealth,
@@ -252,8 +315,11 @@ var nginxTarget = Target{Name: "nginx", Title: "nginx", Keys: map[string]Support
 	"services.<service name>.health.healthy":   nginxNoHealth,
 	"services.<service name>.health.unhealthy": nginxNoHealth,
 
-	"dns":          nginxNotWritten,
-	"dns.resolver": nginxNotWritten,
+	// resolver with valid=5s in the http block, and in the stream block of the check's relay, asks for IPv4 and IPv6
+	// addresses and asks again over TCP after an answer cut short, as Envoy does (measured on nginx 1.30.6 and 1.31.8
+	// beside Envoy 1.40.2 with 100 and 1,000 addresses).
+	"dns":          {Level: Supported},
+	"dns.resolver": {Level: Supported},
 
 	// The route's location asks the check from proxyfile.js through a location of its own, which reaches a relay in the
 	// stream block: the relay sends the check its question and reads the answer itself, and hands nginx only what it
@@ -295,7 +361,7 @@ var nginxTarget = Target{Name: "nginx", Title: "nginx", Keys: map[string]Support
 	// sends the check neither, so no line passes a client's own copies on (measured with send: ["x-proxyfile-*"] on
 	// nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2).
 	"auth.send": {Level: Partial, Note: "a client's own x-proxyfile-method and x-proxyfile-path are not sent to the check when send covers them, where Envoy sends them; what the check is asked does not change"},
-	"auth.accept": {Level: Partial, Note: "names written in full, none of them a header nginx writes itself on the request it passes on; a request the accepted headers take past limits.request_headers is answered 500 as by Envoy, counted with the client's own Connection line, its own copies of the headers the proxy sets, each line of a name sent on several lines and each cookie field over HTTP/2, which Envoy drops, replaces or joins into one before it counts, so such a request can be answered 500 by those lines sooner; a request whose check answers a 200 that holds no accepted header is counted too, and answered 500 past limits.request_headers by its own lines, where Envoy counts only a request the check's answer set a header on and serves it; an accepted header the check sends empty reaches a gRPC service as no header, where Envoy sends it empty",
+	"auth.accept": {Level: Partial, Note: "names written in full, none of them a header nginx writes itself on the request it passes on; a request the accepted headers take past limits.request_headers is answered 500 as by Envoy, counted with the client's own Connection line, its own copies of the headers the proxy sets, each line of a name sent on several lines and each cookie field over HTTP/2, which Envoy drops, replaces or joins into one before it counts, so such a request can be answered 500 by those lines sooner; an accepted header the check sends empty reaches a gRPC service as no header, where Envoy sends it empty",
 		Refuses: []Refusal{nginxAcceptPrefix, nginxAcceptFramed}},
 	// The check is told the path the route matched, the one nginx has normalised where Envoy normalises it. In a file
 	// with no pattern route a path holding such a character is matched on $uri, which holds it decoded, and nginx
@@ -358,14 +424,21 @@ var nginxTarget = Target{Name: "nginx", Title: "nginx", Keys: map[string]Support
 	"origins.<environment name>.patterns": {Level: Partial,
 		Note: "an Origin holding a comma is answered 403, where the Envoy output can match two Origin lines joined with a comma; an Origin longer than 8,192 bytes is not matched against the patterns, so one a pattern would take is refused"},
 
-	"routes":                                    {Level: Supported},
-	"routes[].rpc":                              {Level: Supported},
-	"routes[].rpc.retries":                      nginxNotWritten,
-	"routes[].rpc.rate_limit":                   nginxNotWritten,
-	"routes[].rpc.rate_limit.requests":          nginxNotWritten,
-	"routes[].rpc.rate_limit.per":               nginxNotWritten,
-	"routes[].rpc.rate_limit.burst":             nginxNotWritten,
-	"routes[].rpc.rate_limit.by":                nginxNotWritten,
+	"routes":       {Level: Supported},
+	"routes[].rpc": {Level: Supported},
+	// A call is tried on the next backend after a connection the service refused or did not open in time, as the
+	// Envoy output tries it, and a gRPC call nginx sent is never sent again: 40 calls with one of two backends refusing
+	// were all served by the other, and a call whose stream or connection the service reset after it read it reached
+	// it once through both. A call with another method, GET or PUT with gRPC's content type over HTTP/1.1, is not tried
+	// again, because nginx sent it again after the service read it (measured on nginx 1.30.6 and 1.31.8 beside Envoy
+	// 1.40.2).
+	"routes[].rpc.retries": {Level: Partial,
+		Note: "a call whose method is not POST is not tried again; a service with one backend is not tried again, where the Envoy output tries the same backend"},
+	"routes[].rpc.rate_limit":                   {Level: Supported},
+	"routes[].rpc.rate_limit.requests":          {Level: Supported},
+	"routes[].rpc.rate_limit.per":               nginxRatePer,
+	"routes[].rpc.rate_limit.burst":             {Level: Supported},
+	"routes[].rpc.rate_limit.by":                nginxRateBy,
 	"routes[].rpc.to":                           {Level: Supported},
 	"routes[].rpc.to.<package pattern>":         {Level: Supported},
 	"routes[].rpc.to.<package pattern>.service": {Level: Supported},
@@ -389,13 +462,18 @@ var nginxTarget = Target{Name: "nginx", Title: "nginx", Keys: map[string]Support
 			{Form: "holding a character nginx escapes again",
 				Instead: "nginx escapes the new path before it sends it, so the service would receive that character escaped, where the Envoy output sends it as written; write the rewrite without it, or render it for envoy",
 				Applies: func(value, _ *tree.Node) bool { return !nginxRewriteText.MatchString(value.Text) }}}},
-	"routes[].auth":                {Level: Supported},
-	"routes[].retries":             nginxNotWritten,
-	"routes[].rate_limit":          nginxNotWritten,
-	"routes[].rate_limit.requests": nginxNotWritten,
-	"routes[].rate_limit.per":      nginxNotWritten,
-	"routes[].rate_limit.burst":    nginxNotWritten,
-	"routes[].rate_limit.by":       nginxNotWritten,
+	"routes[].auth": {Level: Supported},
+	// nginx sent a GET and a PUT to the service again after the service read them and reset or closed the connection,
+	// where the Envoy output tries again only a request no service received; with 0 nginx tries each request once, as
+	// the Envoy output does (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2).
+	"routes[].retries": {Level: Partial, Note: "0 alone", Refuses: []Refusal{{Form: "1 or more",
+		Instead: "nginx sends a request again after a service read it when its method is not POST, LOCK or PATCH; write retries: 0, or render it for envoy",
+		Applies: func(value, _ *tree.Node) bool { return value.Text != "0" }}}},
+	"routes[].rate_limit":          {Level: Supported},
+	"routes[].rate_limit.requests": {Level: Supported},
+	"routes[].rate_limit.per":      nginxRatePer,
+	"routes[].rate_limit.burst":    {Level: Supported},
+	"routes[].rate_limit.by":       nginxRateBy,
 
 	"rpc":                   {Level: Supported},
 	"rpc.methods":           {Level: Supported},
@@ -419,7 +497,7 @@ var nginxTarget = Target{Name: "nginx", Title: "nginx", Keys: map[string]Support
 	// and is logged at any status_from, as Envoy logs it. One whose status nginx reads as three other digits, 050, 2 0 0
 	// or 403.1, logs that number, 50, 200 or 403, and is logged only by a status_from that takes it, where Envoy logs
 	// 502 with UPE at any (measured with each form on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2).
-	"log":             {Level: Partial, Note: "the time is the moment nginx writes the line, in whole seconds with the offset of nginx's time zone (+00:00 in UTC), where the Envoy output writes the request's start in milliseconds with Z; over HTTP/1.1 bytes_out counts the chunk lines of an answer nginx sends chunked, where the Envoy output counts its body alone; an answer whose status has one, two or four digits, or that has no status line, logs the status 9, where the Envoy output logs the four digits or 502; a status that starts with 0 logs its number without the zeros (050 as 50), one with spaces between its digits the digits joined (2 0 0 as 200) and one with a fraction its whole number (403.1 as 403), each written only when that number is status_from or above or sample takes the request, where the Envoy output writes 502 whatever status_from says; bytes_in counts the whole request, not its body; upstream_ms counts from the opening of the service connection, not from the request's start; authz_us counts the check's time in whole milliseconds, 0, 1000, 2000 and so on, where the Envoy output counts microseconds; there are no flags and details fields; a value the Envoy output writes null is written empty, but upstream_ms; a request the origin or upgrade check refuses logs route and upstream empty, where the Envoy output names them; a request refused for a dot segment with a ; parameter logs route empty on each of its lines, where the Envoy output names the route that refuses it, refused:dot-segment-with-parameter; a request Envoy refuses as it reads it logs its host, method, request id and protocol, which Envoy writes null and HTTP/1.1; a request id or Host holding a byte above 0x7F is logged empty"},
+	"log":             {Level: Partial, Note: "the time is the moment nginx writes the line, in whole seconds with the offset of nginx's time zone (+00:00 in UTC), where the Envoy output writes the request's start in milliseconds with Z; over HTTP/1.1 bytes_out counts the chunk lines of an answer nginx sends chunked, where the Envoy output counts its body alone; an answer whose status has one, two or four digits, or that has no status line, logs the status 9, where the Envoy output logs the four digits or 502; a status that starts with 0 logs its number without the zeros (050 as 50), one with spaces between its digits the digits joined (2 0 0 as 200) and one with a fraction its whole number (403.1 as 403), each written only when that number is status_from or above or sample takes the request, where the Envoy output writes 502 whatever status_from says; bytes_in counts the whole request, not its body; upstream_ms counts from the opening of the service connection of the try that answered, not from the request's start; authz_us counts the check's time in whole milliseconds, 0, 1000, 2000 and so on, where the Envoy output counts microseconds; there are no flags and details fields; a value the Envoy output writes null is written empty, but upstream_ms; a request the origin or upgrade check refuses logs route and upstream empty, where the Envoy output names them; a request refused for a dot segment with a ; parameter logs route empty on each of its lines, where the Envoy output names the route that refuses it, refused:dot-segment-with-parameter; a request Envoy refuses as it reads it logs its host, method, request id and protocol, which Envoy writes null and HTTP/1.1; a request id or Host holding a byte above 0x7F is logged empty"},
 	"log.status_from": {Level: Supported},
 	"log.sample":      {Level: Partial, Note: "the share is drawn by a hash of the request id, not by its first eight hex digits"},
 
@@ -451,7 +529,7 @@ var nginxTarget = Target{Name: "nginx", Title: "nginx", Keys: map[string]Support
 
 	"the request's path normalised before a route is picked": {Level: Partial,
 		Note: "a path that holds //, a dot segment, an escaped unreserved character or %2F and also an escape Envoy keeps, such as %3B, is answered 400, and so is one that holds such an escape beside a character Envoy escapes before it matches (\" < > ^ ` { | } or one outside ASCII), where Envoy normalises the path and keeps the escape; an empty query, a ? with nothing after it, after a path that needs normalising or holds such a character is answered 400, where Envoy sends the ? on; a backslash, %5C and a control character, written or escaped, are answered 400, and so is an invalid escape such as %zz, which Envoy passes on; a path with an empty segment before a dot-dot segment, / and . written or escaped, such as /catalog//../products/1, is answered 400, where Envoy resolves the dot-dot segment before it merges the slashes and routes /catalog/products/1"},
-	"a dot segment with a ; parameter answered 400": {Level: Partial, Note: "/a/..;/b is answered 400 where Envoy 1.40 resolves it, and nginx closes the connection after it, as after every 400 it answers for a path before a route"},
+	"a dot segment with a ; parameter answered 400": {Level: Partial, Note: "/a/..;/b is answered 400 where Envoy 1.40 resolves it, and nginx closes the connection after it, as after every 400 it answers for a path before a route; so is a CORS preflight through such a segment, where Envoy answers it as the preflight of the path it resolves"},
 	// Over HTTP/2, :authority and a host field that agree, differ or are empty, and over HTTP/1.1 a header block that
 	// gains a byte a second and a connection that sends nothing to a listener without tls, each measured on nginx 1.30.6
 	// and 1.31.8 beside Envoy 1.40.2 at the full time: the 5 minutes of nginx's client_header_timeout, written in the
@@ -462,8 +540,24 @@ var nginxTarget = Target{Name: "nginx", Title: "nginx", Keys: map[string]Support
 	// after its request, measured with no auth on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2: no service received the
 	// request through either, and a Host no environment names was answered 404 by both.
 	"the request line and header names read before a route is picked": {Level: Partial,
-		Note: "a tab between the method and the target, an absolute target with user information, with no Host header or with a query or a fragment right after its host, and OPTIONS * are answered 400, TRACE and CONNECT 405, and a request line with no version, HTTP/0.9's form, gets no answer, where Envoy serves the first two and TRACE, answers OPTIONS *, CONNECT and that absolute target 404, and that request line 426; HTTP/0.0 to HTTP/0.9 with headers are answered 400 and HTTP/2.0 to HTTP/9.9 on an HTTP/1 connection 505, where Envoy answers 426; every QUERY over HTTP/1.1 is answered 400, where Envoy serves one with a Content-Type, and over HTTP/2 a QUERY with no Content-Type or an empty one is served, where Envoy answers 400; a header name outside RFC 9110's token characters, or a header value holding a control byte other than a tab, is answered 400 over HTTP/1.1 and HTTP/2, where Envoy answers 400 over HTTP/1.1 and closes the connection over HTTP/2; over HTTP/2 any request trailer ends the connection, where Envoy serves the request; a header line folded onto the next and a Host whose port is past 65535 or holds a sign are answered 400, where Envoy serves them; a request holding a header name with _ that nginx reads as one of its own headers, or a second X-Forwarded-For, X-Forwarded-Proto, X-Request-Id, Content-Type, User-Agent or Referer line, is refused with 400, where Envoy reads the name as another header and joins the lines with a comma; a Connection header that names a header other than close, keep-alive, upgrade, http2-settings and te is answered 400, where Envoy removes the header it names and serves the request; a second line of authorization, if-modified-since, if-unmodified-since, if-match, if-none-match or if-range is answered 400, where Envoy joins the lines with a comma and serves the request; the lines of accept, via and accept-encoding, each a list, reach the service as separate lines, where Envoy joins them with a comma into one line, the same message written as separate lines; over HTTP/1.1 a tab before or after a header value reaches the service with the value, where Envoy removes it, the same message written another way; two Host lines are answered 400, where Envoy answers 404; over HTTP/2 a host field that differs from :authority, and an empty :authority or host field, is answered 400 with nginx's own page, where Envoy routes by :authority and closes the connection with no answer to an empty one; over HTTP/1.1 a header block still arriving after 5 minutes is ended with no answer, where Envoy answers 408 then and closes the connection a second later, and a connection that sends nothing to a listener without tls is closed after 5 minutes, where Envoy keeps it for an hour; a client that closes its side of the connection right after its request gets nginx's answer when nginx refuses the request itself, an Origin on none of the hosts, a target holding a fragment, a dot segment with a ; parameter or HTTP/1.0, where Envoy closes the connection with no answer; without limits.request_headers nginx holds the Envoy output's 60 KiB and 100 header fields, with the differences the rows of its keys name"},
+		Note: "a tab between the method and the target, an absolute target with user information, with no Host header or with a query or a fragment right after its host, and OPTIONS * are answered 400 and the connection closed, TRACE and CONNECT 405, and a request line with no version, HTTP/0.9's form, gets the text Bad Request alone, with no status line, where Envoy serves the first two and TRACE, answers OPTIONS *, CONNECT and that absolute target 404, and that request line 426; HTTP/0.0 to HTTP/0.9 with headers are answered 400 and HTTP/2.0 to HTTP/9.9 on an HTTP/1 connection 505, where Envoy answers 426; a request nginx's own parser refuses before any rule of the file runs, such as one with a control byte in the target, a space in a header name or no Host line, is answered 400 with nginx's HTML page as text/html, where the Envoy output's 400 carries the body Bad Request as text/plain, or no body for a request with no Host line; the 426 nginx answers carries no reason phrase on its status line, HTTP/1.1 426 alone, where the Envoy output's reads 426 Upgrade Required; a header name outside RFC 9110's token characters, or a header value holding a control byte other than a tab, is answered 400 over HTTP/1.1 and HTTP/2, where Envoy answers 400 over HTTP/1.1 and closes the connection over HTTP/2; over HTTP/2 any request trailer ends the connection, where Envoy serves the request; a header line folded onto the next and a Host whose port is past 65535 or holds a sign are answered 400, where Envoy serves them; a request holding a header name with _ that nginx reads as one of its own headers, or a second X-Forwarded-For, X-Forwarded-Proto, X-Request-Id, Content-Type, User-Agent or Referer line, is refused with 400, where Envoy reads the name as another header and joins the lines with a comma; a Connection header that names a header other than close, keep-alive, upgrade, http2-settings and te is answered 400, where Envoy removes the header it names and serves the request; a second line of authorization, if-modified-since, if-unmodified-since, if-match, if-none-match or if-range is answered 400, where Envoy joins the lines with a comma and serves the request; the lines of accept, via and accept-encoding, each a list, reach the service as separate lines, where Envoy joins them with a comma into one line, the same message written as separate lines; over HTTP/1.1 a tab before or after a header value reaches the service with the value, where Envoy removes it, the same message written another way; two Host lines are answered 400, where Envoy answers 404; over HTTP/2 a host field that differs from :authority, and an empty :authority or host field, is answered 400 with nginx's own page, where Envoy routes by :authority and closes the connection with no answer to an empty one; over HTTP/1.1 a header block still arriving after 5 minutes is ended with no answer, where Envoy answers 408 then and closes the connection a second later, and a connection that sends nothing to a listener without tls is closed after 5 minutes, where Envoy keeps it for an hour; a client that closes its side of the connection right after its request gets nginx's answer when nginx refuses the request itself, an Origin on none of the hosts, a target holding a fragment, a dot segment with a ; parameter or HTTP/1.0, where Envoy closes the connection with no answer; without limits.request_headers nginx holds the Envoy output's 60 KiB and 100 header fields, with the differences the rows of its keys name"},
 }, LessStrict: nginxLessStrict}
+
+// The rows of a rate limit, the same for an entry of routes and for its rpc. Each limited entry has a zone of shared
+// memory that every worker charges, keyed as client_address reads the client, before the check, and a request over the
+// limit gets the Envoy output's answer for its kind; the same requests were admitted and refused at every instant of
+// paced plans with per 1s, 2s and 1m and burst 0 and 5, and 200 requests sent at once to 12 workers admitted the 10 of
+// a limit of 10 (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2). Both end the connection after every HTTP/1.1
+// request over the limit with a body, a gRPC call and a Connect call among them, and keep it after one with none.
+// nginx keeps a rate as thousandths of a request a second, rounded down. Its zone of 16 MiB held 120,000 clients,
+// where Envoy forgets the oldest past 65,536.
+var (
+	nginxRatePer = Support{Level: Partial,
+		Note:    "a rate a minute is kept in thousandths of a request a second, rounded down, so 1 a minute refills every 62.5 s where the Envoy output refills every 60 s (nginx refused at 62.1 s and admitted at 63.3 s)",
+		Refuses: []Refusal{nginxNoWholeRate}}
+	nginxRateBy = Support{Level: Partial,
+		Note: "each limited route remembers about 120,000 clients in up to 16 MiB of shared memory, where the Envoy output remembers 65,536, so a client is forgotten later"}
+)
 
 // nginxLessStrict are the ways the nginx output is less strict than the Envoy output, measured on nginx 1.30.6 and
 // 1.31.8 beside Envoy 1.40.2.
@@ -509,6 +603,10 @@ var nginxLessStrict = []LessStrict{
 	// is left that makes nginx drop the request.
 	{Row: "auth.ask", Name: "a request whose client closes its connection during the check can still reach the service",
 		Measured: "When a client closes its connection while its check is asked, with a close, a reset or a half-close, and the check then allows the request, nginx can still send the request to the service, where the Envoy output ends the request when its client goes and sends the service nothing. Of 30 clients, one after another, that each sent a request and closed 50 ms into a check that allowed it after 300 ms, the service received 16 to 21 `GET` requests and 17 to 29 `POST` requests with their bodies, 12 and 17 after a reset and 17 and 23 after a half-close, once nginx had served other requests to it and so held idle connections to it; from a just-started nginx it received none, and through the Envoy output none in any round. `proxy_ignore_client_abort` is off, nginx's default."},
+	// grpc_next_upstream tries the next backend as soon as a connection fails, and no directive of nginx's gRPC module
+	// sets a wait before it or a limit on the retries in flight (nginx.org, ngx_http_grpc_module).
+	{Row: "routes[].rpc.retries", Name: "a retried call is sent again at once and with no limit on retries at the same time",
+		Measured: "A call whose first connection was refused is sent to the next backend at once, where the Envoy output waits 25 ms, and every such call is retried, where the Envoy output retries at most 3 at the same time and fails the others (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2)."},
 	{Row: "log", Name: "a chunked answer its service cuts short writes no upstream-failure line",
 		Measured: "A service that closes its connection after the first chunk of a chunked `200` answer reaches the client as it does through the Envoy output, which then writes the request line with the flag `UPE`, whatever `log` says, and a `gateway_upstream_failure` line; nginx writes no upstream-failure line, and the request line only when `log` takes the request by its status or its share: nginx records the answer as complete, and with no content-length there is no length to compare the bytes it received to. An answer cut short before its content-length is logged as the Envoy output logs it."},
 }

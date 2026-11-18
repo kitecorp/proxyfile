@@ -43,6 +43,9 @@ type exchange struct {
 	repeat   int
 	admitted int  // with repeat, the first admitted answers must be 200
 	every    bool // with repeat, every answer must be what want asks, instead of at least one
+	// alternate, with repeat, is sent in place of send by every second request, so a row's answers are to two requests:
+	// with oneInstance, both must reach one backend.
+	alternate *request
 	// refusing names the backend containers, by their roles and separated by commas, such as shop-2 or shop-1,shop-2,
 	// that refuse connections on every port while the row's requests go out, as a backend that is down does
 	// (world.refuse).
@@ -109,6 +112,11 @@ type own struct {
 type literal struct {
 	want     answer
 	admitted int
+	// also, on a row that says every, is the other answer the answers after the first admitted may be, on a file whose
+	// values give only some of the requests want: each must be want or also, and at least one must be each. On a file
+	// whose route writes retries: 0, a retry row's requests that the refusing backend draws get the proxy's answer, and
+	// the others the service's.
+	also *answer
 }
 
 // request is what the battery sends to the proxy's listener.
@@ -183,7 +191,10 @@ type answer struct {
 	replaced                        map[string]string // headers the client sent with these values; the stub must receive each with another value
 	// forms holds headers the stub must have received with a value the regular expression matches, and that the answer
 	// must carry with the same value: a value the proxy makes anew for each request, such as a request id.
-	forms      map[string]*regexp.Regexp
+	forms map[string]*regexp.Regexp
+	// made holds response headers the answer must carry with a value the regular expression matches, for a value the
+	// proxy makes anew on an answer no stub wrote, such as the request id of its own 404.
+	made       map[string]*regexp.Regexp
 	body       string // the body the stub received; "" is not compared
 	noTrailers bool   // the stub must have received no trailer
 	marked     string // the value of the target's unchecked mark the stub must receive
@@ -192,7 +203,11 @@ type answer struct {
 	first int
 	// unreadable wants a stub's own answer to a request its HTTP server could not read (result.stubError): the proxy
 	// passed the request on as sent. No service is compared then, because that answer names none.
-	unreadable     bool
+	unreadable bool
+	// oneInstance, on a row with repeat, wants every answer after the first admitted from one backend of the service,
+	// whichever it is: a request whose hash picks the backend reaches the same one each time. compare reads one answer,
+	// so sendRepeated, which reads them all, checks it.
+	oneInstance    bool
 	attempt        int
 	atLeast, below time.Duration
 	// logged holds, by the event a line of the proxy's log names, "request" for the request log's own line, which
@@ -260,6 +275,11 @@ func compare(want answer, got result, mark string) []string {
 	for _, name := range slices.Sorted(maps.Keys(want.headers)) {
 		if value := strings.Join(got.header.Values(name), ","); value != want.headers[name] {
 			differ("header %s: got %q, want %q", name, value, want.headers[name])
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(want.made)) {
+		if value := strings.Join(got.header.Values(name), ","); !want.made[name].MatchString(value) {
+			differ("header %s: got %q, want a value %s matches", name, value, want.made[name])
 		}
 	}
 	if want.grpcStatus != "" {

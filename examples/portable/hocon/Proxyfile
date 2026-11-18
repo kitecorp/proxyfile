@@ -11,7 +11,6 @@ tls {
 client_address = connection
 
 limits {
-  connections = 4096
   request_headers { size = 96KiB, count = 150 }
 }
 

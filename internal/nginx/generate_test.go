@@ -225,7 +225,7 @@ func TestSecurityLines(t *testing.T) {
 			// the path needs it (-uri), and otherwise to the one that sends the path as the client wrote it.
 			want := []string{
 				`  map "$pf_f_dotparam$pf_f_backslash$pf_f_control$pf_f_upgrade$pf_f_preflight:$pf_mode:$pf_g3" $pf_route {`,
-				`    "~^1" refused;`, `    "~^01" refused;`, `    "~^001" refused;`, `    "~^0001" upgrade-refused;`,
+				`    "~^1" refused;`, `    "~^01" refused;`, `    "~^001" refused;`, `    "~^0001" upgrade-refused-$pf_has_origin;`,
 				`    "~^0000[01]:refused:" refused;`, `    "~^0000[01]:[a-z]+:failed\\z" refused;`,
 				`    "~^00001:[a-z]+:[1-9]" preflight;`, `    "~^00000:rawk:[0-9]+w\\z" refused;`,
 				`    "~^00000:uri:(?<pf_n>[1-9][0-9]*)\\z" $pf_n-uri;`, `    "~^00000:[a-z]+:(?<pf_n>[1-9][0-9]*)w?\\z" $pf_n;`,
@@ -263,16 +263,20 @@ func TestSecurityLines(t *testing.T) {
 		}},
 		{"a route without a rewrite sends the path as written, or as nginx has normalised it", func() string {
 			// catalog, route 10, has no rewrite; accounts-webhooks, route 5, has one, which reads $uri in both modes. Each
-			// location names its route and upstream for the request log on its first two lines, then rewrites the path.
+			// location names its route and upstream for the request log on its first two lines, a limited route's its
+			// limit on the next two (the battery file limits catalog), then rewrites the path.
 			for _, server := range environmentServers(out) {
-				for _, want := range [][2]string{
-					{"    location @pf_r_10 {", "      proxy_set_header Host $pf_authority;"},
-					{"    location @pf_r_10-uri {", "      rewrite ^ $uri break;"},
-					{"    location @pf_r_5 {", `      rewrite "^/api/webhooks((?s).*)\\z" "/hooks/payments$1" break;`},
+				for _, want := range []struct {
+					open, line string
+					after      int // the lines between open and line
+				}{
+					{"    location @pf_r_10 {", "      proxy_set_header Host $pf_authority;", 4},
+					{"    location @pf_r_10-uri {", "      rewrite ^ $uri break;", 4},
+					{"    location @pf_r_5 {", `      rewrite "^/api/webhooks((?s).*)\\z" "/hooks/payments$1" break;`, 2},
 				} {
-					at := slices.Index(server, want[0])
-					if at < 0 || at+3 >= len(server) || server[at+3] != want[1] {
-						return fmt.Sprintf("an environment server holds no %q with %q after its two log lines", want[0], want[1])
+					at := slices.Index(server, want.open) + want.after + 1
+					if at <= want.after || at >= len(server) || server[at] != want.line {
+						return fmt.Sprintf("an environment server holds no %q with %q after its log and limit lines", want.open, want.line)
 					}
 				}
 				if slices.Contains(server, "    location @pf_r_5-uri {") {
@@ -307,7 +311,7 @@ func TestSecurityLines(t *testing.T) {
 			return ""
 		}},
 		{"the first route that is not 0 wins, and a failed run is refused", func() string {
-			// The battery file's 80 places of a route are read in groups of 64, and a third map reads the two groups.
+			// The battery file's 81 places of a route are read in groups of 64, and a third map reads the two groups.
 			var first []string
 			for n := 1; n <= 64; n++ {
 				first = append(first, fmt.Sprintf("$pf_m%d", n))
@@ -316,7 +320,7 @@ func TestSecurityLines(t *testing.T) {
 			for _, line := range []string{
 				`  map "$pf_p5:$request_method" $pf_m5 { "~^1:POST\\z" 5w; "~^e:" failed; default 0; }`,
 				`  map "` + strings.Join(first, ":") + `:" $pf_g1 ` + pick,
-				`  map "$pf_m65:$pf_m66:$pf_m67:$pf_m68:$pf_m69:$pf_m70:$pf_m71:$pf_m72:$pf_m73:$pf_m74:$pf_m75:$pf_m76:$pf_m77:$pf_m78:$pf_m79:$pf_m80:" $pf_g2 ` + pick,
+				`  map "$pf_m65:$pf_m66:$pf_m67:$pf_m68:$pf_m69:$pf_m70:$pf_m71:$pf_m72:$pf_m73:$pf_m74:$pf_m75:$pf_m76:$pf_m77:$pf_m78:$pf_m79:$pf_m80:$pf_m81:" $pf_g2 ` + pick,
 				`  map "$pf_g1:$pf_g2:" $pf_g3 ` + pick,
 			} {
 				if broken := missing(out, line); broken != "" {
@@ -349,9 +353,9 @@ func TestSecurityLines(t *testing.T) {
 					return fmt.Sprintf("a route map that names another route: %q", line)
 				}
 			}
-			// 80 places of a route, one of them with a method, which maps its path and then its method.
-			if count != 81 {
-				return fmt.Sprintf("%d route maps, want 81", count)
+			// 81 places of a route, one of them with a method, which maps its path and then its method.
+			if count != 82 {
+				return fmt.Sprintf("%d route maps, want 82", count)
 			}
 			return ""
 		}},
@@ -386,7 +390,7 @@ func TestSecurityLines(t *testing.T) {
 			routeLocations := 0
 			for n, server := range servers {
 				for _, location := range blocks(server, "    location @pf_r_") {
-					if !regexp.MustCompile(`^    location @pf_r_[0-9]+(-uri)? \{$`).MatchString(location[0]) {
+					if !regexp.MustCompile(`^    location @pf_r_[0-9]+(-uri)?(-once)? \{$`).MatchString(location[0]) {
 						continue
 					}
 					routeLocations++
@@ -395,13 +399,15 @@ func TestSecurityLines(t *testing.T) {
 					}
 				}
 				name := server[slices.IndexFunc(server, func(line string) bool { return strings.HasPrefix(line, "    server_name ") })]
-				at := slices.Index(server, "    location @pf_502 {")
-				if at < 0 || at+1 >= len(server) || server[at+1] != `      return 502 "$pf_empty";` {
-					return fmt.Sprintf("the server of %q holds no location @pf_502 answering 502 with no body", name)
+				// The 502 carries no Content-Type, as the Envoy output's carries none: nginx would give it default_type,
+				// or the type of the path's extension.
+				answer := []string{"    location @pf_502 {", `      default_type "";`, `      return 502 "$pf_empty";`, "    }"}
+				if got := blocks(server, "    location @pf_502 {"); len(got) != 1 || !slices.Equal(got[0], answer) {
+					return fmt.Sprintf("the server of %q holds %q, want %q", name, got, answer)
 				}
 				grpc := blocks(server, "    location @pf_502-grpc {")
 				want := []string{"    location @pf_502-grpc {", "      default_type application/grpc;",
-					"      add_header x-request-id $pf_request_id always;", "      add_header Vary Origin always;",
+					"      add_header x-request-id $pf_answer_id always;", "      add_header Vary Origin always;",
 					fmt.Sprintf("      add_header Access-Control-Allow-Origin $pf_acao%d always;", n+1),
 					fmt.Sprintf("      add_header Access-Control-Expose-Headers $pf_aceh%d always;", n+1),
 					"      add_header grpc-status 14 always;", `      return 200 "$pf_empty";`, "    }"}
@@ -411,16 +417,17 @@ func TestSecurityLines(t *testing.T) {
 			}
 			// A server with no Access-Control lines repeats the other two.
 			want := []string{"    location @pf_502-grpc {", "      default_type application/grpc;",
-				"      add_header x-request-id $pf_request_id always;", "      add_header Vary Origin always;",
+				"      add_header x-request-id $pf_answer_id always;", "      add_header Vary Origin always;",
 				"      add_header grpc-status 14 always;", `      return 200 "$pf_empty";`, "    }"}
 			if got := blocks(lines(generate(t, string(testsupport.ReadFile(t, "../../examples/grpc/yaml/proxyfile.yaml")))),
 				"    location @pf_502-grpc {"); len(got) != 1 || !slices.Equal(got[0], want) {
 				return fmt.Sprintf("the gRPC example holds %q, want %q", got, want)
 			}
-			// 80 places of a route in each of four environments, each with a second location but the two with a
-			// rewrite.
-			if routeLocations != 632 {
-				return fmt.Sprintf("%d route locations, want 632", routeLocations)
+			// 81 places of a route in each of four environments, each with a second location but the two with a
+			// rewrite, and a copy that tries once of each of the six locations of the three RPC methods, which the file
+			// retries: (81 * 2 - 2 + 6) * 4 = 664.
+			if routeLocations != 664 {
+				return fmt.Sprintf("%d route locations, want 664", routeLocations)
 			}
 			return ""
 		}},
@@ -462,10 +469,10 @@ func TestSecurityLines(t *testing.T) {
 				return fmt.Sprintf("%d environment servers, want 4", len(servers))
 			}
 			for i, server := range servers {
-				check := []string{fmt.Sprintf("    if ($pf_o%d) {", i+1), `      return 403 "Invalid CORS request";`, "    }"}
+				check := []string{fmt.Sprintf("    if ($pf_o%d) {", i+1), "      set $pf_route $pf_foreign_refusal;", "      break;", "    }"}
 				at := slices.Index(server, check[0])
 				firstLocation := slices.IndexFunc(server, func(line string) bool { return strings.HasPrefix(line, "    location ") })
-				if at < 0 || at+3 > len(server) || !slices.Equal(server[at:at+3], check) || at > firstLocation {
+				if at < 0 || at+len(check) > len(server) || !slices.Equal(server[at:at+len(check)], check) || at > firstLocation {
 					return fmt.Sprintf("environment server %d holds no %q before its first location", i+1, check)
 				}
 			}
@@ -482,17 +489,19 @@ func TestSecurityLines(t *testing.T) {
 			}
 			// With cors written each environment answers a preflight with its values, "*" echoing what the request asks
 			// for; the live environment, which holds lists, also names the origin it admits and the headers it exposes.
-			// Without cors and lists the answer is 200 with no body and no line of its own.
-			plain := []string{"    location @pf_r_preflight {", `      return 200 "$pf_empty";`, "    }"}
-			answer := []string{"    location @pf_r_preflight {", "      add_header x-request-id $pf_request_id always;",
+			// Without cors and lists the answer is 200 with no body and no line of its own. Every one carries no
+			// Content-Type, as the Envoy output's carries none, where nginx would send text/plain (measured on Envoy 1.40.2
+			// beside nginx 1.30.6 and 1.31.8).
+			plain := []string{"    location @pf_r_preflight {", `      default_type "";`, `      return 200 "$pf_empty";`, "    }"}
+			answer := []string{"    location @pf_r_preflight {", "      add_header x-request-id $pf_answer_id always;",
 				"      add_header Vary Origin always;", "      add_header Access-Control-Allow-Methods $http_access_control_request_method always;",
 				"      add_header Access-Control-Allow-Headers $http_access_control_request_headers always;",
-				"      add_header Access-Control-Max-Age 600 always;", `      return 200 "$pf_empty";`, "    }"}
+				"      add_header Access-Control-Max-Age 600 always;", `      default_type "";`, `      return 200 "$pf_empty";`, "    }"}
 			// An environment with lists names the origin it admits, and with cors the headers it exposes.
 			listed := func(n int) []string {
-				return []string{"    location @pf_r_preflight {", "      add_header x-request-id $pf_request_id always;",
+				return []string{"    location @pf_r_preflight {", "      add_header x-request-id $pf_answer_id always;",
 					"      add_header Vary Origin always;", fmt.Sprintf("      add_header Access-Control-Allow-Origin $pf_acao%d always;", n),
-					`      return 200 "$pf_empty";`, "    }"}
+					`      default_type "";`, `      return 200 "$pf_empty";`, "    }"}
 			}
 			withCORS := func(n int) []string {
 				return slices.Concat(answer[:3], []string{fmt.Sprintf("      add_header Access-Control-Allow-Origin $pf_acao%d always;", n)}, answer[3:6],
@@ -563,9 +572,9 @@ func TestSecurityLines(t *testing.T) {
 			}); set < 0 || set > first {
 				return fmt.Sprintf("the live server sets $pf_reached at line %d, want before its first if at line %d", set, first)
 			}
-			for _, name := range []string{"refused", "upgrade-refused", "no-route"} {
+			for _, name := range []string{"refused", "upgrade-required", "upgrade-refused-0", "upgrade-refused-1", "origin-refused", "no-route"} {
 				location := blocks(live, "    location @pf_r_"+name+" {")
-				if len(location) != 1 || !slices.Equal(location[0][1:3], []string{"      add_header x-request-id $pf_request_id always;", "      add_header Vary Origin always;"}) ||
+				if len(location) != 1 || !slices.Equal(location[0][1:3], []string{"      add_header x-request-id $pf_answer_id always;", "      add_header Vary Origin always;"}) ||
 					slices.ContainsFunc(location[0], func(line string) bool { return strings.Contains(line, "Access-Control") }) {
 					return fmt.Sprintf("the live server's @pf_r_%s is %q, want its own x-request-id and Vary lines and no Access-Control line", name, location)
 				}
@@ -593,16 +602,31 @@ func TestSecurityLines(t *testing.T) {
 			return ""
 		}},
 		{"an upgrade other than WebSocket", func() string {
-			// The Envoy output answers it 403 with the body Invalid CORS request when the request carries an Origin, and
-			// with no body when it carries none, with or without cors.
-			if broken := missing(out, `  map $pf_origin $pf_upgrade_refused { "" ""; default "Invalid CORS request"; }`); broken != "" {
+			// The Envoy output answers it 403 with the body Invalid CORS request as text/plain when the request carries an
+			// Origin, and with no body and no Content-Type when it carries none, with or without cors, and closes the
+			// connection after it, from an origin the origin check refuses too, where it keeps the connection after that
+			// check's 403 to any other request (measured on Envoy 1.40.2): the route choice names the location by
+			// $pf_has_origin, and the origin check by $pf_foreign_refusal.
+			if broken := missing(out, "  map $pf_f_upgrade $pf_foreign_refusal { 1 upgrade-refused-1; default origin-refused; }"); broken != "" {
 				return broken
 			}
 			for _, server := range environmentServers(out) {
-				location := blocks(server, "    location @pf_r_upgrade-refused {")
-				if len(location) != 1 || !slices.Contains(location[0], `      return 403 "$pf_upgrade_refused";`) {
-					return fmt.Sprintf("an environment server's @pf_r_upgrade-refused is %q, want it to return 403 \"$pf_upgrade_refused\"", location)
+				refused := blocks(server, "    location @pf_r_origin-refused {")
+				if len(refused) != 1 || !slices.Equal(refused[0][len(refused[0])-2:], []string{`      return 403 "Invalid CORS request";`, "    }"}) ||
+					slices.Contains(refused[0], "      keepalive_timeout 0;") || slices.Contains(refused[0], `      default_type "";`) {
+					return fmt.Sprintf("an environment server's @pf_r_origin-refused is %q, want the 403's text, the type kept and the connection too", refused)
 				}
+				none, origin := blocks(server, "    location @pf_r_upgrade-refused-0 {"), blocks(server, "    location @pf_r_upgrade-refused-1 {")
+				if len(none) != 1 || !slices.Equal(none[0][len(none[0])-4:], []string{"      keepalive_timeout 0;", `      default_type "";`, `      return 403 "$pf_empty";`, "    }"}) {
+					return fmt.Sprintf("an environment server's @pf_r_upgrade-refused-0 is %q, want it to end closing the connection with no type and an empty 403", none)
+				}
+				if len(origin) != 1 || !slices.Equal(origin[0][len(origin[0])-3:], []string{"      keepalive_timeout 0;", `      return 403 "Invalid CORS request";`, "    }"}) ||
+					slices.Contains(origin[0], `      default_type "";`) {
+					return fmt.Sprintf("an environment server's @pf_r_upgrade-refused-1 is %q, want it to end closing the connection with the 403's text and keep the type", origin)
+				}
+			}
+			if strings.Contains(out, "$pf_upgrade_refused") {
+				return "the file still holds $pf_upgrade_refused"
 			}
 			return ""
 		}},
@@ -696,21 +720,29 @@ func TestSecurityLines(t *testing.T) {
 		}},
 		{"what Envoy answers before it reads the host is answered first in every server", func() string {
 			for _, line := range []string{
-				`  map "$server_protocol:$request_method" $pf_f_method { "~^HTTP/2\\.0:" 0; "~^[^:]*:(?:ACL|BIND|CHECKOUT|CONNECT|COPY|DELETE|GET|HEAD|LINK|LOCK|MERGE|MKACTIVITY|MKCALENDAR|MKCOL|MOVE|MSEARCH|NOTIFY|OPTIONS|PATCH|POST|PROPFIND|PROPPATCH|PURGE|PUT|REBIND|REPORT|SEARCH|SOURCE|SUBSCRIBE|TRACE|UNBIND|UNLINK|UNLOCK|UNSUBSCRIBE)\\z" 0; default 1; }`,
+				`  map "$server_protocol:$request_method:$http_content_type" $pf_f_method { "~^[^:]*:QUERY:\\z" 2; "~^HTTP/1\\.[0-9]:QUERY:[ \\t]+\\z" 2; "~^HTTP/2\\.0:" 0; "~^[^:]*:QUERY:" 0; "~^[^:]*:(?:ACL|BIND|CHECKOUT|CONNECT|COPY|DELETE|GET|HEAD|LINK|LOCK|MERGE|MKACTIVITY|MKCALENDAR|MKCOL|MOVE|MSEARCH|NOTIFY|OPTIONS|PATCH|POST|PROPFIND|PROPPATCH|PURGE|PUT|REBIND|REPORT|SEARCH|SOURCE|SUBSCRIBE|TRACE|UNBIND|UNLINK|UNLOCK|UNSUBSCRIBE):" 0; default 1; }`,
 				`  map $http_connection $pf_f_connection { "" 0; "~*^,*(?:(?:[ \\t]*(?:close|keep-alive|upgrade|http2-settings|te)[ \\t]*|[ \\t]+)(?:,+(?:[ \\t]*(?:close|keep-alive|upgrade|http2-settings|te)[ \\t]*|[ \\t]+)){0,8})?,*\\z" 0; default 1; }`,
 				`  map "$server_protocol:$request_uri" $pf_f_raw { "~^HTTP/2\\.0:" 0; "~[\\x00-\\x08\\x0A\\x0B\\x0D-\\x20\\x7F-\\xFF]" 1; default 0; }`,
 				`  map "$server_protocol:$http_connection$http_keep_alive$http_proxy_connection$http_transfer_encoding$http_upgrade" $pf_f_h2_connection { "~^HTTP/2\\.0:." 1; default 0; }`,
 				`  map "$server_protocol:$http_te" $pf_f_h2_te { "~^HTTP/2\\.0:(?!trailers\\z)." 1; default 0; }`,
 				`  map $server_protocol $pf_f_version { "~^HTTP/[0-9]\\.[0-9]\\z" 0; default 1; }`,
-				`  map "$pf_f_method$pf_f_connection$pf_f_raw$pf_f_h2_connection$pf_f_h2_te$pf_f_fragment$pf_f_authority$pf_f_names$pf_f_version" $pf_f_request { "~1" 1; default 0; }`,
+				`  map "$pf_f_method$pf_f_connection$pf_f_raw$pf_f_h2_connection$pf_f_h2_te$pf_f_authority$pf_f_names$pf_f_version" $pf_f_request { "~1" 1; default 0; }`,
+				`  map "$pf_f_method$pf_f_fragment" $pf_f_refused { "~^2|1\\z" 1; default 0; }`,
+				`  map "$pf_f_request$pf_f_refused$pf_f_426" $pf_refusal { "~^1" bad-request; "~^01" refused; "~^001" upgrade-required; default 0; }`,
+				`  map "$pf_reached:$pf_refusal" $pf_answer_id { "~^1:0\\z" $pf_request_id; default ""; }`,
 				`  map $server_protocol $pf_f_426 { "~^HTTP/(?:0\\.9|1\\.[02-9])\\z" 1; default 0; }`,
 			} {
 				if broken := missing(out, line); broken != "" {
 					return broken
 				}
 			}
-			checks := []string{"    if ($pf_f_request) {", `      return 400 "$pf_empty";`, "    }",
-				"    if ($pf_f_426) {", `      return 426 "Upgrade Required";`, "    }"}
+			// Envoy answers what its parser refuses 400 with the body Bad Request as text/plain, which @pf_r_bad-request
+			// answers, a QUERY with no Content-Type or a # in the target 400 with no body and no Content-Type, which
+			// @pf_r_refused answers, and HTTP/1.0 and HTTP/1.2 to HTTP/1.9 426 with the body Upgrade Required as
+			// text/plain, which @pf_r_upgrade-required answers, each closing the connection.
+			// The default server, whose location / reads $pf_refusal itself, sets no route.
+			routed := []string{"    if ($pf_refusal) {", "      set $pf_route $pf_refusal;", "      break;", "    }"}
+			unrouted := []string{"    if ($pf_refusal) {", "      break;", "    }"}
 			servers := blocks(lines(out), "  server {")
 			// The default server and four environment servers; the admin server answers on 127.0.0.1 alone.
 			checked := 0
@@ -719,9 +751,13 @@ func TestSecurityLines(t *testing.T) {
 					continue
 				}
 				checked++
+				checks := routed
+				if slices.Contains(server, "    listen 10000 ssl default_server;") {
+					checks = unrouted
+				}
 				at := slices.Index(server, checks[0])
 				firstOther := slices.IndexFunc(server, func(line string) bool {
-					return strings.HasPrefix(line, "    location ") || (strings.HasPrefix(line, "    if (") && line != checks[0] && line != checks[3])
+					return strings.HasPrefix(line, "    location ") || (strings.HasPrefix(line, "    if (") && !slices.Contains(checks, line))
 				})
 				if at < 0 || at+len(checks) > len(server) || !slices.Equal(server[at:at+len(checks)], checks) || at > firstOther {
 					return fmt.Sprintf("a server holds no %q before its other checks and locations", checks)
@@ -732,17 +768,116 @@ func TestSecurityLines(t *testing.T) {
 			}
 			return ""
 		}},
+		{"a host no environment names is answered 404 with no Content-Type", func() string {
+			// The Envoy output answers it 404 with no body and no Content-Type, where nginx would send text/plain, and,
+			// whatever the host, what its parser refuses 400 with the body Bad Request as text/plain, a QUERY with no
+			// Content-Type or a # in the target 400 with no body and no Content-Type, and HTTP/1.0 and HTTP/1.2 to
+			// HTTP/1.9 426 with the body Upgrade Required as text/plain, closing the connection after each (measured on
+			// Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8).
+			want := [][]string{
+				{"    location / {", "      return 418;", "      error_page 418 = @pf_default-$pf_refusal;", "    }"},
+				{"    location @pf_default-0 {", `      default_type "";`, `      return 404 "$pf_empty";`, "    }"},
+				{"    location @pf_default-refused {", "      keepalive_timeout 0;", `      default_type "";`, `      return 400 "$pf_empty";`, "    }"},
+				{"    location @pf_default-bad-request {", "      keepalive_timeout 0;", "      default_type text/plain;",
+					`      return 400 "Bad Request";`, "    }"},
+				{"    location @pf_default-upgrade-required {", "      keepalive_timeout 0;", "      default_type text/plain;",
+					`      return 426 "Upgrade Required";`, "    }"},
+			}
+			for _, server := range blocks(lines(out), "  server {") {
+				if slices.Contains(server, "    listen 10000 ssl default_server;") {
+					for _, block := range want {
+						if got := blocks(server, block[0]); len(got) != 1 || !slices.Equal(got[0], block) {
+							return fmt.Sprintf("the default server holds %q, want %q", got, block)
+						}
+					}
+					// Envoy 1.40.2 sends vary: Origin on every answer to such a host, its 404, both 400s and its 426, and
+					// x-request-id on its 404 alone, which the server's lines give them: no location of the server writes an
+					// add_header of its own, and $pf_answer_id is empty for the 400s and the 426 and for a request nginx
+					// refuses before the server's rules set $pf_reached.
+					var added []string
+					for _, line := range server {
+						if strings.Contains(line, "add_header ") {
+							added = append(added, line)
+						}
+					}
+					if want := []string{"    add_header x-request-id $pf_answer_id always;", "    add_header Vary Origin always;"}; !slices.Equal(added, want) {
+						return fmt.Sprintf("the default server's add_header lines are %q, want %q", added, want)
+					}
+					return ""
+				}
+			}
+			return "no default server"
+		}},
 		{"a host with a dot at its end is on no environment", func() string {
 			if broken := missing(out, `  map $pf_authority $pf_f_host_dot { "~\\.(?::[0-9]*)?\\z" 1; default 0; }`); broken != "" {
 				return broken
 			}
+			// The Envoy output answers it 404 with no body and no Content-Type before its origin check (measured on Envoy
+			// 1.40.2): the check names @pf_r_no-route and ends the server's rewrite lines, so the origin check after it
+			// never runs.
 			for _, server := range environmentServers(out) {
-				check := []string{"    if ($pf_f_host_dot) {", `      return 404 "$pf_empty";`, "    }"}
+				check := []string{"    if ($pf_f_host_dot) {", "      set $pf_route no-route;", "      break;", "    }"}
 				at := slices.Index(server, check[0])
 				origin := slices.IndexFunc(server, func(line string) bool { return strings.HasPrefix(line, "    if ($pf_o") })
-				if at < 0 || !slices.Equal(server[at:at+3], check) || at > origin {
+				if at < 0 || !slices.Equal(server[at:at+len(check)], check) || at > origin {
 					return fmt.Sprintf("an environment server holds no %q before its origin check", check)
 				}
+			}
+			return ""
+		}},
+		{"a request no route takes is answered 404 with no Content-Type", func() string {
+			// Measured on a file with no / route, on Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8. The host-dot check and
+			// the X-Forwarded-Proto check name the same location.
+			want := []string{"    location @pf_r_no-route {", "      add_header x-request-id $pf_answer_id always;",
+				"      add_header Vary Origin always;", `      default_type "";`, `      return 404 "$pf_empty";`, "    }"}
+			for _, server := range environmentServers(out) {
+				if got := blocks(server, "    location @pf_r_no-route {"); len(got) != 1 || !slices.Equal(got[0], want) {
+					return fmt.Sprintf("an environment server holds %q, want %q", got, want)
+				}
+			}
+			return ""
+		}},
+		{"every public server sets $pf_reached before its first if", func() string {
+			// $pf_answer_id and the CORS maps read it: only the server's rewrite phase sets it, so a request nginx's own
+			// parser refuses before that phase leaves it empty. The default server and every environment server, with
+			// cors and lists and without.
+			for _, file := range []string{out, noCORS} {
+				for _, server := range blocks(lines(file), "  server {") {
+					if !slices.ContainsFunc(server, func(line string) bool { return strings.HasPrefix(line, "    listen 10000") }) {
+						continue
+					}
+					set := slices.Index(server, "    set $pf_reached 1;")
+					first := slices.IndexFunc(server, func(line string) bool { return strings.HasPrefix(line, "    if (") })
+					if set < 0 || set > first || slices.Index(server[set+1:], "    set $pf_reached 1;") >= 0 {
+						return fmt.Sprintf("a server sets $pf_reached at line %d, want once before its first if at line %d", set, first)
+					}
+				}
+			}
+			return ""
+		}},
+		{"what Envoy's parser refuses is answered 400 Bad Request and the connection closed", func() string {
+			// Envoy 1.40.2 answers an unknown method, ten Connection tokens, a byte above 0x7F in the target, an empty port,
+			// a header name outside the token characters, a control byte in a header value and HTTP/1.10 with the same
+			// answer, 400 with the body Bad Request as text/plain, and closes the connection, where nginx's return in a
+			// server's if kept it and sent no body (measured beside nginx 1.30.6 and 1.31.8).
+			want := []string{"    location @pf_r_bad-request {", "      add_header x-request-id $pf_answer_id always;",
+				"      add_header Vary Origin always;", "      keepalive_timeout 0;", "      default_type text/plain;",
+				`      return 400 "Bad Request";`, "    }"}
+			for _, server := range environmentServers(out) {
+				if got := blocks(server, "    location @pf_r_bad-request {"); len(got) != 1 || !slices.Equal(got[0], want) {
+					return fmt.Sprintf("an environment server holds %q, want %q", got, want)
+				}
+			}
+			return ""
+		}},
+		{"an answer of nginx's own takes no type from the path's ending", func() string {
+			// nginx's own types give a path ending .html text/html and .jpg image/jpeg (measured on nginx 1.30.6 and
+			// 1.31.8), where the Envoy output's answers carry text/plain or none; a server's if cannot hold a types block.
+			if at := strings.Index(out, "\n  types {}\n"); at < 0 || at > firstServer {
+				return "no line \"  types {}\" before the first server"
+			}
+			if n := strings.Count(out, "types {"); n != 1 {
+				return fmt.Sprintf("%d types blocks, want the http block's alone", n)
 			}
 			return ""
 		}},
@@ -816,10 +951,10 @@ func TestSecurityLines(t *testing.T) {
 			refused := []string{"    error_page 495 496 497 = @pf_tls_refused;", "    error_page 421 = @pf_tls_misdirected;",
 				"    location @pf_tls_refused {", `      return 400 "$pf_empty";`, "    }",
 				"    location @pf_tls_misdirected {", `      return 421 "$pf_empty";`, "    }"}
-			own := slices.Concat(refused[:3], []string{"      add_header x-request-id $pf_request_id always;", "      add_header Vary Origin always;"},
-				refused[3:6], []string{"      add_header x-request-id $pf_request_id always;", "      add_header Vary Origin always;"}, refused[6:])
+			own := slices.Concat(refused[:3], []string{"      add_header x-request-id $pf_answer_id always;", "      add_header Vary Origin always;"},
+				refused[3:6], []string{"      add_header x-request-id $pf_answer_id always;", "      add_header Vary Origin always;"}, refused[6:])
 			alone := slices.Concat(refused[:1], refused[2:5])
-			aloneOwn := slices.Concat(refused[:1], refused[2:3], []string{"      add_header x-request-id $pf_request_id always;",
+			aloneOwn := slices.Concat(refused[:1], refused[2:3], []string{"      add_header x-request-id $pf_answer_id always;",
 				"      add_header Vary Origin always;"}, refused[3:5])
 			for _, want := range []struct {
 				file   string
@@ -922,7 +1057,7 @@ func TestSecurityLines(t *testing.T) {
 			// X-Forwarded-Proto line that is present and empty 404 before it reads the host or the origin, where nginx's
 			// $http_x_forwarded_proto reads it as none and would send the service the connection's scheme. Every server
 			// refuses it after the request checks, and a refused request carries no Access-Control line.
-			proto := []string{"    if ($pf_f_proto) {", `      return 404 "$pf_empty";`, "    }"}
+			proto := []string{"    if ($pf_f_proto) {", "      set $pf_route no-route;", "      break;", "    }"}
 			for _, file := range []string{forwarded, unset} {
 				for _, line := range []string{"  js_set $pf_js_proto pf.forwardedProto;", `  map $pf_js_proto $pf_f_proto { "0" 0; default 1; }`} {
 					if at := strings.Index(file, "\n"+line+"\n"); at < 0 || at > strings.Index(file, "\n  server {\n") {
@@ -935,10 +1070,15 @@ func TestSecurityLines(t *testing.T) {
 						continue
 					}
 					checked++
-					at := slices.Index(server, "    if ($pf_f_426) {") + 3
+					// The default server's refusal check is three lines, and its check sets no route.
+					want, after := proto, 4
+					if slices.ContainsFunc(server, func(line string) bool { return strings.HasSuffix(line, " default_server;") }) {
+						want, after = []string{"    if ($pf_f_proto) {", "      break;", "    }"}, 3
+					}
+					at := slices.Index(server, "    if ($pf_refusal) {") + after
 					firstLocation := slices.IndexFunc(server, func(line string) bool { return strings.HasPrefix(line, "    location ") })
-					if at < 3 || at+len(proto) > len(server) || !slices.Equal(server[at:at+len(proto)], proto) || at > firstLocation {
-						return fmt.Sprintf("a server holds no %q right after its request checks", proto)
+					if at < after || at+len(want) > len(server) || !slices.Equal(server[at:at+len(want)], want) || at > firstLocation {
+						return fmt.Sprintf("a server holds no %q right after its request checks", want)
 					}
 				}
 				if checked != 5 {
@@ -965,13 +1105,14 @@ func TestSecurityLines(t *testing.T) {
 			// when the route's 15 s are. A service that does not take the connection in the cluster's 5 s is answered 502
 			// with no body, as the Envoy output answers it, wherever the connect time is those 5 s, through @pf_502 so a
 			// gRPC call gets the gRPC answer; under idle: 2s Envoy's idle timer ends it first, with its text. With idle
-			// and request none nothing but the connection is timed.
+			// and request none nothing but the connection is timed. The check reads the last try's connect time, which
+			// is "-, -" for a retried call whose two tries timed out connecting.
 			idleText := []string{"    location @pf_504 {", `      return 504 "stream timeout";`, "    }"}
 			checked := func(answer string) []string {
 				return []string{"    location @pf_504 {", "      error_page 502 = @pf_502$pf_grpc_call;",
-					`      if ($upstream_connect_time = "-") {`, "        return 502;", "      }", answer, "    }"}
+					`      if ($upstream_connect_time ~ "^(?:[^:]*, )?-\\z") {`, "        return 502;", "      }", answer, "    }"}
 			}
-			routeLocation := regexp.MustCompile(`^    location @pf_r_[0-9]+(-uri)? \{$`)
+			routeLocation := regexp.MustCompile(`^    location @pf_r_[0-9]+(-uri)?(-once)? \{$`)
 			for _, want := range []struct {
 				file   string
 				answer []string // the server's @pf_504 location
@@ -1002,18 +1143,20 @@ func TestSecurityLines(t *testing.T) {
 						return fmt.Sprintf("%s holds no error_page 504 = @pf_504 after its error_page 502", location[0])
 					}
 				}
-				if servers != 4 || locations != 632 {
-					return fmt.Sprintf("%d servers and %d route locations, want 4 and 632", servers, locations)
+				if servers != 4 || locations != 664 {
+					return fmt.Sprintf("%d servers and %d route locations, want 4 and 664", servers, locations)
 				}
 			}
 			return ""
 		}},
 		{"the admin server", func() string {
 			// The admin server, on 127.0.0.1 alone, answers every method on /ready, /stats and /server_info as Envoy's
-			// admin answers it: a method Envoy's parser does not know 400, then a query 404 before a location reads the
-			// path; /stats asks stub_status again with GET, as error_page does, for a method stub_status refuses with
-			// 405, and nginx's own 405 to TRACE has no body (measured on Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8 with
-			// GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS, TRACE and FOO). No public server serves stub_status.
+			// admin answers it: what Envoy's parser refuses 400 Bad Request as text/plain, a QUERY with no Content-Type or
+			// a # in the target 400 with no body and no Content-Type, and HTTP/1.0 426 with Upgrade Required as
+			// text/plain, each closing the connection, then a query 404 before a location reads the path; /stats asks stub_status again with GET, as error_page does, for a
+			// method stub_status refuses with 405, and nginx's own 405 to TRACE has no body (measured on Envoy 1.40.2
+			// beside nginx 1.30.6 and 1.31.8 with GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS, TRACE and FOO, and with each
+			// kind of request flag). No public server serves stub_status.
 			if broken := missing(out, `  map $request_uri $pf_admin_query { "~\\?" 1; default 0; }`); broken != "" {
 				return broken
 			}
@@ -1022,8 +1165,8 @@ func TestSecurityLines(t *testing.T) {
 				"    listen 127.0.0.1:9901;",
 				"    access_log off;",
 				"    error_page 405 = @pf_admin_405;",
-				"    if ($pf_f_method) {",
-				`      return 400 "$pf_empty";`,
+				"    if ($pf_refusal) {",
+				"      rewrite ^ / break;",
 				"    }",
 				"    if ($pf_admin_query) {",
 				`      return 404 "$pf_empty";`,
@@ -1041,7 +1184,26 @@ func TestSecurityLines(t *testing.T) {
 				`      return 200 '{"version":"$nginx_version"}\n';`,
 				"    }",
 				"    location / {",
+				"      return 418;",
+				"      error_page 418 = @pf_admin-$pf_refusal;",
+				"    }",
+				"    location @pf_admin-0 {",
 				`      return 404 "$pf_empty";`,
+				"    }",
+				"    location @pf_admin-refused {",
+				"      keepalive_timeout 0;",
+				`      default_type "";`,
+				`      return 400 "$pf_empty";`,
+				"    }",
+				"    location @pf_admin-bad-request {",
+				"      keepalive_timeout 0;",
+				"      default_type text/plain;",
+				`      return 400 "Bad Request";`,
+				"    }",
+				"    location @pf_admin-upgrade-required {",
+				"      keepalive_timeout 0;",
+				"      default_type text/plain;",
+				`      return 426 "Upgrade Required";`,
 				"    }",
 				"    location @pf_admin_405 {",
 				`      return 405 "$pf_empty";`,
@@ -1122,7 +1284,7 @@ func TestSecurityLines(t *testing.T) {
 				`  map "$pf_log_status$pf_log_sampled$pf_log_flagged" $pf_log { "000" 0; default 1; }`,
 				// A response the Envoy output flags is logged below status_from too: nginx's own answers but its preflight
 				// 200 and its 403s, which Envoy answers with no flag, and every failure of a service.
-				`  map "$upstream_header_time:$status:$pf_log_cut" $pf_log_flagged { "~:UPE\\z" 1; "~^[0-9][^:]*:(?!499:)" 0; "~^:(?:200|403):" 0; default 1; }`,
+				`  map "$upstream_header_time:$status:$pf_log_cut" $pf_log_flagged { "~:UPE\\z" 1; "~^(?:[^:]*, )?[0-9][^:,]*:(?!499:)" 0; "~^:(?:200|403):" 0; default 1; }`,
 				"  access_log /dev/stdout pf_request if=$pf_log;"} {
 				if broken := missing(out, line); broken != "" {
 					return broken
@@ -1162,12 +1324,12 @@ func TestSecurityLines(t *testing.T) {
 			// and UPE when it sent an answer nginx could not read, as Envoy flags them.
 			format := `  log_format pf_upstream_failure escape=json '{"event":"gateway_upstream_failure","flags":"$pf_log_failure","route":"$pf_log_route","status":$pf_log_code,"upstream":"$pf_log_upstream"}';`
 			for _, want := range []struct{ file, failure string }{
-				{noTimeouts, `  map "$upstream_status:$upstream_connect_time:$upstream_header_time:$pf_log_cut:$upstream_bytes_received" $pf_log_failure { "~:UPE:" UPE; "~^502:-:" UF; "~^502:[0-9][^:]*:-::0\\z" UC; "~^502:[0-9][^:]*:-:" UPE; "~^504:-:" UF; "~^504:[0-9][^:]*:-:" UT; default ""; }`},
-				{withTimeouts("{idle: 2s}"), `  map "$upstream_status:$upstream_connect_time:$upstream_header_time:$pf_log_cut:$upstream_bytes_received" $pf_log_failure { "~:UPE:" UPE; "~^502:-:" UF; "~^502:[0-9][^:]*:-::0\\z" UC; "~^502:[0-9][^:]*:-:" UPE; default ""; }`},
-				{withTimeouts("{idle: 10s}"), `  map "$upstream_status:$upstream_connect_time:$upstream_header_time:$pf_log_cut:$upstream_bytes_received" $pf_log_failure { "~:UPE:" UPE; "~^502:-:" UF; "~^502:[0-9][^:]*:-::0\\z" UC; "~^502:[0-9][^:]*:-:" UPE; "~^504:-:" UF; default ""; }`},
+				{noTimeouts, `  map "$pf_log_retried:$upstream_status:$upstream_connect_time:$upstream_header_time:$pf_log_cut:$upstream_bytes_received" $pf_log_failure { "~:UPE:" UPE; "~^1:(?:[^:]*, )?502:(?:[^:]*, )?-:" URX,UF; "~^[01]:(?:[^:]*, )?502:(?:[^:]*, )?-:" UF; "~^[01]:(?:[^:]*, )?502:(?:[^:]*, )?[0-9][^:,]*:(?:[^:]*, )?-::(?:[^:]*, )?0\\z" UC; "~^[01]:(?:[^:]*, )?502:(?:[^:]*, )?[0-9][^:,]*:(?:[^:]*, )?-:" UPE; "~^1:(?:[^:]*, )?504:(?:[^:]*, )?-:" URX,UF; "~^[01]:(?:[^:]*, )?504:(?:[^:]*, )?-:" UF; "~^[01]:(?:[^:]*, )?504:(?:[^:]*, )?[0-9][^:,]*:(?:[^:]*, )?-:" UT; default ""; }`},
+				{withTimeouts("{idle: 2s}"), `  map "$pf_log_retried:$upstream_status:$upstream_connect_time:$upstream_header_time:$pf_log_cut:$upstream_bytes_received" $pf_log_failure { "~:UPE:" UPE; "~^1:(?:[^:]*, )?502:(?:[^:]*, )?-:" URX,UF; "~^[01]:(?:[^:]*, )?502:(?:[^:]*, )?-:" UF; "~^[01]:(?:[^:]*, )?502:(?:[^:]*, )?[0-9][^:,]*:(?:[^:]*, )?-::(?:[^:]*, )?0\\z" UC; "~^[01]:(?:[^:]*, )?502:(?:[^:]*, )?[0-9][^:,]*:(?:[^:]*, )?-:" UPE; default ""; }`},
+				{withTimeouts("{idle: 10s}"), `  map "$pf_log_retried:$upstream_status:$upstream_connect_time:$upstream_header_time:$pf_log_cut:$upstream_bytes_received" $pf_log_failure { "~:UPE:" UPE; "~^1:(?:[^:]*, )?502:(?:[^:]*, )?-:" URX,UF; "~^[01]:(?:[^:]*, )?502:(?:[^:]*, )?-:" UF; "~^[01]:(?:[^:]*, )?502:(?:[^:]*, )?[0-9][^:,]*:(?:[^:]*, )?-::(?:[^:]*, )?0\\z" UC; "~^[01]:(?:[^:]*, )?502:(?:[^:]*, )?[0-9][^:,]*:(?:[^:]*, )?-:" UPE; "~^1:(?:[^:]*, )?504:(?:[^:]*, )?-:" URX,UF; "~^[01]:(?:[^:]*, )?504:(?:[^:]*, )?-:" UF; default ""; }`},
 			} {
 				for _, line := range []string{format, want.failure, "  access_log /dev/stdout pf_upstream_failure if=$pf_log_failure;",
-					`  map "$request_method:$upstream_status:$upstream_response_length:$upstream_http_content_length" $pf_log_cut { "~^HEAD:" ""; "~^[A-Z]+:(?:1[0-9][0-9]|204|304):" ""; "~^[A-Z]+:[0-9]+:(?<pf_log_got>[0-9]+):(?!\\k<pf_log_got>\\z)[0-9]+\\z" UPE; default ""; }`} {
+					`  map "$request_method:$upstream_status:$upstream_response_length:$upstream_http_content_length:$request_completion:$pf_log_upstream" $pf_log_cut { "~^HEAD:" ""; "~^[A-Z]+:(?:[^:]*, )?(?:1[0-9][0-9]|204|304):" ""; "~^[A-Z]+:(?:[^:]*, )?[0-9]+:[^:]*:[0-9]+::[^:]*_grpc\\z" UPE; "~_grpc\\z" ""; "~^[A-Z]+:(?:[^:]*, )?[0-9]+:(?:[^:]*, )?(?<pf_log_got>[0-9]+):(?!\\k<pf_log_got>:)[0-9]+:" UPE; default ""; }`} {
 					if broken := missing(want.file, line); broken != "" {
 						return broken
 					}
@@ -1187,8 +1349,9 @@ func TestSecurityLines(t *testing.T) {
 
 // everyRouteLocation calls check on each route location of the environment servers of out, the ones that send the
 // request to a service, with the directive that sets a header there, and returns the first problem check names. The
-// battery file has 77 HTTP routes and three RPC methods in each of four environments, each with a second location but
-// the two HTTP routes with a rewrite, and a row on fewer locations fails.
+// battery file has 78 HTTP routes and three RPC methods in each of four environments, each with a second location but
+// the two HTTP routes with a rewrite, and each of the six locations of the RPC methods, which it retries, with a copy
+// that tries once: (78 * 2 - 2) * 4 = 616 HTTP and 6 * 2 * 4 = 48 gRPC locations. A row on fewer locations fails.
 func everyRouteLocation(out string, check func(location []string, set string) string) string {
 	kinds := map[string]int{}
 	for _, server := range environmentServers(out) {
@@ -1208,8 +1371,8 @@ func everyRouteLocation(out string, check func(location []string, set string) st
 			}
 		}
 	}
-	if kinds["proxy_set_header"] != 608 || kinds["grpc_set_header"] != 24 {
-		return fmt.Sprintf("%d HTTP and %d gRPC route locations, want 608 and 24", kinds["proxy_set_header"], kinds["grpc_set_header"])
+	if kinds["proxy_set_header"] != 616 || kinds["grpc_set_header"] != 48 {
+		return fmt.Sprintf("%d HTTP and %d gRPC route locations, want 616 and 48", kinds["proxy_set_header"], kinds["grpc_set_header"])
 	}
 	return ""
 }
@@ -1403,7 +1566,9 @@ func TestPatterns(t *testing.T) {
 }
 
 // TestManyRoutes: a file of 600 routes holds no line nginx refuses (nginx reads no value over 4096 bytes), sizes the
-// variables' hash for them, and chooses its route through a tree of maps two levels deep: nginx finds no variable
+// variables' hash for the 691 variables its http block declares, 4 for each (counted by a script apart from the
+// generator, which nginx 1.30.6 and 1.31.8 loaded at that size), and chooses its route through a tree of maps two
+// levels deep: nginx finds no variable
 // nested 100 deep (ngx_http_variables.c), which a chain of one map a route reached past its 96th route, where every
 // request was answered 400 (measured on 1.30.6 and 1.31.8 with 2,000 routes).
 func TestManyRoutes(t *testing.T) {
@@ -1430,7 +1595,7 @@ func TestManyRoutes(t *testing.T) {
 		`  map "` + strings.Join(last, ":") + `:" $pf_g10` + group,
 		`  map "` + strings.Join(top, ":") + `:" $pf_g11` + group,
 		`  map "$pf_f_dotparam$pf_f_backslash$pf_f_control$pf_f_upgrade$pf_f_preflight:$pf_mode:$pf_g11" $pf_route {`,
-		"  variables_hash_max_size 7560;",
+		"  variables_hash_max_size 2764;",
 	} {
 		if broken := missing(out, line); broken != "" {
 			t.Error(broken)
@@ -1440,6 +1605,45 @@ func TestManyRoutes(t *testing.T) {
 	// which reads the three classes of the path as written, which read the path out of the request line.
 	if got := mapDepth(out, "pf_route"); got != 8 {
 		t.Errorf("the route choice nests %d maps, want 8", got)
+	}
+}
+
+// TestAcceptNamesCounted: the variables' hash counts each accept name of the auth check once for its js_var, and once
+// more for its _grpc map in a file with an RPC route, which declares one for each name (checkLines): the counts are
+// those of a script apart from the generator, at which nginx 1.30.6 and 1.31.8 loaded each file.
+func TestAcceptNamesCounted(t *testing.T) {
+	names := make([]string, 200)
+	for i := range names {
+		names[i] = fmt.Sprintf("x%d", i+1)
+	}
+	var routes strings.Builder
+	for i := 1; i <= 300; i++ {
+		fmt.Fprintf(&routes, "  - {name: r%d, prefix: /r%d/, to: app}\n", i, i)
+	}
+	file := func(rpc bool) string {
+		out := "listen: 8000\nservices:\n  app: {http: 3000, grpc: 3001}\n  checks: {http: 9000}\norigins:\n  local: {hosts: [localhost]}\n" +
+			"auth: {ask: checks /auth, timeout: 1s, enabled: true, when_unavailable: deny, accept: [" + strings.Join(names, ", ") + "]}\n" +
+			"routes:\n" + routes.String()
+		if rpc {
+			out += `  - rpc: {to: {"*": app}}` + "\nrpc:\n  methods:\n    - {service: example.shop.v1.CartService, method: GetCart}\n"
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name string
+		rpc  bool
+		want string
+	}{
+		// 802 variables, four times over: the 601 of the file without one, 200 _grpc maps and the RPC route's own.
+		{"with an RPC route", true, "  variables_hash_max_size 3208;"},
+		// 601 variables, four times over.
+		{"without one", false, "  variables_hash_max_size 2404;"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if broken := missing(generate(t, file(tc.rpc)), tc.want); broken != "" {
+				t.Error(broken)
+			}
+		})
 	}
 }
 
@@ -1598,6 +1802,126 @@ func TestLogStatuses(t *testing.T) {
 	}
 }
 
+// TestRetriedLog: a call to a retried RPC route is logged by the try that answered, the last of the values nginx writes
+// for each try, joined by ", ", and one whose last try was refused is flagged URX,UF, as the Envoy output flags a call
+// retries ran out on, also through the copy that tries once. Each key is what nginx 1.30.6 and 1.31.8 logged for such a
+// call, the variables of the map's source with the colons between them, and each value what Envoy 1.40.2 logged for it.
+func TestRetriedLog(t *testing.T) {
+	out := generate(t, "listen: 8000\nservices:\n  down: {grpc: 8081, addresses: [\"10.0.0.1\", \"10.0.0.2\"]}\n"+
+		"  app: {http: 8080}\norigins:\n  local: {hosts: [localhost]}\nroutes:\n"+
+		"  - rpc: {to: {\"*\": {service: down, name: down}}, retries: 1}\n  - {name: app, prefix: /, to: app}\n"+
+		"rpc:\n  methods:\n    - {service: example.v1.S, method: Call}\n")
+	all := lines(out)
+	for _, c := range []struct {
+		location string
+		marked   bool
+	}{{"@pf_r_1", true}, {"@pf_r_1-once", true}, {"@pf_r_1-uri", true}, {"@pf_r_1-uri-once", true}, {"@pf_r_2", false}, {"@pf_r_2-uri", false}} {
+		found := blocks(all, "    location "+c.location+" {")
+		if len(found) != 1 {
+			t.Fatalf("%d locations %s, want 1", len(found), c.location)
+		}
+		if got := slices.Contains(found[0], "      set $pf_log_retried 1;"); got != c.marked {
+			t.Errorf("location %s sets $pf_log_retried 1: %t, want %t", c.location, got, c.marked)
+		}
+	}
+	failure := mapOf(t, out, "pf_log_failure")
+	for key, want := range map[string]string{
+		"1:502, 502:-, -:-, -::0, 0":           "URX,UF",
+		"1:502:-:-::0":                         "URX,UF",
+		"1:502, 200:-, 0.000:-, 0.006::0, 208": "",
+		"0:502:-:-::0":                         "UF",
+		"0:200:0.000:0.001::140":               "",
+		"0:502:0.000:-::0":                     "UC",
+		"0:502:0.000:-::40":                    "UPE",
+		"1:504, 504:-, -:-, -::0, 0":           "URX,UF",
+		"0:504:-:-::0":                         "UF",
+	} {
+		if got := failure(key); got != want {
+			t.Errorf("$pf_log_failure of %q: %q, want %q", key, got, want)
+		}
+	}
+	upstream := mapOf(t, out, "pf_log_upstream_ms")
+	for key, want := range map[string]string{"-, 0.006": "6", "0.006": "6", "-, 1.250": "1250", "0.000": "0", "-, -": "null", "-": "null"} {
+		if got := upstream(key); got != want {
+			t.Errorf("$pf_log_upstream_ms of %q: %q, want %q", key, got, want)
+		}
+	}
+}
+
+// mapOf returns the map of out that sets $name, read as nginx reads it: its regular expressions in the order written,
+// each quoted string's \\ as one \, the first that matches giving its value with each $capture filled in, and default
+// when none does. A map with a key that is not a regular expression ends the test, as it would need nginx's exact
+// match first, and so does a key the function is asked about that reaches an expression Go's regexp cannot compile,
+// such as one with a lookahead or a backreference, which PCRE2 reads.
+func mapOf(t *testing.T, out, name string) func(key string) string {
+	t.Helper()
+	line := regexp.MustCompile(`(?m)^  map (?:"[^"]*"|\S+) \$` + name + ` \{ (.*) default (\S*); \}$`).FindStringSubmatch(out)
+	if line == nil {
+		t.Fatalf("no map sets $%s", name)
+	}
+	type entry struct {
+		key         *regexp.Regexp // nil when Go's regexp cannot compile text
+		text, value string
+	}
+	var entries []entry
+	rest := line[1] + " "
+	entryText := regexp.MustCompile(`^"~((?:[^"\\]|\\.)*)" (\S+); `)
+	for rest != "" {
+		found := entryText.FindStringSubmatch(rest)
+		if found == nil {
+			t.Fatalf("the map of $%s holds %q, which is not a regular expression and its value", name, rest)
+		}
+		key, _ := regexp.Compile(strings.ReplaceAll(found[1], `\\`, `\`))
+		entries = append(entries, entry{key, found[1], found[2]})
+		rest = rest[len(found[0]):]
+	}
+	unquoted := func(value string) string {
+		if value == `""` {
+			return ""
+		}
+		return value
+	}
+	return func(key string) string {
+		for _, e := range entries {
+			if e.key == nil {
+				t.Fatalf("%q reaches %q in the map of $%s, which Go's regexp cannot compile", key, e.text, name)
+			}
+			if match := e.key.FindStringSubmatch(key); match != nil {
+				return regexp.MustCompile(`\$(\w+)`).ReplaceAllStringFunc(unquoted(e.value), func(variable string) string {
+					return match[e.key.SubexpIndex(variable[1:])]
+				})
+			}
+		}
+		return unquoted(line[2])
+	}
+}
+
+// TestCutLog: an answer from a gRPC port, which nginx reads over HTTP/2, is flagged UPE when nginx ended the call
+// because its body did not match its content-length, so the request did not complete, and never by
+// $upstream_response_length, which counts the frames there. The keys are the values nginx 1.30.6 and 1.31.8 wrote for a
+// Go service that sends content-length: 5 with the empty message (47 bytes of frames), and for one that sends 10 or 3
+// with it (35 bytes), beside Envoy 1.40.2, which flags the last two UPE and the first nothing.
+func TestCutLog(t *testing.T) {
+	out := generate(t, "listen: 8000\nservices:\n  up: {grpc: 8081}\n  app: {http: 8080}\norigins:\n  local: {hosts: [localhost]}\n"+
+		"routes:\n  - rpc: {to: {\"*\": {service: up, name: up}}}\n  - {name: app, prefix: /, to: app}\n"+
+		"rpc:\n  methods:\n    - {service: example.v1.S, method: Call}\n")
+	cut := mapOf(t, out, "pf_log_cut")
+	for _, c := range []struct{ key, want string }{
+		{"POST:200:47:5:OK:up_grpc", ""},
+		{"POST:200:35:10::up_grpc", "UPE"},
+		{"POST:200:35:3::up_grpc", "UPE"},
+		{"POST:502, 200:0, 47:5:OK:up_grpc", ""},
+		{"POST:200:47::OK:up_grpc", ""},
+		{"POST:200:47:::up_grpc", ""},
+		{"HEAD:200:0:5::app_http", ""},
+		{"GET:304:0:5::app_http", ""},
+	} {
+		if got := cut(c.key); got != c.want {
+			t.Errorf("$pf_log_cut of %q: %q, want %q", c.key, got, c.want)
+		}
+	}
+}
+
 // TestHostHash: the server-name hash holds the longest host a file writes; nginx's default bucket of 64 bytes holds
 // none of 47 characters or more.
 func TestHostHash(t *testing.T) {
@@ -1689,9 +2013,9 @@ func TestUpgradeMaps(t *testing.T) {
 			}
 		}
 	}
-	// 77 HTTP routes in each of four environments, each with a second location but the two with a rewrite.
-	if proxied != 608 {
-		t.Errorf("%d locations hold proxy_pass, want 608", proxied)
+	// 78 HTTP routes in each of four environments, each with a second location but the two with a rewrite.
+	if proxied != 616 {
+		t.Errorf("%d locations hold proxy_pass, want 616", proxied)
 	}
 }
 
@@ -1801,22 +2125,29 @@ func TestPathModes(t *testing.T) {
 // TestScript: the script beside the configuration starts with the header every generated file carries, in the
 // script's own comment syntax, and defines and exports each function the configuration names: nginx -t passes a
 // configuration whose function the script lacks, and nginx then answers every request 500. The battery file is read
-// with client_address forwarded, so the configuration names every function the script holds.
+// with client_address forwarded, a route limited by client and a service that hashes a header, so the configuration
+// names every function the script holds.
 func TestScript(t *testing.T) {
-	config, script := generateFiles(t, rewritten(t, string(testsupport.ReadFile(t, authFile)), "client_address: connection\n", "client_address: forwarded\n"))
+	file := rewritten(t, string(testsupport.ReadFile(t, authFile)), "client_address: connection\n", "client_address: forwarded\n")
+	file = rewritten(t, file, "  - {name: public, prefix: /public/, to: shop, auth: off}",
+		"  - {name: public, prefix: /public/, to: shop, auth: off, rate_limit: {requests: 20, per: 1s, by: client}}")
+	file = rewritten(t, file, `  catalog: {http: 8090, address: "10.0.2.21"}`,
+		`  catalog: {http: 8090, address: "10.0.2.21", balance: hash, hash: {header: x-session-id}}`)
+	config, script := generateFiles(t, file)
 	if first, _, _ := strings.Cut(script, "\n"); first != "// Generated by proxyfile. Do not edit: change the proxyfile beside it and run proxyfile render; proxyfile check fails on a hand edit." {
 		t.Errorf("the script's first line is %q", first)
 	}
-	// Each function the configuration calls, once, in the order it first calls it: the handler on every checked route
-	// location and the relay in the stream block among them.
+	// Each function the configuration calls, once, in the order it first calls it: the client key, the rate limit's
+	// answer and the hash key in the http block, the handler on every checked route location and the relay in the
+	// stream block among them.
 	var named []string
 	for _, m := range regexp.MustCompile(`(?m)^\s*js_(?:set \$\w+|content|header_filter|body_filter|access|filter) pf\.(\w+);$`).FindAllStringSubmatch(config, -1) {
 		if !slices.Contains(named, m[1]) {
 			named = append(named, m[1])
 		}
 	}
-	if !slices.Equal(named, []string{"headerNames", "forwardedProto", "origin", "check", "relay"}) {
-		t.Fatalf("the configuration names the functions %q, want headerNames, forwardedProto, origin, check and relay", named)
+	if want := []string{"headerNames", "forwardedProto", "origin", "clientKey", "limitedKind", "hashKey", "check", "relay"}; !slices.Equal(named, want) {
+		t.Fatalf("the configuration names the functions %q, want %q", named, want)
 	}
 	// A header value holding a control byte other than a tab is refused: nginx passes one to the service, where Envoy
 	// answers 400 over HTTP/1.1 and closes the connection over HTTP/2 (measured on nginx 1.30.6 and 1.31.8 beside
@@ -1835,7 +2166,7 @@ func TestScript(t *testing.T) {
 		// An X-Forwarded-Proto line that is empty as Envoy reads it, over HTTP/1 once the spaces and tabs around it are
 		// left out, is flagged.
 		"\n        if (raw[i][0].toLowerCase() == \"x-forwarded-proto\" && asEnvoyReads(r, raw[i][1]) == \"\") {\n            return \"1\";\n        }\n",
-		"\nfunction asEnvoyReads(r, value) {\n    if (r.httpVersion == \"2.0\") {\n        return value;\n    }\n    return value.replace(/^[ \\t]+|[ \\t]+$/g, \"\");\n}\n",
+		"\nfunction asEnvoyReads(r, value) {\n    if (r.httpVersion == \"2.0\") {\n        return value;\n    }\n    return trimmed(value);\n}\n",
 	} {
 		if !strings.Contains(script, check) {
 			t.Errorf("the script holds no %q", check)

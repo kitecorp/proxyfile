@@ -3,6 +3,7 @@
 var framing = ["host", "content-length", "transfer-encoding", "connection", "keep-alive", "te", "trailer", "upgrade", "expect", "proxy-connection"];
 var hop = ["content-length", "transfer-encoding", "connection", "keep-alive", "upgrade", "proxy-connection"];
 var grpcStatus = {400: 13, 401: 16, 403: 7, 404: 12, 429: 14, 502: 14, 503: 14, 504: 14};
+var grpcUnknown = 2;
 var checkLocation = "/.proxyfile/check";
 var methodHeader = "x-proxyfile-method", pathHeader = "x-proxyfile-path", answerHeader = "x-proxyfile-check";
 
@@ -87,7 +88,22 @@ function asEnvoyReads(r, value) {
     if (r.httpVersion == "2.0") {
         return value;
     }
-    return value.replace(/^[ \t]+|[ \t]+$/g, "");
+    return trimmed(value);
+}
+
+// trimmed is text without the spaces and tabs at either end, found by a loop from each end. A regular expression
+// anchored at the end, [ \t]+$, tries it again at every space of a run that the value does not end with, each try
+// walking the rest of the run, so a header of x, 60,000 spaces and y held one worker, which serves nothing else
+// meanwhile, about 14 s (measured on nginx 1.30.6 and 1.31.8).
+function trimmed(text) {
+    var from = 0, to = text.length;
+    while (from < to && (text[from] == " " || text[from] == "\t")) {
+        from++;
+    }
+    while (to > from && (text[to - 1] == " " || text[to - 1] == "\t")) {
+        to--;
+    }
+    return text.substring(from, to);
 }
 
 // forwardedProto is "1" when the request has an X-Forwarded-Proto line that is empty as Envoy reads it, and "0"
@@ -140,7 +156,8 @@ function origin(r) {
 // through a JavaScript string on its way to the check, the service or the client: a string holds each byte that is not
 // UTF-8 as U+FFFD, where r.headersOut, r.variables and r.send take a Buffer and send its bytes as they are (measured on
 // nginx 1.30.6 and 1.31.8). A name is compared byte for byte, A to Z read as a to z. framing, hop, grpcStatus,
-// checkLocation, methodHeader, pathHeader and answerHeader are written above from the generator (script.go).
+// grpcUnknown, checkLocation, methodHeader, pathHeader and answerHeader are written above from the generator
+// (script.go).
 
 // The bounds of an answer of the check. Envoy 1.40.2 reads 81,920 bytes of a head, from the status line to the empty
 // line with each line end counted and a bare LF as two, each 1xx head on its own, as many of a trailer section, and 100
@@ -966,15 +983,25 @@ function kept(c) {
 // :authority is an absolute target's host and port, whatever the Host line says, and nginx routes by the same
 // ($pf_authority), so the script counts that or the Host line's value, the longer: counting the Host line alone, a Host
 // of one byte beside http://api.test.example.com:10000/ was answered 500 23 bytes later than by Envoy (measured on
-// nginx 1.30.6 beside Envoy 1.40.2). The script counts each of the client's header lines, Connection among them, and
-// each byte of the path Envoy escapes as three, so it never counts less than Envoy: more by the client's Connection
-// line and its own copies of the headers the proxy sets, which Envoy replaces or joins.
+// nginx 1.30.6 beside Envoy 1.40.2). The script counts each of the client's header lines but Transfer-Encoding,
+// Connection among them, and each byte of the path Envoy escapes as three, so it never counts less than Envoy: more by
+// the client's Connection line and its own copies of the headers the proxy sets, which Envoy replaces or joins. Envoy
+// takes a chunked request's Transfer-Encoding line off before it counts, so neither its bytes nor its field are
+// counted: Envoy served a chunked request with 89 fields that nginx, counting the line, answered 500, and served 24
+// bytes more chunked than nginx did, the bytes of the line's name and value (measured on Envoy 1.40.2 beside nginx
+// 1.30.6 and 1.31.8). fieldCount still counts the line, as Envoy counts it against the header count of the request it
+// reads.
 function passable(r, set) {
     var raw = r.rawHeadersIn, scheme = r.variables.scheme.length, size = set.size, host = -1;
     var fields = fieldCount(r) + 3 + 2 + set.fields;
     for (var i = 0; i < raw.length; i++) {
+        var name = raw[i][0].toLowerCase();
+        if (name == "transfer-encoding") {
+            fields--;
+            continue;
+        }
         size += Buffer.byteLength(raw[i][0]) + Buffer.byteLength(raw[i][1]);
-        if (raw[i][0].toLowerCase() == "host") {
+        if (name == "host") {
             host = Buffer.byteLength(raw[i][1]);
         }
     }
@@ -1001,10 +1028,11 @@ function passable(r, set) {
     return size <= Number(r.variables.pf_header_size) && fields <= Number(r.variables.pf_header_count);
 }
 
-// grpcCode is the grpc-status Envoy answers a gRPC call it refuses with status with: grpcStatus, and 2 for any other.
+// grpcCode is the grpc-status Envoy answers a gRPC call it refuses with status with: grpcStatus, and grpcUnknown for
+// any other.
 function grpcCode(status) {
     var code = grpcStatus[status];
-    return code === undefined ? 2 : code;
+    return code === undefined ? grpcUnknown : code;
 }
 
 // grpcMessage is a new Buffer of body as Envoy writes it in grpc-message: each byte that is not printable ASCII, and %,
@@ -1146,15 +1174,20 @@ function pass(r) {
 // check is the access handler of every location a checked route writes. It asks the check through the relay, and lets
 // the request go on (pass) with the accepted headers of an allowed answer ($pf_accept_<n>), or with the mark
 // ($pf_unchecked) for an unanswered check under allow; or it answers the request, a denial as the check wrote it
-// (refuse), and an unanswered check under deny or an answer it cannot read 403 (unavailable). It runs in the access
-// phase, before nginx reads the body of the request, so a refused upload is answered at once (measured: 0.00 s, where a
-// content handler, which reads the whole body first, answered after 3.00 s). The deadline is a timer of auth.timeout
-// raced against the subrequest. $pf_authz_us is the whole microseconds from the question to the answer of the relay or
-// the deadline, which the request log writes, in steps of 1,000, as Date.now() counts milliseconds; it stays empty
-// when no check is asked. The body is one try: an exception the handler did not catch left the request to nginx, which
-// answered 500 once the deadline timer fired (measured on nginx 1.30.6 and 1.31.8). The catch answers 403 in both
-// modes and logs nothing, as the Envoy output writes no line for a refused check, and every path clears the timer,
-// which held the request open until it fired.
+// (refuse), and an unanswered check under deny or an answer it cannot read 403 (unavailable). A request the accepted
+// headers take past limits.request_headers (passable) is answered 500 with no body through refuse, so a gRPC call gets
+// the gRPC form Envoy answers it with, 200 with grpc-status 2, where a plain 500 from nginx reached the client; Envoy
+// counts the request only when the check's answer held a header auth.accept covers other than keep-alive, which
+// $pf_accept leaves out, and serves one whose answer set none up to the 100 lines its parser reads (measured on Envoy
+// 1.40.2), so the count runs only when accept set a field. It runs in the access phase, before nginx reads the body of
+// the request, so a refused upload is answered at once (measured: 0.00 s, where a content handler, which reads the
+// whole body first, answered after 3.00 s). The deadline is a timer of auth.timeout raced against the subrequest.
+// $pf_authz_us is the whole microseconds from the question to the answer of the relay or the deadline, which the
+// request log writes, in steps of 1,000, as Date.now() counts milliseconds; it stays empty when no check is asked. The
+// body is one try: an exception the handler did not catch left the request to nginx, which answered 500 once the
+// deadline timer fired (measured on nginx 1.30.6 and 1.31.8). The catch answers 403 in both modes and logs nothing, as
+// the Envoy output writes no line for a refused check, and every path clears the timer, which held the request open
+// until it fired.
 async function check(r) {
     try {
         var timer = null;
@@ -1187,8 +1220,9 @@ async function check(r) {
             refuse(r, a.status, a.headers, a.body);
             return;
         }
-        if (!passable(r, accept(r, a.headers))) {
-            r.return(500, "");
+        var set = accept(r, a.headers);
+        if (set.fields > 0 && !passable(r, set)) {
+            refuse(r, 500, [], Buffer.alloc(0));
             return;
         }
         pass(r);
@@ -1201,4 +1235,124 @@ async function check(r) {
     }
 }
 
-export default {headerNames, forwardedProto, origin, relay, check};
+// clientKey is the client's address as the Envoy output reads it under client_address forwarded, the key of a rate
+// limit by client and of hash.client: the text after the last comma of X-Forwarded-For, without the spaces and tabs
+// around it, when it is an IPv4 address in dotted form with no leading zero or an IPv6 address, and the peer's address
+// ($remote_addr) otherwise, each in canonical's form. Envoy reads the entry with inet_pton and compares an IPv6 address
+// by its value, so two spellings of one address are one client. Measured on nginx 1.30.6 and 1.31.8 beside Envoy
+// 1.40.2: the last entry of two, spaces or a tab around it, which Envoy leaves out alike, a port, IPv6 spellings, IPv4
+// in IPv6, a value that is no address, an empty value, a trailing comma, a leading zero, brackets, a zone and 1.2.3.
+// headerNames refuses a second X-Forwarded-For line first. nginx counts no request whose zone key is empty, so the
+// catch answers the peer's key.
+function clientKey(r) {
+    try {
+        var peer = r.variables.remote_addr;
+        var xff = r.variables.http_x_forwarded_for;
+        if (!xff) {
+            return canonical(peer);
+        }
+        var last = trimmed(xff.substring(xff.lastIndexOf(",") + 1));
+        var key = canonical(last);
+        return key === null ? canonical(peer) : key;
+    } catch (e) {
+        return canonical(r.variables.remote_addr);
+    }
+}
+
+// canonical is text in one form when it is an address inet_pton reads, and null otherwise: an IPv4 address in dotted
+// form with no leading zero as it is; an IPv6 address, with at most one ::, at most eight groups of one to four
+// hexadecimal digits and an IPv4 tail only when the last part holds a dot, as its eight groups in lower case without
+// leading zeros. Brackets, a zone and a port are no part of an address inet_pton reads. A last part of digits with no
+// dot is a group, not an IPv4 tail: inet_pton reads fd01::37 as the address whose last group is 37.
+function canonical(text) {
+    var octet = "(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])";
+    if (new RegExp("^" + octet + "(?:\\." + octet + "){3}$").test(text)) {
+        return text;
+    }
+    if (!/^[0-9A-Fa-f:.]+$/.test(text) || text.split("::").length > 2) {
+        return null;
+    }
+    var tail = [];
+    var m = /^(.*:)([0-9]+\.[0-9.]+)$/.exec(text);
+    if (m) {
+        var v4 = canonical(m[2]);
+        if (v4 === null) {
+            return null;
+        }
+        var o = v4.split(".");
+        tail = [((+o[0]) * 256 + (+o[1])).toString(16), ((+o[2]) * 256 + (+o[3])).toString(16)];
+        text = m[1].substring(m[1].length - 2) == "::" ? m[1] : m[1].substring(0, m[1].length - 1);
+    }
+    var halves = text.split("::");
+    var left = halves[0] ? halves[0].split(":") : [];
+    var right = halves.length > 1 && halves[1] ? halves[1].split(":") : [];
+    var groups = left.length + right.length + tail.length;
+    if (halves.length == 1 ? groups != 8 : groups > 7) {
+        return null;
+    }
+    var all = halves.length == 1 ? left.concat(tail) : left.concat(new Array(8 - groups).fill("0"), right, tail);
+    for (var i = 0; i < all.length; i++) {
+        if (!/^[0-9A-Fa-f]{1,4}$/.test(all[i])) {
+            return null;
+        }
+        all[i] = parseInt(all[i], 16).toString(16);
+    }
+    return all.join(":");
+}
+
+// hashKey is the key balance hash hashes for hash.header, whose name $pf_hash_name gives: no key when the request has
+// no line of the header, which nginx's hash spreads round robin, as Envoy spreads a request without it; otherwise "v"
+// and the values of its lines, each as Envoy reads it (asEnvoyReads), sorted and joined by a line feed, so an empty
+// header has a key of its own, as Envoy hashes an empty value. Envoy sorts a header's values before it hashes them, and
+// hashes several lines as another key than one line holding the same values joined by commas (measured on Envoy
+// 1.40.2: every order of two and of three lines reached one backend for each of 20 sets of values, where the line
+// holding them joined in sorted order reached another for 12 and 16 of the sets). A line feed is a byte no value holds,
+// as headerNames refuses one, so two lines never give the key of one. nginx's ring is its own, so one value reaches
+// one backend every time, not the one Envoy picks (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2). The
+// catch answers no key, round robin, as for a request without the header.
+function hashKey(r) {
+    try {
+        var name = r.variables.pf_hash_name, raw = r.rawHeadersIn, values = [];
+        for (var i = 0; i < raw.length; i++) {
+            if (raw[i][0].toLowerCase() == name) {
+                values.push(asEnvoyReads(r, raw[i][1]));
+            }
+        }
+        values.sort();
+        return values.length ? "v" + values.join("\n") : "";
+    } catch (e) {
+        return "";
+    }
+}
+
+// limitedKind is the form of the 429 the Envoy output answers a rate limited request with, the suffix of the location
+// nginx.conf answers it from: "-grpc" for a gRPC call ($pf_grpc_call), 200 with grpc-status 8; "-connect" for a
+// Connect call, which carries a Connect-Protocol-Version line of any value, the JSON body Connect reads; "-body" for an
+// HTTP/1.x request whose head announces a body (hasBody), after which Envoy closes the connection, where nginx kept it;
+// and "" otherwise (each measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2). "-grpc-body" and "-connect-body"
+// are a gRPC call and a Connect call with such a body, which close the connection as "-body" does: Envoy closed it
+// after a gRPC call over HTTP/1.1 with a body, framed by its length or chunked or waiting on Expect, and kept it after
+// one with none. An empty kind keeps the connection, so the catch answers "-body", which closes it.
+function limitedKind(r) {
+    try {
+        var body = r.httpVersion != "2.0" && hasBody(r);
+        if (r.variables.pf_grpc_call == "-grpc") {
+            return body ? "-grpc-body" : "-grpc";
+        }
+        var connect = r.headersIn["Connect-Protocol-Version"] !== undefined;
+        if (connect && body) {
+            return "-connect-body";
+        }
+        if (connect) {
+            return "-connect";
+        }
+        if (body) {
+            return "-body";
+        }
+        return "";
+    } catch (e) {
+        return "-body";
+    }
+}
+
+export default {headerNames, forwardedProto, origin, relay, check, clientKey, hashKey, limitedKind};

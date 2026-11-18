@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/kitecorp/proxyfile/v2/internal/generator"
@@ -34,14 +35,16 @@ var scriptBody string
 
 // script is the script beside the configuration: generator.Header in the comment syntax of JavaScript; the lists the
 // auth check reads, generator.FramingHeaders (never sent from a client to the check) and generator.HopHeaders (never
-// passed to the client with a denial); Envoy's gRPC status for each HTTP status of a denial (generator.GRPCStatus);
-// the names the configuration and the script share; then the body. Only constants are written, so the script is the
-// same bytes for every file, and two files rendered into one folder share it.
+// passed to the client with a denial); Envoy's gRPC status for each HTTP status of a denial (generator.GRPCStatus)
+// and for any other (generator.GRPCUnknown); the names the configuration and the script share; then the body. Only
+// constants are written, so the script is the same bytes for every file, and two files rendered into one folder share
+// it.
 func script() []byte {
 	return []byte("// " + strings.TrimPrefix(generator.Header, "# ") + "\n" +
 		"var framing = " + jsList(generator.FramingHeaders) + ";\n" +
 		"var hop = " + jsList(generator.HopHeaders) + ";\n" +
 		"var grpcStatus = " + jsStatuses(generator.GRPCStatus) + ";\n" +
+		"var grpcUnknown = " + strconv.Itoa(generator.GRPCUnknown) + ";\n" +
 		"var checkLocation = " + jsString(checkLocation) + ";\n" +
 		"var methodHeader = " + jsString(methodHeader) + ", pathHeader = " + jsString(pathHeader) +
 		", answerHeader = " + jsString(answerHeader) + ";\n\n" + scriptBody)

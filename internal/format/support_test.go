@@ -243,8 +243,12 @@ func TestRefusals(t *testing.T) {
 			want:     []string{`g.yaml:7:39: "tls.key" holding $ is refused by --target nginx: ` + dollarWords}},
 		{name: "a $ in the clients CA's path", spec: Proxyfile, target: nginxTarget,
 			document: m.Inserted(7, `tls: {certificate: /etc/tls/cert.pem, key: /etc/tls/key.pem, clients: {ca: "/etc/a$b/ca.pem"}}`), want: nil},
-		{name: "an address by name", spec: Proxyfile, target: nginxTarget, document: m.Replaced(3, 3, "  app: {http: 3000, address: catalog.internal}"),
-			want: []string{`g.yaml:3:21: "services.<service name>.address" a DNS name is refused by --target nginx: not written by this version's nginx generator; render it for envoy`}},
+		// nginx looks a name up only through its resolver directive, and refuses to load an upstream that resolves a name
+		// without one.
+		{name: "a DNS name without dns.resolver", spec: Proxyfile, target: nginxTarget, document: m.Replaced(3, 3, "  app: {http: 3000, address: catalog.internal}"),
+			want: []string{`g.yaml:3:21: "services.<service name>.address" a DNS name with no dns.resolver is refused by --target nginx: nginx looks a name up only through the name server it is given; write dns.resolver`}},
+		{name: "a DNS name with dns.resolver", spec: Proxyfile, target: nginxTarget,
+			document: m.Replaced(3, 3, "  app: {http: 3000, address: catalog.internal}", `dns: {resolver: "10.0.0.2:53"}`), want: nil},
 		{name: "an address by IP", spec: Proxyfile, target: nginxTarget, document: m.Replaced(3, 3, "  app: {http: 3000, address: 10.0.2.21}"), want: nil},
 		// The reader takes a zoned IPv6 address as an IP address (netip.ParseAddr); nginx loads none in an upstream.
 		{name: "a zoned IPv6 address", spec: Proxyfile, target: nginxTarget, document: m.Replaced(3, 3, `  app: {http: 3000, address: "fe80::1%en0"}`),
@@ -332,6 +336,45 @@ func TestRefusals(t *testing.T) {
 		// Neither refusal fires on a name that only holds one nginx writes itself inside it.
 		{name: "accept names in full that nginx does not write itself", spec: Proxyfile, target: nginxTarget,
 			document: m.Inserted(7, "auth: {ask: app /check, enabled: true, accept: [x-host, x-te, x-request-ids]}"), want: nil},
+		// The keys of rate limits, retries, DNS names and balancing, each in a form nginx writes.
+		{name: "the traffic keys nginx writes", spec: Proxyfile, target: nginxTarget,
+			document: m.Replaced(3, 6, "  app: {http: 3000, balance: least_requests}",
+				"  catalog: {http: 8090, address: catalog.internal.example, balance: hash, hash: {header: x-session-id}}",
+				"  shop: {grpc: 8081}", `dns: {resolver: "10.0.0.2:53"}`, "origins: origins.json", "routes:",
+				"  - {name: login, prefix: /login, to: app, rate_limit: {requests: 5, per: 1s, burst: 5, by: client}}",
+				`  - rpc: {to: {"*": shop}, retries: 2, rate_limit: {requests: 3, per: 2s, by: all}}`,
+				"  - {name: catalog, prefix: /catalog/, to: catalog, retries: 0}", "  - {name: app, prefix: /, to: app}"),
+			want: nil},
+		// nginx sent a GET and a PUT again after the service read them, where the Envoy output never does.
+		{name: "retries of 1 or more", spec: Proxyfile, target: nginxTarget, document: m.Replaced(6, 6, "  - {name: app, prefix: /, to: app, retries: 1}"),
+			want: []string{`g.yaml:6:37: "routes[].retries" 1 or more is refused by --target nginx: nginx sends a request again after a service read it when its method is not POST, LOCK or PATCH; write retries: 0, or render it for envoy`}},
+		// limit_req_zone takes a whole number of requests a second or a minute, and no other unit.
+		{name: "a per that gives no whole rate", spec: Proxyfile, target: nginxTarget,
+			document: m.Replaced(6, 6, "  - {name: app, prefix: /, to: app, rate_limit: {requests: 1, per: 7s}}"),
+			want:     []string{`g.yaml:6:63: "routes[].rate_limit.per" giving no whole number of requests a second or a minute is refused by --target nginx: nginx's rate is a whole number of requests a second or a minute; write requests and per so that one of them is whole`}},
+		{name: "a per that gives no whole rate on the rpc entry", spec: Proxyfile, target: nginxTarget,
+			document: m.Replaced(6, 6, `  - rpc: {to: {"*": app}, rate_limit: {requests: 2, per: 7s, by: all}}`, "  - {name: app, prefix: /, to: app}"),
+			want:     []string{`g.yaml:6:53: "routes[].rpc.rate_limit.per" giving no whole number of requests a second or a minute is refused by --target nginx: nginx's rate is a whole number of requests a second or a minute; write requests and per so that one of them is whole`}},
+		{name: "a per that gives a whole rate a minute", spec: Proxyfile, target: nginxTarget,
+			document: m.Replaced(6, 6, "  - {name: app, prefix: /, to: app, rate_limit: {requests: 3, per: 2s}}"), want: nil},
+		// The relay that asks the check is a stream server, where neither a header nor the script's client key exists.
+		{name: "hash on the check's service", spec: Proxyfile, target: nginxTarget,
+			document: m.Replaced(3, 6, "  app: {http: 3000}", "  accounts: {http: 7070, balance: hash, hash: {client: true}}", "origins: origins.json",
+				"routes:", "  - {name: app, prefix: /, to: app}", "auth: {ask: accounts /check, timeout: 1s, enabled: true, when_unavailable: deny}"),
+			want: []string{`g.yaml:4:26: "services.<service name>.balance" hash on the service auth.ask names is refused by --target nginx: nginx's check relay cannot read the check's headers to hash them; write another balance on the service`}},
+		// Refused with the check turned off too, so the file stays valid when it is turned on.
+		{name: "hash on the check's service with the check off", spec: Proxyfile, target: nginxTarget,
+			document: m.Replaced(3, 6, "  app: {http: 3000}", "  accounts: {http: 7070, balance: hash, hash: {client: true}}", "origins: origins.json",
+				"routes:", "  - {name: app, prefix: /, to: app}", "auth: {ask: accounts /check, timeout: 1s, enabled: false, when_unavailable: deny}"),
+			want: []string{`g.yaml:4:26: "services.<service name>.balance" hash on the service auth.ask names is refused by --target nginx: nginx's check relay cannot read the check's headers to hash them; write another balance on the service`}},
+		{name: "hash on a service the check does not name", spec: Proxyfile, target: nginxTarget,
+			document: m.Replaced(3, 6, "  app: {http: 3000}", "  accounts: {http: 7070, balance: hash, hash: {client: true}}", "origins: origins.json",
+				"routes:", "  - {name: app, prefix: /, to: app}", "auth: {ask: app /check, timeout: 1s, enabled: true, when_unavailable: deny}"),
+			want: nil},
+		{name: "another balance on the check's service", spec: Proxyfile, target: nginxTarget,
+			document: m.Replaced(3, 6, "  app: {http: 3000}", "  accounts: {http: 7070, balance: least_requests}", "origins: origins.json",
+				"routes:", "  - {name: app, prefix: /, to: app}", "auth: {ask: accounts /check, timeout: 1s, enabled: true, when_unavailable: deny}"),
+			want: nil},
 		{name: "an X-Ray tracer", spec: Proxyfile, target: nginxTarget, document: m.Inserted(7, "tracing: {provider: {xray: {segment: s}}}"),
 			want: []string{`g.yaml:7:1: "tracing" ` + notWrittenWords, `g.yaml:7:11: "tracing.provider" ` + notWrittenWords,
 				`g.yaml:7:22: "tracing.provider.xray" ` + xrayWords, `g.yaml:7:29: "tracing.provider.xray.segment" ` + xrayWords}},
@@ -471,7 +514,7 @@ func TestHeaderNamesNeedNoEscaping(t *testing.T) {
 func TestLessStrictWarning(t *testing.T) {
 	for _, c := range []struct{ target, want string }{
 		{"envoy", ""},
-		{"nginx", `this nginx configuration is less strict than the Envoy output in 12 ways; docs/nginx.md lists them under "Where nginx is less strict than the Envoy output"`},
+		{"nginx", `this nginx configuration is less strict than the Envoy output in 13 ways; docs/nginx.md lists them under "Where nginx is less strict than the Envoy output"`},
 		{"haproxy", `this HAProxy configuration is less strict than the Envoy output in 10 ways; docs/haproxy.md lists them under "Where HAProxy is less strict than the Envoy output"`},
 	} {
 		target, _ := TargetNamed(c.target)
@@ -523,6 +566,7 @@ func TestLessStrictWays(t *testing.T) {
 			{"auth.when_unavailable", "with allow, a check service that does not close its connection right after its answer leaves requests unchecked past about 470 checks a second"},
 			{"auth.when_unavailable", "with allow, a worker with none of its 8192 connections left serves requests unchecked"},
 			{"auth.ask", "a request whose client closes its connection during the check can still reach the service"},
+			{"routes[].rpc.retries", "a retried call is sent again at once and with no limit on retries at the same time"},
 			{"log", "a chunked answer its service cuts short writes no upstream-failure line"},
 		}},
 	} {
@@ -646,7 +690,7 @@ func TestHAProxyWrites(t *testing.T) {
 		{key: "a dot segment with a ; parameter answered 400", level: Partial,
 			note: "a dot segment whose ; parameter is written with dots, such as /a/..;/b, is answered 400, and a gRPC call 200 with grpc-status 13, where Envoy 1.40 drops the parameter and resolves the segment; with the auth check, such a request is asked about whatever route its resolved path takes, and gets the check's denial or, once the check lets it through, 400, where Envoy asks only when that route is checked and, with send_request, sends the check the resolved path; after the 400 of such a segment with the ; written %3B, which both answer, HAProxy keeps the connection open, where Envoy closes it"},
 		{key: "the request line and header names read before a route is picked", level: Partial,
-			note: "over HTTP/1.1 an absolute target is answered 400, where Envoy routes it by its host and sends the path alone with that host as Host, or answers 404 when no environment has the host, and OPTIONS * and CONNECT are answered 400, where Envoy answers 404; a request line with no version, HTTP/0.9's form, is answered 400, where Envoy answers 426; a Connection token other than close, keep-alive, upgrade, HTTP2-Settings and te is answered 400, where Envoy removes the header the token names and serves the request; ten Connection elements or more, an empty one counted but for an empty last one, are answered 400, where Envoy counts no empty element and serves a token with ten; an h2c upgrade is answered 400, where Envoy serves it as a plain request; a header line folded onto the next, and a header value that holds three spaces or tabs in a row, are answered 400, where Envoy serves them; over HTTP/2 a cookie field that starts with two spaces or tabs, as one of spaces alone does, or ends with three is answered 400 too, where Envoy serves it, as HAProxy keeps the spaces around a cookie field's value and drops them around any other field's; a WebSocket upgrade with no Sec-WebSocket-Key is answered 400, where Envoy passes it on, or answers 403 to an origin it does not admit; more than 100 header lines are answered 431 or, from 102, 400, where Envoy answers 431, and 101 lines or more of a header Envoy joins into one line are answered 400, where Envoy serves them; two Host lines of different hosts, and a Host that holds a comma, are answered 400, where Envoy answers 404; Transfer-Encoding: chunked on two lines is answered 400, and Transfer-Encoding: gzip, chunked 422, where Envoy answers 501; a request line and header lines of more than 15,277 bytes together, counted as sent with their line ends, Host alone beside the line and 4 bytes fewer for each further header line (3.4.7: 8 bytes more), are answered 431, and a request line of 16,319 bytes or more (3.4.7: 16,327) 414, where Envoy serves both up to its default limit of 60 KiB; over HTTP/2 a request with 97 header fields or more is answered 400, where Envoy resets its stream, and so is one with fewer whose cookies, counted one a field, reach 97, and one with 97 fields or more of a header Envoy joins, which Envoy serves, is answered 400 or, with 120, its stream reset; a WebSocket, an extended CONNECT, is answered 400, where Envoy closes the connection; a path whose escaped form outgrows HAProxy's buffer, such as one of 7000 bytes above 0x7F, is answered 400 by HAProxy 3.4.7 and 500 by 3.2.26, where Envoy serves it; a header or trailer name outside RFC 9110's token characters resets the stream, where Envoy closes the connection; a # in :path resets the stream, where Envoy answers 400; and a request with neither :authority nor host is answered 404, where Envoy closes the connection; over HTTP/1.1 a request trailer whose name is outside those characters ends the connection with no answer when the body comes after the headers, where Envoy answers 400; over HTTP/2 a QUERY whose content-type field is spaces alone is answered 400, where Envoy serves it: HAProxy reads an HTTP/2 value of spaces alone as empty, and Envoy answers 400 to a QUERY with no Content-Type or an empty one"},
+			note: "over HTTP/1.1 an absolute target is answered 400, where Envoy routes it by its host and sends the path alone with that host as Host, or answers 404 when no environment has the host, and OPTIONS * and CONNECT are answered 400, where Envoy answers 404; a request line with no version, HTTP/0.9's form, is answered 400, where Envoy answers 426; after its 426 to HTTP/1.0 asking for keep-alive or to HTTP/1.2 to HTTP/1.9, and after its 403 to an upgrade other than WebSocket, from any origin, HAProxy keeps the connection and serves the next request on it, where Envoy closes it; a Connection token other than close, keep-alive, upgrade, HTTP2-Settings and te is answered 400, where Envoy removes the header the token names and serves the request; ten Connection elements or more, an empty one counted but for an empty last one, are answered 400, where Envoy counts no empty element and serves a token with ten; an h2c upgrade is answered 400, where Envoy serves it as a plain request; a header line folded onto the next, and a header value that holds three spaces or tabs in a row, are answered 400, where Envoy serves them; over HTTP/2 a cookie field that starts with two spaces or tabs, as one of spaces alone does, or ends with three is answered 400 too, where Envoy serves it, as HAProxy keeps the spaces around a cookie field's value and drops them around any other field's; a WebSocket upgrade with no Sec-WebSocket-Key is answered 400, where Envoy passes it on, or answers 403 to an origin it does not admit; more than 100 header lines are answered 431 or, from 102, 400, where Envoy answers 431, and 101 lines or more of a header Envoy joins into one line are answered 400, where Envoy serves them; two Host lines of different hosts, and a Host that holds a comma, are answered 400, where Envoy answers 404; Transfer-Encoding: chunked on two lines is answered 400, and Transfer-Encoding: gzip, chunked 422, where Envoy answers 501; a request line and header lines of more than 15,277 bytes together, counted as sent with their line ends, Host alone beside the line and 4 bytes fewer for each further header line (3.4.7: 8 bytes more), are answered 431, and a request line of 16,319 bytes or more (3.4.7: 16,327) 414, where Envoy serves both up to its default limit of 60 KiB; over HTTP/2 a request with 97 header fields or more is answered 400, where Envoy resets its stream, and so is one with fewer whose cookies, counted one a field, reach 97, and one with 97 fields or more of a header Envoy joins, which Envoy serves, is answered 400 or, with 120, its stream reset; a WebSocket, an extended CONNECT, is answered 400, where Envoy closes the connection; a path whose escaped form outgrows HAProxy's buffer, such as one of 7000 bytes above 0x7F, is answered 400 by HAProxy 3.4.7 and 500 by 3.2.26, where Envoy serves it; a header or trailer name outside RFC 9110's token characters resets the stream, where Envoy closes the connection; a # in :path resets the stream, where Envoy answers 400; and a request with neither :authority nor host is answered 404, where Envoy closes the connection; over HTTP/1.1 a request trailer whose name is outside those characters ends the connection with no answer when the body comes after the headers, where Envoy answers 400; over HTTP/2 a QUERY whose content-type field is spaces alone is answered 400, where Envoy serves it: HAProxy reads an HTTP/2 value of spaces alone as empty, and Envoy answers 400 to a QUERY with no Content-Type or an empty one"},
 	}
 	wantRefused := map[string][]string{
 		"not written by this version's HAProxy generator; render it for envoy": {

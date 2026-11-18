@@ -10,7 +10,6 @@ tls:
   clients: {ca: /etc/gateway/tls/clients-ca.pem}
 client_address: connection
 limits:
-  connections: 4096
   request_headers: {size: 96KiB, count: 150}
 timeouts:
   request: none

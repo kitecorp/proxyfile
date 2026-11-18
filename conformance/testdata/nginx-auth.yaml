@@ -2,9 +2,11 @@
 # accept names written in full, as the nginx generator refuses a name with a * prefix there, and send naming the prefix
 # x-client-*, which covers x-client-id, the name remove_from_clients lists; auth: off on the routes haproxy.yaml writes
 # it on, its public prefix route included, at the same place; and the RPC methods' action and reports as haproxy.yaml
-# writes them. Its other keys are nginx.yaml's, so the rows of the check run beside every form of the keys the
-# generator writes: tls with clients, client_address connection, the pattern routes, cors and the request log. Every
-# entry that runs it, Envoy's too, measures its literals on Envoy.
+# writes them. Its other keys are nginx.yaml's but for the traffic keys, so the rows of the check run beside the forms
+# the generator writes for tls with clients, client_address connection, the pattern routes, cors and the request log.
+# Of the traffic keys it writes only the catalog route's limit, nginx.yaml's 20 requests a second with a burst of 10 by
+# client, so the rate limit rows that need the check run on an nginx file. Every entry that runs it, Envoy's too,
+# measures its literals on Envoy.
 listen: 10000
 admin: 9901
 tls:
@@ -127,7 +129,7 @@ routes:
   - {name: braces, pattern: "^/braces/x{,3}$", to: accounts}
   - {name: backtrack, pattern: "^/backtrack/((a|a)*c|a+b)$", to: accounts}
   - {name: give-up, pattern: "^/give-up/(a|aa)+$", to: accounts}
-  - {name: catalog, prefix: /catalog/, to: catalog}
+  - {name: catalog, prefix: /catalog/, to: catalog, rate_limit: {requests: 20, per: 1s, burst: 10, by: client}}
   - {name: api-admin, pattern: "^/api/[A-Za-z0-9%_-]+/admin$", to: accounts}
   - {name: user, pattern: "^/u/@[a-z]+$", to: accounts}
   - {name: letters, pattern: "^/l/[a-z ]+$", to: accounts}
