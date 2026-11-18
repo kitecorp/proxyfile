@@ -1,15 +1,13 @@
 # Portability
 
-proxyfile writes Envoy's configuration, nginx's and HAProxy's from the same file. In this version nginx's generator
-writes routing, CORS, the client's address, header removal, TLS, the header limits, the two idle times, the admin port's
-paths, the request log, the auth check, rate limits, RPC retries, balance, hash and services found by DNS name, and
-HAProxy's routing, TLS, CORS and the auth check, and each refuses by name every key it does not write yet (its column
-below). Every key is **core** or belongs to one proxy. A core key is one every proxy can carry, at times with a
-difference this page names, or one a proxy refuses by name where it cannot carry it. A key that belongs to one proxy
-lives in that proxy's block at the top of the file: `envoy`, `nginx` or `haproxy`. A render for one target reads the
-core keys and its own block and leaves the other blocks alone, so one file can hold what each proxy needs. The split
-follows the Kubernetes Gateway API, which sorts its features into core, extended and implementation-specific ones and is
-implemented by Envoy, nginx and HAProxy alike.
+proxyfile writes Envoy's configuration, nginx's and HAProxy's from the same file. In this version nginx's and HAProxy's
+generators write the keys their columns of [the support table](#support-by-proxy-from-the-generators) mark supported or
+partial, and each refuses by name every key it does not write yet. Every key is **core** or belongs to one proxy. A core
+key is one every proxy can carry, at times with a difference this page names, or one a proxy refuses by name where it
+cannot carry it. A key that belongs to one proxy lives in that proxy's block at the top of the file: `envoy`, `nginx` or
+`haproxy`. A render for one target reads the core keys and its own block and leaves the other blocks alone, so one file
+can hold what each proxy needs. The split follows the Kubernetes Gateway API, which sorts its features into core,
+extended and implementation-specific ones and is implemented by Envoy, nginx and HAProxy alike.
 
 `proxyfile render --target envoy` is the default. Any key written in the `nginx` or `haproxy` block is refused, as
 neither block takes a key yet. A target that cannot carry a key the file uses refuses the file, naming the key and what
