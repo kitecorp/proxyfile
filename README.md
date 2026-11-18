@@ -10,18 +10,16 @@
 You describe your gateway in one short file: the services behind it, the routes to them, who may call what. proxyfile
 writes the complete configuration of the proxy you run from it.
 
-Generators: Envoy writes every key; nginx writes routing, CORS with the origin lists, the client's address, header
-removal, TLS, the header limits, the two idle times, the admin port's paths, the request log, the auth check, rate
-limits, RPC retries, balance, hash and services found by DNS name ([docs/nginx.md](docs/nginx.md)), and HAProxy
-routing, TLS, CORS and the auth check ([docs/haproxy.md](docs/haproxy.md)), each refusing by name the keys it does not
-write.
+Generators: Envoy writes every key. nginx and HAProxy write the keys that
+[the support table](docs/portability.md#support-by-proxy-from-the-generators) marks supported or partial in their
+columns, and each refuses the others by name ([docs/nginx.md](docs/nginx.md), [docs/haproxy.md](docs/haproxy.md)).
 
 ```mermaid
 flowchart TB
     source["Your proxyfile<br/>YAML or HOCON"] --> render["proxyfile render"]
-    render --> envoy["The Envoy configuration<br/>every key"]
-    render --> nginx["The nginx configuration<br/>routing, CORS, the client's address,<br/>header removal, TLS, header limits,<br/>idle times, admin paths, the log,<br/>the auth check, rate limits, RPC retries,<br/>balance, hash and DNS names"]
-    render --> haproxy["The HAProxy configuration<br/>routing, TLS, CORS<br/>and the auth check"]
+    render --> envoy["The Envoy configuration"]
+    render --> nginx["The nginx configuration"]
+    render --> haproxy["The HAProxy configuration"]
 ```
 
 <picture>
