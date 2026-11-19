@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/kitecorp/proxyfile/v2/internal/model"
@@ -37,6 +38,15 @@ type Refusal struct {
 	// proxyfile, the proxyfile's tree with its includes merged, also when the key is written in an origins file, a
 	// methods file or .proto options, because those keys are the proxyfile's.
 	Applies func(value, proxyfile *tree.Node) bool
+}
+
+// countAbove is the Applies of a count refused above bound, the most a target's directive takes. A value that is no
+// count is the reader's to refuse, so it is never of this form.
+func countAbove(bound int64) func(value, _ *tree.Node) bool {
+	return func(value, _ *tree.Node) bool {
+		count, err := strconv.ParseInt(value.Text, 10, 64)
+		return err == nil && count > bound
+	}
 }
 
 // Target is a proxy with a generator: Name is the --target value, Title the support table's column heading, and Keys

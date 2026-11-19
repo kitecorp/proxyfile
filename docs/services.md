@@ -108,9 +108,9 @@ configuration, for a service's address, the name of the [tracing endpoint](traci
 the [keys URL](auth.md#tokens) alike. Each of these names is looked up for its IPv4 and IPv6 addresses both, and each
 address is a backend, as [Backends and balancing](#backends-and-balancing) says for a service.
 The nginx generator writes a DNS name with `dns.resolver` and refuses one without it, because nginx looks a name up
-while it runs only through the name server it is given ([nginx](nginx.md#backends-balance-hash-and-dns-names)). In this
-version the HAProxy generator writes no DNS name: it refuses one in `address`, and refuses `dns`
-([Portability](portability.md#support-by-proxy-from-the-generators)).
+while it runs only through the name server it is given ([nginx](nginx.md#backends-balance-hash-and-dns-names)). The
+HAProxy generator writes a DNS name with HAProxy's own resolvers, which take the name's addresses of one family
+([HAProxy](haproxy.md#services-found-by-name)).
 
 [`examples/dns`](../examples/dns/) writes a DNS name in `address`, `hash` and `dns.resolver` in
 [YAML](../examples/dns/yaml/proxyfile.yaml) and [HOCON](../examples/dns/hocon/Proxyfile), each beside the

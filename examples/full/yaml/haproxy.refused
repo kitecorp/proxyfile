@@ -1,24 +1,4 @@
-examples/full/yaml/proxyfile.yaml:10:1: "limits" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:11:3: "limits.connections" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:12:3: "limits.request_headers" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:12:21: "limits.request_headers.size" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:12:34: "limits.request_headers.count" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:15:3: "timeouts.idle" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:16:3: "timeouts.upstream_idle" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:22:5: "services.<service name>.balance" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:23:5: "services.<service name>.health" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:23:14: "services.<service name>.health.path" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:23:30: "services.<service name>.health.grpc" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:23:42: "services.<service name>.health.interval" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:23:57: "services.<service name>.health.timeout" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:23:70: "services.<service name>.health.healthy" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:23:82: "services.<service name>.health.unhealthy" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:25:25: "services.<service name>.address" a DNS name is refused by --target haproxy: this version's HAProxy generator writes no DNS name; give the service's IP address, or render it for envoy
-examples/full/yaml/proxyfile.yaml:25:60: "services.<service name>.balance" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:25:75: "services.<service name>.hash" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:25:82: "services.<service name>.hash.header" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:26:1: "dns" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:26:7: "dns.resolver" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:23:30: "services.<service name>.health.grpc" is refused by --target haproxy: HAProxy has no gRPC health check: http-check send writes a text body, not the health service's gRPC message; write health.path on the service's http port
 examples/full/yaml/proxyfile.yaml:36:3: "auth.jwt" is refused by --target haproxy: HAProxy's jwt_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names
 examples/full/yaml/proxyfile.yaml:37:5: "auth.jwt.issuer" is refused by --target haproxy: HAProxy's jwt_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names
 examples/full/yaml/proxyfile.yaml:38:5: "auth.jwt.audiences" is refused by --target haproxy: HAProxy's jwt_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names
@@ -29,20 +9,8 @@ examples/full/yaml/proxyfile.yaml:42:5: "auth.jwt.optional" is refused by --targ
 examples/full/yaml/proxyfile.yaml:43:5: "auth.jwt.claims" is refused by --target haproxy: HAProxy's jwt_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names
 examples/full/yaml/proxyfile.yaml:43:14: "auth.jwt.claims.<header name>" is refused by --target haproxy: HAProxy's jwt_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names
 examples/full/yaml/proxyfile.yaml:43:30: "auth.jwt.claims.<header name>" is refused by --target haproxy: HAProxy's jwt_verify takes one key file, with no key set, URL, issuer or audience check; verify the token in the service auth.ask names
-examples/full/yaml/proxyfile.yaml:66:7: "routes[].rpc.retries" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:67:7: "routes[].rpc.rate_limit" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:67:20: "routes[].rpc.rate_limit.requests" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:67:35: "routes[].rpc.rate_limit.per" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:67:44: "routes[].rpc.rate_limit.by" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:72:53: "routes[].rate_limit" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:72:66: "routes[].rate_limit.requests" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:72:80: "routes[].rate_limit.per" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:72:89: "routes[].rate_limit.burst" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:72:100: "routes[].rate_limit.by" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:73:39: "routes[].retries" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:79:1: "log" is refused by --target haproxy: not written by this version's HAProxy generator, and without it HAProxy logs no request, where the Envoy output logs every request; render it for envoy
-examples/full/yaml/proxyfile.yaml:79:7: "log.status_from" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/full/yaml/proxyfile.yaml:79:25: "log.sample" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
+examples/full/yaml/proxyfile.yaml:66:7: "routes[].rpc.retries" is refused by --target haproxy: with retry-on at HAProxy's default, a gRPC call whose connection to the service failed was not sent again, and the wider retry-on that sends it also sends again a request a service may have read; leave retries out of the rpc entry, or render it for envoy
+examples/full/yaml/proxyfile.yaml:72:89: "routes[].rate_limit.burst" above 0 is refused by --target haproxy: HAProxy's rate counts the requests of a period and has no burst; write burst: 0 or leave it out, or render it for envoy
 examples/full/yaml/proxyfile.yaml:80:1: "tracing" is refused by --target haproxy: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy
 examples/full/yaml/proxyfile.yaml:81:3: "tracing.provider" is refused by --target haproxy: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy
 examples/full/yaml/proxyfile.yaml:82:5: "tracing.provider.otel" is refused by --target haproxy: the official HAProxy images have no tracing filter (the OpenTelemetry filter is an addon built from source); remove tracing, or render it for envoy

@@ -1,4 +1,1 @@
-examples/partial/hocon/Proxyfile: log: "log" is refused by --target haproxy: not written by this version's HAProxy generator, and without it HAProxy logs no request, where the Envoy output logs every request; render it for envoy
-examples/partial/hocon/Proxyfile: log.sample: "log.sample" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/partial/hocon/Proxyfile: log.status_from: "log.status_from" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
 examples/partial/hocon/Proxyfile: timeouts.request: "timeouts.request" a time is refused by --target haproxy: HAProxy has no limit on a whole request (timeout server is the time without data, timeouts.idle); write timeouts.request: none

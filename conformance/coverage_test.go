@@ -11,18 +11,32 @@ import (
 	"github.com/kitecorp/proxyfile/v2/internal/render"
 )
 
-// fileKeys is a file an entry renders, by its label, with every core key a render of it reads (writtenKeys), and the
-// scenarios it is held to (file.scenarios).
+// fileKeys is a file an entry renders, by its label, with every core key a render of it reads (writtenKeys), the
+// scenarios it is held to (file.scenarios), and the main rows of the entry's target (target.mainRows).
 type fileKeys struct {
 	label     string
 	keys      []string
 	scenarios []string
+	mainRows  map[string][]string
 }
 
 // runs reports whether row e of scenario s runs on f: a row of a scenario f is held to, or of any when it names none,
-// whose keys f writes (runsOn).
+// whose keys f writes (runsOn), and that is a main row of each of its keys the target holds to main rows alone (held).
 func (f fileKeys) runs(s scenario, e exchange) bool {
-	return (f.scenarios == nil || slices.Contains(f.scenarios, s.name)) && runsOn(e, f.keys)
+	return (f.scenarios == nil || slices.Contains(f.scenarios, s.name)) && runsOn(e, f.keys) && held(f.mainRows, e)
+}
+
+// held reports whether a target with mainRows runs e: for each key of e that mainRows names, e is one of its main rows.
+// A target that writes a key with its own feature is held to the key's main behaviour, not to every answer the Envoy
+// output gives with it, so a row that holds such a key and is not a main row of it runs on none of the target's files,
+// and rowCoverage does not ask the target for it.
+func held(mainRows map[string][]string, e exchange) bool {
+	for _, key := range e.keys {
+		if rows, ok := mainRows[key]; ok && !slices.Contains(rows, e.name) {
+			return false
+		}
+	}
+	return true
 }
 
 // rendered returns, by each entry's label, the files of the entry that render.Read accepts for its target, in the
@@ -38,7 +52,7 @@ func rendered(ts []target) (map[string][]fileKeys, error) {
 			if problem != "" {
 				return nil, errors.New(problem)
 			}
-			byEntry[tg.label] = append(byEntry[tg.label], fileKeys{label: f.label, keys: keys, scenarios: f.scenarios})
+			byEntry[tg.label] = append(byEntry[tg.label], fileKeys{label: f.label, keys: keys, scenarios: f.scenarios, mainRows: tg.mainRows})
 		}
 	}
 	return byEntry, nil
@@ -94,11 +108,12 @@ func exercised(files []fileKeys) []string {
 }
 
 // version is the entries of one target at one version, such as nginx 1.31's entry on the plain image and its entry on
-// the image tagged -otel, with the files of them all that render.
+// the image tagged -otel, with the files of them all that render, and the target's main rows.
 type version struct {
 	name, number string
 	labels       []string
 	files        []fileKeys
+	mainRows     map[string][]string
 }
 
 // versions returns the entries of ts by target and version, in the order each version first appears, each with the
@@ -115,7 +130,7 @@ func versions(ts []target, byEntry map[string][]fileKeys) []version {
 		}
 		i := slices.IndexFunc(found, func(v version) bool { return v.name == tg.name && v.number == tg.version })
 		if i < 0 {
-			found = append(found, version{name: tg.name, number: tg.version})
+			found = append(found, version{name: tg.name, number: tg.version, mainRows: tg.mainRows})
 			i = len(found) - 1
 		}
 		found[i].labels = append(found[i].labels, tg.label)
@@ -144,16 +159,16 @@ func coverage(ts []target, byEntry map[string][]fileKeys) []string {
 }
 
 // rowCoverage returns a line for each row that runs on an Envoy entry's file and on none of the files of another
-// version's entries, when that target refuses none of the row's keys. coverage alone would pass a version whose files
-// split a row's keys between them, each key exercised by other rows, while the row itself runs on none of them.
-// Envoy's version is held to the same.
+// version's entries, when that target refuses none of the row's keys and holds the row (held). coverage alone would
+// pass a version whose files split a row's keys between them, each key exercised by other rows, while the row itself
+// runs on none of them. Envoy's version is held to the same.
 func rowCoverage(ts []target, byEntry map[string][]fileKeys) []string {
 	envoy := filesOf("envoy", ts, byEntry)
 	var lines []string
 	for _, v := range versions(ts, byEntry) {
 		for _, s := range scenarios {
 			for _, e := range s.exchanges {
-				if runsOnAny(s, e, envoy) && !runsOnAny(s, e, v.files) && !refusesAny(v.name, e.keys) {
+				if held(v.mainRows, e) && runsOnAny(s, e, envoy) && !runsOnAny(s, e, v.files) && !refusesAny(v.name, e.keys) {
 					lines = append(lines, fmt.Sprintf("%s: row %q of %q runs on no file of %s %s, and %s refuses none of %q",
 						strings.Join(v.labels, ", "), e.name, s.name, v.name, v.number, v.name, e.keys))
 				}
@@ -167,7 +182,7 @@ func rowCoverage(ts []target, byEntry map[string][]fileKeys) []string {
 // on a file the row does not run on, a target's own literal on a row that runs on none of the files of the target's
 // entries, and one held on a file label that names no file of the target's entries the row runs on. It also returns a line for each target's own literal whose difference the target does not declare
 // partial, a difference docs/portability.md would not show, and for each row that runs on no file of an Envoy entry,
-// whose literal no proxy was measured on.
+// whose literal no proxy was measured on, and the lines of mainRowProblems.
 func rowProblems(ts []target, byEntry map[string][]fileKeys) []string {
 	labels := map[string]bool{}
 	byLabel := map[string][]fileKeys{}
@@ -222,5 +237,47 @@ func rowProblems(ts []target, byEntry map[string][]fileKeys) []string {
 			}
 		}
 	}
+	return append(lines, mainRowProblems(ts, byEntry)...)
+}
+
+// mainRowProblems returns a line for each main row a target names (target.mainRows) that is no row of the scenarios,
+// that does not hold the key it is named under, or that runs on no file of the target's entries: each would leave the
+// key held by no row on that target while reading as held.
+func mainRowProblems(ts []target, byEntry map[string][]fileKeys) []string {
+	var lines []string
+	judged := map[string]bool{}
+	for _, tg := range ts {
+		if judged[tg.name] {
+			continue
+		}
+		judged[tg.name] = true
+		files := filesOf(tg.name, ts, byEntry)
+		for _, key := range slices.Sorted(maps.Keys(tg.mainRows)) {
+			for _, name := range tg.mainRows[key] {
+				s, e, found := rowNamed(name)
+				switch {
+				case !found:
+					lines = append(lines, fmt.Sprintf("%s names %q a main row of %q, the name of no row", tg.name, name, key))
+				case !slices.Contains(e.keys, key):
+					lines = append(lines, fmt.Sprintf("%s names row %q of %q a main row of %q, a key it does not hold", tg.name, name, s.name, key))
+				case !runsOnAny(s, e, files):
+					lines = append(lines, fmt.Sprintf("%s names row %q of %q a main row of %q, but it runs on none of the files of the %s entries",
+						tg.name, name, s.name, key, tg.name))
+				}
+			}
+		}
+	}
 	return lines
+}
+
+// rowNamed returns the first row named name and its scenario, and false when no row has the name.
+func rowNamed(name string) (scenario, exchange, bool) {
+	for _, s := range scenarios {
+		for _, e := range s.exchanges {
+			if e.name == name {
+				return s, e, true
+			}
+		}
+	}
+	return scenario{}, exchange{}, false
 }

@@ -50,6 +50,9 @@ type exchange struct {
 	// that refuse connections on every port while the row's requests go out, as a backend that is down does
 	// (world.refuse).
 	refusing string
+	// settle is waited after the refusing backends refuse and before the first request: a proxy takes a backend out of
+	// its pool only once its health checks have failed, which takes the checks' interval times the failures they need.
+	settle time.Duration
 	// flood, when set, sends the row's request many times at once with other paths, and wants the proxy's memory to
 	// stay within a bound (sendFlood).
 	flood *flood
@@ -219,6 +222,10 @@ type answer struct {
 	// counted, on a row sent in sequence, wants lines of the proxy's log of an event that carries no request id, which
 	// logged cannot find, such as gateway_upstream_failure (sendRepeated reads them).
 	counted *countedLines
+	// lineAfter, on a row sent in sequence, wants a line the proxy wrote to its stdout after the row began that the
+	// expression matches: the request log line of a target whose line is its own and no JSON object, which logged
+	// cannot read (sendRepeated reads it, as it reads counted).
+	lineAfter *regexp.Regexp
 	// receivedForms holds headers the stub must have received with a value the regular expression matches, which the
 	// answer need not carry, unlike forms: a value the proxy makes anew for the service alone, such as a traceparent.
 	receivedForms map[string]*regexp.Regexp

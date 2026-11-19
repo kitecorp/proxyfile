@@ -37,7 +37,12 @@ type view struct {
 	TLS           *tlsView // nil without tls
 	Admin         int64    // 0 without admin
 	Listen        int64
-	ServerTimeout string   // timeout server: 15s without timeouts.request, 300s with none
+	ClientTimeout string   // timeout client: timeouts.idle, 300s without it
+	ServerTimeout string   // timeout server: 15s without timeouts.request, 300s with none, or timeouts.idle when shorter
+	MaxConn       int64    // maxconn on the listener and on each server: limits.connections, 0 without it
+	MaxHeaders    int64    // tune.http.maxhdr: the header count (headerCount) and one for the request line
+	FieldsRefused int64    // the HTTP/2 header lines and cookies a request is answered 400 at (haproxy.cfg.tmpl)
+	BufSize       int64    // tune.bufsize: limits.request_headers.size and format.HAProxyRewriteRoom, 0 without it
 	LongestID     int      // idRoom, the longest X-Request-Id a client may send under forwarded
 	Removed       []string // del-header's arguments (removal), in the order generator.RemovedFromClients gives
 	EnvoyRemoved  []string // generator.RemovedByEnvoy
@@ -51,15 +56,41 @@ type view struct {
 	Scheme                  string   // the scheme x-forwarded-proto carries: https with tls, http without
 	Environments            []environment
 	originCheck
-	GRPC     grpcStatuses
-	Routes   []route
-	Rewrites []rewrite
-	Backends []backend
+	GRPC       grpcStatuses
+	Routes     []route
+	Rewrites   []rewrite
+	Backends   []backend
+	RateLimits []rateLimit // the stick table of each limited entry of the routes, in the routes' order
+	Sample     *sample     // log, nil without the key: every request is logged
 	// Unchecked is generator.UncheckedMark with auth.ask, enabled or not, whose client's copy is removed after the
 	// others; "" without auth.ask.
 	Unchecked string
 	Check     *checkView // nil without auth.ask or with enabled: false
+	// Resolvers is the resolvers section a service found by a DNS name is looked up through, nil when every service is
+	// at IP addresses.
+	Resolvers *resolversView
 }
+
+// sample is log: a request answered StatusFrom or above is logged, and one below it when HAProxy's own rand(100) draws
+// below Percent.
+type sample struct {
+	StatusFrom int64
+	Percent    int
+}
+
+// resolversView is HAProxy's own resolvers section: its Name, resolversName, and the name server dns.resolver names, its
+// address with its port, or "" without the key, for the host's resolv.conf (parse-resolv-conf). Every other setting is
+// HAProxy's own: a name is looked up every second (timeout resolve) and an answer kept as hold says.
+type resolversView struct {
+	Name, Nameserver string
+}
+
+// resolversName names the resolvers section, and templateServers the most addresses a name gives a backend: HAProxy's
+// server-template writes a fixed number of servers, each taking one address of the answer, and the rest stay down.
+const (
+	resolversName   = "proxyfile"
+	templateServers = 100
+)
 
 // checkView is the data of the auth check's lines. The action's arguments come in the order the script reads them:
 // Relay, the socket of the relay to the check service, quoted; Path, Send and Accept, quoted, a list's names joined by
@@ -67,7 +98,7 @@ type view struct {
 // generator's own words, written bare. Bind is the relay's socket for its bind line, the generator's own text too.
 // OnlyWith is auth.only_with_header, whose own line sets txn.pf_header; Ask is the condition that asks a request,
 // written after if; Questions is the RPC question of each method that has
-// one; Servers is one server line's arguments for each address of the check service.
+// one; Servers is the server lines of the check service (servers).
 type checkView struct {
 	Relay, Bind                 string
 	Path, Send, Accept          string
@@ -77,7 +108,9 @@ type checkView struct {
 	Ask                         string
 	Questions                   []question
 	Servers                     []string
-	ActionHeader, ReportsHeader string // generator.QuestionHeaders, set for the check and removed after it
+	Balance                     string      // the relay's balance argument (spread), "" for round robin
+	Health                      *healthView // the check service's HTTP check, nil without health.path
+	ActionHeader, ReportsHeader string      // generator.QuestionHeaders, set for the check and removed after it
 }
 
 // grpcStatuses is the grpc-status of each of the file's own refusals of a gRPC call that Envoy makes too, by the
@@ -163,6 +196,71 @@ type route struct {
 	Pattern string
 	authOff bool
 	methods []string
+	retries int64 // routes[].retries
+	// limit is routes[].rate_limit, or the rpc entry's, which each of its routes holds, so one table counts them all;
+	// nil without the key.
+	limit *model.RateLimit
+}
+
+// rateLimit is HAProxy's own count of a limited entry's requests: the stick table backend Table, one entry per client
+// address (type ipv6, to which HAProxy casts an IPv4 key) or one for every client (Type), counts the requests of each
+// of Routes over Period (http_req_rate), and a request past Requests is denied with HAProxy's own 429. No expire is
+// written: a full table forgets its oldest entries (the manual, stick-table). Track holds the track-sc0 lines of each
+// route, in order.
+type rateLimit struct {
+	Table, Type, Period string
+	Requests            int64
+	Routes              []int
+	Track               []tracking
+}
+
+// tracking is one track-sc0 line: Key is the table's key for the request, and Condition what the line asks beside the
+// route, "" for nothing.
+type tracking struct {
+	Key, Condition string
+}
+
+// lastForwarded is the last X-Forwarded-For address, the client's under forwarded, which the hash of a client and a
+// rate limit read.
+const lastForwarded = "req.hdr_ip(x-forwarded-for,-1)"
+
+// rateLimits returns the table of each limited entry of the routes. The routes of the rpc entry come one after another
+// and hold the entry's one limit, so a route whose limit is the one before it shares that table.
+func rateLimits(routes []route, connection bool) []rateLimit {
+	var list []rateLimit
+	var last *model.RateLimit
+	for _, r := range routes {
+		if r.limit == nil {
+			continue
+		}
+		if r.limit != last {
+			list = append(list, newRateLimit(r.ID, r.limit, connection))
+			last = r.limit
+		}
+		list[len(list)-1].Routes = append(list[len(list)-1].Routes, r.ID)
+	}
+	return list
+}
+
+// newRateLimit is the table of limit, named by its first route, id. A client is the connection's peer (src), or under
+// forwarded the last X-Forwarded-For address and the peer when the request holds none, each through clientNetwork;
+// by: all keys every request alike.
+// clientNetwork is HAProxy's own ipmask on a client's key: an IPv4 address is kept whole and an IPv6 address is cut
+// to its /64 network, the block one client is given, so a client cannot start a new count by moving inside its own
+// network (the manual, ipmask).
+const clientNetwork = ",ipmask(32,64)"
+
+func newRateLimit(id int, limit *model.RateLimit, connection bool) rateLimit {
+	r := rateLimit{Table: "proxyfile_rate" + strconv.Itoa(id), Type: "integer size 1", Period: timeText(limit.Per.Millis),
+		Requests: limit.Requests, Track: []tracking{{Key: "int(1)"}}}
+	if limit.ByClient {
+		r.Type, r.Track = "ipv6 size 100k", []tracking{{Key: "src" + clientNetwork}}
+		if !connection {
+			found := "{ " + lastForwarded + " -m found }"
+			r.Track = []tracking{{Key: lastForwarded + clientNetwork, Condition: found}, {Key: "src" + clientNetwork, Condition: "!" + found}}
+		}
+	}
+	return r
 }
 
 type rewrite struct {
@@ -172,8 +270,48 @@ type rewrite struct {
 
 type backend struct {
 	Name       string
-	HostHeader string // the service's quoted host_header, "" when not written
-	Servers    []string
+	Balance    string      // balance's argument (balance), "" for round robin, HAProxy's default
+	Health     *healthView // the HTTP check of an http backend, nil without health.path
+	Retries    []retry     // the retries of each retried route the backend serves, in the routes' order
+	HostHeader string      // the service's quoted host_header, "" when not written
+	Servers    []string    // the server lines (servers)
+}
+
+// retry is HAProxy's own retries for the requests of route Route, Count, set by http-request set-retries in the
+// backend the route reaches: the backend's other routes keep the defaults' retries 0. retry-on stays at HAProxy's
+// default, conn-failure, a connection that failed, and option redispatch, written once in a backend with a retry, lets
+// a try go to another server (the manual, retries, retry-on and option redispatch). Measured on HAProxy 3.2.26 and
+// 3.4.7: round robin and leastconn sent the first retry at once to the other address, a hash sent every try to the
+// address it picks, and a service of one address was tried again after 1 s.
+type retry struct {
+	Count int64
+	Route int
+}
+
+// addRetries gives each backend the retries of the routes that reach it.
+func addRetries(backends []backend, routes []route) {
+	for _, r := range routes {
+		if r.retries == 0 {
+			continue
+		}
+		at := slices.IndexFunc(backends, func(b backend) bool { return b.Name == r.Backend })
+		backends[at].Retries = append(backends[at].Retries, retry{Count: r.retries, Route: r.ID})
+	}
+}
+
+// healthView is HAProxy's own HTTP check of health.path: option httpchk GET with Path, quoted, http-check expect for a
+// 2xx, and timeout check, Timeout, health.timeout. HAProxy sends it over HTTP/1.0 with no Host header, its defaults
+// (the manual, option httpchk), and a server's connect for it takes the shorter of timeout connect and inter.
+type healthView struct {
+	Path, Timeout string
+}
+
+// health is the HTTP check of service, nil without health.path.
+func health(service *model.Service) *healthView {
+	if service.Health == nil || service.Health.Path == nil {
+		return nil
+	}
+	return &healthView{Path: quote(service.Health.Path.Value), Timeout: timeText(service.Health.Timeout.Millis)}
 }
 
 // Generate returns the HAProxy configuration and the script it loads, proxyfile.lua. Its error is a generator.Refused
@@ -191,9 +329,14 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		ConnectionTokens: generator.ConnectionTokens, TooManyConnectionTokens: generator.MostConnectionTokens + 1, LongestID: idRoom,
 		GRPC: grpcStatuses{BadRequest: generator.GRPCStatus[http.StatusBadRequest], Forbidden: generator.GRPCStatus[http.StatusForbidden],
 			NotFound: generator.GRPCStatus[http.StatusNotFound], Unknown: generator.GRPCUnknown}}
-	v.ServerTimeout = "15s"
-	if g.Timeouts.Request != nil {
-		v.ServerTimeout = "300s"
+	v.ClientTimeout, v.ServerTimeout = timeouts(g.Timeouts)
+	count := int64(envoyHeaderCount)
+	if headers := g.Limits.RequestHeaders; headers != nil {
+		count, v.BufSize = headers.Count.Number, headers.Size.Bytes+format.HAProxyRewriteRoom
+	}
+	v.MaxHeaders, v.FieldsRefused = count+1, max(count-2, 0)
+	if g.Limits.Connections != nil {
+		v.MaxConn = g.Limits.Connections.Number
 	}
 	// Only connection takes the peer of the connection, so a Gateway built with the zero value writes forwarded, as
 	// Envoy's file does.
@@ -209,6 +352,9 @@ func Generate(in generator.Input) ([]generator.File, error) {
 	}
 	if g.Admin != nil {
 		v.Admin = g.Admin.Number
+	}
+	if g.Log != nil {
+		v.Sample = &sample{StatusFrom: g.Log.StatusFrom, Percent: g.Log.SamplePercent}
 	}
 	for _, header := range generator.RemovedFromClients(g) {
 		if line := removal(header); line != "" {
@@ -229,6 +375,14 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		return nil, refused
 	}
 	v.Backends = backends(g)
+	addRetries(v.Backends, v.Routes)
+	v.RateLimits = rateLimits(v.Routes, v.Connection)
+	if slices.ContainsFunc(g.Services, func(s model.Service) bool { return s.DNS }) {
+		v.Resolvers = &resolversView{Name: resolversName}
+		if g.Resolver != nil {
+			v.Resolvers.Nameserver = net.JoinHostPort(g.Resolver.Address, strconv.FormatInt(g.Resolver.Port, 10))
+		}
+	}
 	if g.Auth != nil && g.Auth.Enabled {
 		v.Check = check(in, v.Routes)
 	}
@@ -240,6 +394,35 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		return nil, fmt.Errorf("haproxy: line %d of the configuration holds more than the %d words HAProxy reads", line, mostWords)
 	}
 	return []generator.File{{Bytes: out.Bytes()}, {Name: scriptName, Bytes: script()}}, nil
+}
+
+// envoyHeaderCount is the header count a file without limits.request_headers writes, Envoy's default of 100.
+const envoyHeaderCount = 100
+
+// timeouts returns timeout client and timeout server. Without timeouts.idle they are the 5 minutes of Envoy's stream
+// idle timeout and, on the server's side, the 15 s of a route's timeout, or the 5 minutes with timeouts.request: none
+// (haproxy.cfg.tmpl). timeouts.idle is HAProxy's own time without data on each side, and on the server's side the
+// shorter of it and the time written without it; none is the longest time a timer holds.
+func timeouts(t model.Timeouts) (client, server string) {
+	clientMillis, serverMillis := int64(300000), int64(15000)
+	if t.Request != nil {
+		serverMillis = 300000
+	}
+	if t.Idle == nil {
+		return timeText(clientMillis), timeText(serverMillis)
+	}
+	if t.Idle.Millis == 0 {
+		return timeText(format.HAProxyLongestTime), timeText(serverMillis)
+	}
+	return timeText(t.Idle.Millis), timeText(min(t.Idle.Millis, serverMillis))
+}
+
+// timeText is a time HAProxy reads: in seconds when whole, else in milliseconds.
+func timeText(millis int64) string {
+	if millis%1000 == 0 {
+		return strconv.FormatInt(millis/1000, 10) + "s"
+	}
+	return strconv.FormatInt(millis, 10) + "ms"
 }
 
 // environments is the data of the environment rules and of the browser origin lines. A host and a pattern are written
@@ -374,9 +557,7 @@ func check(in generator.Input, routes []route) *checkView {
 			c.Questions = append(c.Questions, question{Header: c.ReportsHeader, Value: logFormat(strings.Join(q.Reports, ",")), Route: routeOf[q.Path], Path: quote(q.Path)})
 		}
 	}
-	for i, address := range service.Addresses {
-		c.Servers = append(c.Servers, server(service.Name, i, address.Value, port.Number))
-	}
+	c.Servers, c.Balance, c.Health = servers(in.Gateway, service, port), spread(service), health(service)
 	return c
 }
 
@@ -411,7 +592,7 @@ func routes(in generator.Input, v *values) ([]route, []rewrite, error) {
 				for _, path := range group.paths {
 					matches = append(matches, "{ path "+quote(path)+" }")
 				}
-				list = append(list, route{ID: len(list) + 1, Matches: matches, Backend: group.backend, methods: group.paths})
+				list = append(list, route{ID: len(list) + 1, Matches: matches, Backend: group.backend, methods: group.paths, limit: r.RPC.RateLimit})
 			}
 			continue
 		}
@@ -435,7 +616,7 @@ func routes(in generator.Input, v *values) ([]route, []rewrite, error) {
 			match += " { method " + r.Method + " }"
 		}
 		list = append(list, route{ID: id, Matches: []string{match}, Backend: g.Service(r.To.Value).Cluster(model.HTTP), Program: text, Pattern: pattern,
-			authOff: r.AuthOff != nil})
+			authOff: r.AuthOff != nil, retries: r.Retries, limit: r.RateLimit})
 		if r.Rewrite != nil {
 			key := "routes[].prefix"
 			if r.Match == model.Path {
@@ -475,24 +656,99 @@ func backends(g *model.Gateway) []backend {
 	var list []backend
 	for _, service := range g.Services {
 		for _, port := range service.Ports {
-			b := backend{Name: service.Cluster(port.Protocol)}
+			b := backend{Name: service.Cluster(port.Protocol), Balance: balance(g, &service)}
+			if port.Protocol == model.HTTP {
+				b.Health = health(&service)
+			}
 			if service.HostHeader != "" {
 				b.HostHeader = logFormat(service.HostHeader)
 			}
-			for i, address := range service.Addresses {
-				line := server(service.Name, i, address.Value, port.Number)
-				// A gRPC service's connection carries one call and is never used again, as an HTTP service's is closed
-				// after each answer (the template's defaults): HAProxy sent a call again on a new connection when the
-				// service closed one it reused (measured on HAProxy 3.2.26 and 3.4.7).
-				if port.Protocol == model.GRPC {
-					line += " proto h2 max-reuse 0"
-				}
-				b.Servers = append(b.Servers, line)
-			}
+			b.Servers = servers(g, &service, port)
 			list = append(list, b)
 		}
 	}
 	return list
+}
+
+// balance is the argument of HAProxy's own balance for service, "" for round_robin, HAProxy's default: spread's for
+// least_requests and random, and for hash, hdr() of the header, source for the client's address under connection, or
+// under forwarded the last X-Forwarded-For address, which the client in front of the proxy is. hash-type is left at
+// HAProxy's default, map-based.
+func balance(g *model.Gateway, service *model.Service) string {
+	if b := spread(service); b != "" {
+		return b
+	}
+	switch {
+	case service.Hash != nil && service.Hash.Header != "":
+		return "hdr(" + service.Hash.Header + ")"
+	case service.Hash != nil && g.ClientAddress == model.ClientConnection:
+		return "source"
+	case service.Hash != nil:
+		return "hash " + lastForwarded
+	}
+	return ""
+}
+
+// spread is HAProxy's own balance for a balance that reads no request: leastconn for least_requests, which counts
+// connections, one a request here, and random(1), one draw, for random; "" for round robin, HAProxy's default. It is
+// also the check relay's whole balance for the service auth.ask names, round robin for a hash: the relay is a TCP
+// section whose one client is HAProxy itself, so it reads no header and every connection has one source, and HAProxy
+// 3.2.26 and 3.4.7 warn at balance hdr() in such a section and go round robin ("Layer 7 hash not possible", measured
+// with the validator).
+func spread(service *model.Service) string {
+	switch service.Balance.Value {
+	case "least_requests":
+		return "leastconn"
+	case "random":
+		return "random(1)"
+	}
+	return ""
+}
+
+// servers returns the server lines of service on port, the check relay's as a backend's: one for each address, in the
+// written order (server), or for a DNS name one server-template of templateServers servers, named as server names
+// them, which HAProxy's own resolvers fill with the name's addresses, each starting down with no address until they
+// answer (init-addr none). Each line ends with the options every server of a service takes.
+func servers(g *model.Gateway, service *model.Service, port model.ServicePort) []string {
+	var lines []string
+	for i, address := range service.Addresses {
+		line := "server " + server(service.Name, i, address.Value, port.Number)
+		if service.DNS {
+			line = fmt.Sprintf("server-template %s 1-%d %s resolvers %s init-addr none", service.Name, templateServers,
+				net.JoinHostPort(address.Value, strconv.FormatInt(port.Number, 10)), resolversName)
+		}
+		// A gRPC service's connection carries one call and is never used again, as an HTTP service's is closed after
+		// each answer (the template's defaults): HAProxy sent a call again on a new connection when the service closed
+		// one it reused (measured on HAProxy 3.2.26 and 3.4.7).
+		if port.Protocol == model.GRPC {
+			line += " proto h2 max-reuse 0"
+		}
+		// limits.connections holds each server to the count: a request past it waits in HAProxy's queue.
+		if g.Limits.Connections != nil {
+			line += " maxconn " + strconv.FormatInt(g.Limits.Connections.Number, 10)
+		}
+		line += checked(service, port, i)
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// checked is what a server line of service on port adds for health.path: the check's interval and counts on an http
+// server, which health checks, and on a gRPC server of a service at IP addresses track of the http server at the same
+// address, so it leaves the pool with it. A server-template tracks no server: HAProxy 3.2.26 and 3.4.7 looked for one
+// named as the template's prefix and refused the file (measured with the validator), so the gRPC servers of a service
+// found by a DNS name take no check and stay in the pool, as without health.
+func checked(service *model.Service, port model.ServicePort, i int) string {
+	h := service.Health
+	switch {
+	case h == nil || h.Path == nil:
+		return ""
+	case port.Protocol == model.HTTP:
+		return fmt.Sprintf(" check inter %s fall %d rise %d", timeText(h.Interval.Millis), h.Unhealthy, h.Healthy)
+	case !service.DNS:
+		return fmt.Sprintf(" track %s/%s%d", service.Cluster(model.HTTP), service.Name, i+1)
+	}
+	return ""
 }
 
 // server is a server line's name and address for the address at index i of a service: the service's name and i+1, and
@@ -514,15 +770,9 @@ func notWritten(in generator.Input) error {
 		key     string
 		written bool
 	}{
-		{"limits.connections", g.Limits.Connections != nil},
-		{"limits.request_headers", g.Limits.RequestHeaders != nil},
 		// none, Millis 0, is what HAProxy does with no line: nothing limits a whole request.
 		{"timeouts.request as a time", g.Timeouts.Request != nil && g.Timeouts.Request.Millis != 0},
-		{"timeouts.idle", g.Timeouts.Idle != nil},
-		{"timeouts.upstream_idle", g.Timeouts.UpstreamIdle != nil},
-		{"dns.resolver", g.Resolver != nil},
 		{"auth.jwt", g.JWT != nil},
-		{"log", g.Log != nil},
 		{"tracing", g.Tracing != nil},
 	}
 	for _, k := range keys {
@@ -530,45 +780,63 @@ func notWritten(in generator.Input) error {
 			refuse("%s is not written in this version", k.key)
 		}
 	}
+	// The forms the declaration refuses past HAProxy's bounds (format.HAProxySmallestHeaders and the constants beside it).
+	if headers := g.Limits.RequestHeaders; headers != nil {
+		if headers.Size.Bytes < format.HAProxySmallestHeaders {
+			refuse("limits.request_headers.size below 15KiB is not written in this version")
+		}
+		if headers.Count.Number > format.HAProxyMostHeaderFields {
+			refuse("limits.request_headers.count %d is not written in this version", headers.Count.Number)
+		}
+	}
+	if g.Timeouts.Idle != nil && g.Timeouts.Idle.Millis > format.HAProxyLongestTime {
+		refuse("timeouts.idle above %dms is not written in this version", format.HAProxyLongestTime)
+	}
 	for _, service := range g.Services {
 		for _, address := range service.Addresses {
 			// The reader admits an IPv6 address with a zone, such as fe80::1%eth0. HAProxy 3.2.26 and 3.4.7 refused to
 			// load one as [::1%lo]:3000, ::1%lo:3000 and ipv6@::1%lo:3000, with lo an interface they had (measured).
-			switch ip, err := netip.ParseAddr(address.Value); {
-			case err != nil:
-				refuse("service %s: address %q is not an IP address", service.Name, address.Value)
-			case ip.Zone() != "":
+			if ip, err := netip.ParseAddr(address.Value); !service.DNS && err == nil && ip.Zone() != "" {
 				refuse("service %s: address %q names a zone, which HAProxy 3.2 and 3.4 load in no server address", service.Name, address.Value)
 			}
 		}
-		// The reader gives a service with no balance round_robin, which is HAProxy's own default and needs no line;
-		// the declaration refuses any balance a file writes, round_robin too, before render calls Generate.
-		if service.Balance.Value != "round_robin" {
-			refuse("service %s: balance %s is not written in this version", service.Name, service.Balance.Value)
+		if service.Health != nil && service.Health.GRPC != nil {
+			refuse("service %s: health.grpc is not written in this version", service.Name)
 		}
-		if service.Hash != nil {
-			refuse("service %s: hash is not written in this version", service.Name)
+		// check inter and timeout check are timers.
+		if service.Health != nil && service.Health.Interval.Millis > format.HAProxyLongestTime {
+			refuse("service %s: health.interval above %dms is not written in this version", service.Name, format.HAProxyLongestTime)
 		}
-		if service.Health != nil {
-			refuse("service %s: health is not written in this version", service.Name)
+		if service.Health != nil && service.Health.Timeout.Millis > format.HAProxyLongestTime {
+			refuse("service %s: health.timeout above %dms is not written in this version", service.Name, format.HAProxyLongestTime)
+		}
+	}
+	// HAProxy's rate has no burst, and its period is a timer.
+	limited := func(entry string, limit *model.RateLimit) {
+		if limit == nil {
+			return
+		}
+		if limit.Burst > 0 {
+			refuse("%s: rate_limit.burst %d is not written in this version", entry, limit.Burst)
+		}
+		if limit.Per.Millis > format.HAProxyLongestTime {
+			refuse("%s: rate_limit.per above %dms is not written in this version", entry, format.HAProxyLongestTime)
 		}
 	}
 	for _, r := range g.Routes {
 		if r.RPC != nil {
+			// With retry-on at its default, HAProxy 3.2.26 and 3.4.7 did not send a gRPC call again after its connection
+			// to the service failed; the retry-on that does also sends again a request a service may have read.
 			if r.RPC.Retries > 0 {
 				refuse("the rpc entry: retries is not written in this version")
 			}
-			if r.RPC.RateLimit != nil {
-				refuse("the rpc entry: rate_limit is not written in this version")
-			}
+			limited("the rpc entry", r.RPC.RateLimit)
 			continue
 		}
-		if r.Retries > 0 {
-			refuse("route %q: retries is not written in this version", r.Name.Value)
+		if r.Retries > format.HAProxyMostRetries {
+			refuse("route %q: retries %d is not written in this version", r.Name.Value, r.Retries)
 		}
-		if r.RateLimit != nil {
-			refuse("route %q: rate_limit is not written in this version", r.Name.Value)
-		}
+		limited(fmt.Sprintf("route %q", r.Name.Value), r.RateLimit)
 	}
 	removals := func(key string, headers []model.Header) {
 		for _, header := range headers {

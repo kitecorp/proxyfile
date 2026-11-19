@@ -16,7 +16,7 @@ import (
 // wait beside the rest of their own scenario alone: a later scenario's quiet and burst count on nothing else reaching
 // the proxy meanwhile. The rate limit runs last, so the requests the scenarios before it send to its route come first,
 // and its quiet lets that route's bucket fill again before its burst.
-var scenarios = []scenario{routing, mutualTLS, cors, auth, timeout, retry, gRPC, paths, asWritten, offRoute, clientKeys, hash, tracing, tracingRetried, rateLimit, cost, backendLimits}
+var scenarios = []scenario{routing, mutualTLS, cors, auth, timeout, retry, gRPC, paths, asWritten, offRoute, clientKeys, hash, tracing, tracingRetried, rateLimit, cost, backendLimits, traffic}
 
 // get is a GET over HTTP/1.1 to localhost, a host of the example's local environment.
 func get(path string) request {
@@ -1962,7 +1962,8 @@ var retry = scenario{name: "retry",
 			on:   onceOnPlain(answer{status: 200, service: "shop", instance: "shop-1", body: mebibyte})},
 		{name: "a request whose every backend refuses is answered 502 and logged URX,UF", keys: []string{"routes[].retries", "log"},
 			send: get(retriedPath), refusing: "shop-1,shop-2", want: answer{status: 502, counted: refusedEverywhere("retried")},
-			on: map[string]literal{"full": {want: answer{status: 502, counted: refusedEverywhere("shop")}}}},
+			on: map[string]literal{"full": {want: answer{status: 502, counted: refusedEverywhere("shop")}},
+				"haproxy-traffic": {want: answer{status: 502, counted: refusedEverywhere("shop")}}}},
 		{name: "a PUT over 1 MiB whose first connection was refused is not tried again", keys: []string{"routes[].retries"},
 			send: putTo(retriedPath, overMebibyte, map[string]string{"content-length": "1048577"}), repeat: 40, refusing: "shop-2",
 			want: answer{status: 507}, on: map[string]literal{"nginx-plain": {want: answer{status: 502}}},
@@ -2483,7 +2484,7 @@ var rateLimit = scenario{name: "rate limit",
 			refill: 2 * time.Second, repeat: 40, want: answer{status: 429}},
 		{name: "a limited route whose first connections were refused charges each request once", keys: []string{"routes[].rate_limit", "routes[].retries"},
 			send: get("/retried-limited/products/1"), repeat: 40, admitted: 10, refusing: "shop-2", want: answer{status: 429},
-			on: onEach([]string{"full", "nginx-auth", "nginx-tracing", "nginx-plain"}, literal{want: answer{status: 200, service: "shop", instance: "shop-1"}})},
+			on: onEach([]string{"full", "nginx-auth", "nginx-tracing", "nginx-plain", "haproxy-traffic"}, literal{want: answer{status: 200, service: "shop", instance: "shop-1"}})},
 	}}
 
 // burstKeys are what the rows that find the catalog route's bucket spent depend on: the limit with its burst, which the
@@ -2572,6 +2573,10 @@ func toLimited(forwardedFor string) request {
 // file with no such route sends the path to shop, either backend.
 var hash = scenario{name: "hash",
 	exchanges: []exchange{
+		// The hash's main row: one value, sent 20 times, reaches one backend of the two each time, on nginx-file and
+		// haproxy-traffic, whose route /sessions/ hashes x-session-id.
+		{name: "one hash header value reaches one backend every time", keys: hashKeys, send: toSessions("user-7"), repeat: 20, every: true,
+			want: answer{status: 200, service: "shop"}, on: onEach([]string{"nginx-file", "haproxy-traffic"}, oneBackend)},
 		{name: "an empty hash header reaches one backend every time", keys: hashKeys, send: toSessions(""), repeat: 20, every: true,
 			want: answer{status: 200, service: "shop"}, on: oneBackendOnFile},
 		{name: "a hash header on two lines reaches one backend every time", keys: hashKeys, send: toSessions("a\r\nx-session-id: b"),
@@ -2596,8 +2601,12 @@ var hash = scenario{name: "hash",
 // hashKeys are what the hash rows depend on: a service balanced by a header's hash.
 var hashKeys = []string{"services.<service name>.hash.header"}
 
-// oneBackendOnFile is the literal of the hash rows on nginx-file, whose route /sessions/ hashes x-session-id.
-var oneBackendOnFile = map[string]literal{"nginx-file": {want: answer{status: 200, service: "shop", oneInstance: true}}}
+// oneBackend is a hash row's answer on a file whose route /sessions/ hashes x-session-id, and oneBackendOnFile the
+// literal of the hash rows on nginx-file.
+var (
+	oneBackend       = literal{want: answer{status: 200, service: "shop", oneInstance: true}}
+	oneBackendOnFile = map[string]literal{"nginx-file": oneBackend}
+)
 
 // toSessions is a GET of nginx-file's route /sessions/ sent by hand, with the x-session-id line value, which may hold a
 // second line.
@@ -3210,11 +3219,47 @@ var backendLimits = scenario{name: "connection limit and failed backends",
 			send:    request{proto: "h2", method: "GET", host: "localhost", path: "/products/1", headers: map[string]string{"x-stub-delay": "1s"}},
 			streams: 3, want: answer{status: 200, service: "shop"},
 			by: map[string]own{"nginx": {difference: "limits.connections", files: []string{"nginx-limits"},
-				literal: literal{want: answer{status: 200, service: "shop"}, also: &answer{status: 503}}}}},
+				literal: literal{want: answer{status: 200, service: "shop"}, also: &answer{status: 503}}},
+				// HAProxy's maxconn on the one server of haproxy-limits serves two at once and holds the third in its queue
+				// until one ends, so the third is answered a second after the others.
+				"haproxy": {difference: "limits.connections", files: []string{"haproxy-limits"},
+					literal: literal{want: answer{status: 200, service: "shop", below: 1500 * time.Millisecond},
+						also: &answer{status: 200, service: "shop", atLeast: 1900 * time.Millisecond}}}}},
 		{name: "requests while one backend refuses connections", keys: []string{"services.<service name>.health"},
 			send: get("/products/1"), refusing: "shop-2", repeat: 4, want: answer{status: 200, service: "shop"}},
 		{name: "requests right after a backend refused connections", keys: []string{"services.<service name>.health"},
 			send: get("/products/1"), repeat: 6, every: true, want: answer{status: 200, service: "shop"},
 			by: map[string]own{"nginx": {difference: "services.<service name>.health",
 				literal: literal{want: answer{status: 200, service: "shop", instance: "shop-1"}}}}},
+	}}
+
+// traffic: the main rows of keys HAProxy writes with its own directives (haproxyMainRows), every value measured on
+// Envoy 1.40.2 beside HAProxy 3.2.26 and 3.4.7. A header block of 50 KiB passes HAProxy's default buffer of 16,384
+// bytes, so it reaches the service only through a buffer the size writes; one of 200 KiB passes 96 KiB. 120 header
+// lines pass the 100 a file without the count gets, and 200 pass 150. The files of nginx's battery hold 100 lines, so
+// they refuse 120 (measured on Envoy 1.40.2), and nginx holds examples/portable's 96 KiB in two buffers of 49,120
+// bytes, so it refuses a header line longer than one there (limits.request_headers.size, as the size rows of routing
+// say). checked, at shop's two addresses, is checked every second and leaves the pool after two failed checks, so 3 s
+// after shop-2 began refusing connections every request reaches shop-1; on examples/full the shop route's retry gives
+// the same answers. A request whose service answers 404 is logged, as the log of each file that writes one keeps every
+// answer of 400 or more: HAProxy's line holds no path, so the row finds it by its frontend, backend, status, method and
+// version.
+var traffic = scenario{name: "traffic keys",
+	exchanges: []exchange{
+		{name: "a header block of 50 KiB reaches the service", keys: []string{"limits.request_headers.size"},
+			send: rawHeaders(map[string]string{"x-big": strings.Repeat("a", 51200)}), want: answer{status: 200, service: "shop"},
+			by: map[string]own{"nginx": {difference: "limits.request_headers.size", files: []string{"portable"}, literal: literal{want: answer{status: 400}}}}},
+		{name: "a header block of 200 KiB is refused", keys: []string{"limits.request_headers.size"},
+			send: rawHeaders(map[string]string{"x-big": strings.Repeat("a", 204800)}), want: answer{refused: true}},
+		{name: "120 header lines reach the service", keys: []string{"limits.request_headers.count"}, send: rawHeaders(numbered(119)),
+			want: answer{status: 200, service: "shop"}, on: onEach(nginxYAMLFiles, literal{want: answer{refused: true}})},
+		{name: "200 header lines are refused", keys: []string{"limits.request_headers.count"}, send: rawHeaders(numbered(199)),
+			want: answer{refused: true}},
+		{name: "a backend that fails its health checks gets no request", keys: []string{"services.<service name>.health"}, send: get("/checked/products/1"),
+			refusing: "shop-2", settle: 3 * time.Second, repeat: 20, every: true, want: answer{status: 200, service: "shop", instance: "shop-1"}},
+		{name: "a request answered 404 is logged", keys: []string{"log"},
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/logged/1", headers: map[string]string{"x-stub-status": "404"}},
+			want: answer{status: 404, service: "shop", logged: map[string]map[string]*regexp.Regexp{"request": {"status": logNumber(404)}}},
+			by: map[string]own{"haproxy": {difference: "log", literal: literal{want: answer{status: 404, service: "shop",
+				lineAfter: regexp.MustCompile(`^\[[^]]+\] public shop_http/shop[12] \S+ 404 \d+ \d+ \S+ GET HTTP/1\.1 "[^"]+"$`)}}}}},
 	}}

@@ -7,7 +7,10 @@
 # every file is checked with a throwaway certificate, its key and a CA bundle mounted at /etc/gateway/tls, the folder
 # examples/tls names, made for this run by throwaway-tls.sh and removed after it; no key is ever committed. The file
 # loads proxyfile.lua, which render writes beside it, from its own folder, so the folder of the configuration is
-# mounted and holds both; the check needs no network.
+# mounted and holds both. The check sends nothing, but HAProxy connects a UDP socket to each name server of a resolvers
+# section and warns when it has no route to it: with --network none HAProxy 3.2.26 and 3.4.7 refused a file whose name
+# server was 10.0.0.2:53 ("can't connect socket for nameserver"), so the check runs on Docker's default network, where
+# an IPv4 name server has a route.
 set -euo pipefail
 # Each file named is checked, so a run that names none would check nothing and exit 0, which reads as every file
 # loading.
@@ -30,7 +33,7 @@ for file in "$@"; do
   name=$(basename "$file")
   for image in "${images[@]}"; do
     tag=${image%%@*}
-    if out=$(docker run --rm --network none --volume "${dir}:/config:ro" --volume "${tls}:/etc/gateway/tls:ro" \
+    if out=$(docker run --rm --volume "${dir}:/config:ro" --volume "${tls}:/etc/gateway/tls:ro" \
       "$image" haproxy -c -V -dW -f "/config/$name" 2>&1) &&
       grep -qF "Configuration file is valid" <<<"$out"; then
       echo "valid: $file on $tag"

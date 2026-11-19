@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -450,15 +451,32 @@ func (w *world) countedAfter(mark int, c countedLines, want int) []map[string]st
 	return read()
 }
 
+// lineAfter reports whether a line the proxy wrote to its stdout after its first mark lines matches p. It reads the log
+// every 100 ms for 5 s at most, as countedAfter does: a proxy writes a request's log line once the request ends.
+func (w *world) lineAfter(mark int, p *regexp.Regexp) bool {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		lines := stdoutLines()
+		if slices.ContainsFunc(lines[min(mark, len(lines)):], p.MatchString) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // stdoutLines returns the lines the proxy has written to its stdout, or none when Docker cannot read them, which fails
 // a row that wants lines. Reading stdout alone keeps the proxy's messages, on stderr, from moving a count of lines
-// between two reads.
+// between two reads. The newline that ends the last line starts no line, so the count is the lines written and a mark
+// taken from it (logMark) is the index of the first line written after it.
 func stdoutLines() []string {
 	out, err := dockerStdout("logs", proxy)
-	if err != nil {
+	if err != nil || out == "" {
 		return nil
 	}
-	return strings.Split(out, "\n")
+	return strings.Split(strings.TrimSuffix(out, "\n"), "\n")
 }
 
 // dockerAPI is a client of the Docker daemon on the unix socket the docker command's current context names.

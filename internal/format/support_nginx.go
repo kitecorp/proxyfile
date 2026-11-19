@@ -360,10 +360,7 @@ var nginxTarget = Target{Name: "nginx", Title: "nginx", Keys: map[string]Support
 		Note: "nginx's own limit_conn: a request on its way to a service past the number of such requests in flight is answered 503, before its check, if any, is asked, each HTTP/2 stream counted as one and an idle connection as none; an answer the file gives itself, such as a 404 or a preflight's 200, is neither counted nor refused, and no line limits a service's connections",
 		Refuses: []Refusal{{Form: "above 65535",
 			Instead: "nginx's limit_conn takes at most 65535; write 65535 or less, or render it for envoy",
-			Applies: func(value, _ *tree.Node) bool {
-				number, _ := strconv.ParseInt(value.Text, 10, 64)
-				return number > 65535
-			}}}},
+			Applies: countAbove(65535)}}},
 	"limits.request_headers": {Level: Supported},
 	// The generator's headerLines says how nginx's buffers hold the size; measured on nginx 1.30.6 and 1.31.8 beside
 	// Envoy 1.40.2 at 4 KiB, 60 KiB, 96 KiB, 128 KiB and 8 MiB.

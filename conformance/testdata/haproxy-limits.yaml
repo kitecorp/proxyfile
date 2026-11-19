@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=../../schema/proxyfile.schema.json
+# The conformance battery's file for HAProxy's connection limit: a limit of two on the public listener and on the shop
+# service's one address, so three requests at once on one connection meet the limit on HAProxy, whose maxconn on the
+# server holds the third in its queue until one of the first two ends. Only the rows of the connection limit run on it
+# (file.scenarios), the ones whose keys it writes. It writes no tls, so the battery's clients reach it in plain HTTP.
+# Each HAProxy entry runs it, and Envoy's entry too, which measures its literals.
+listen: 10000
+admin: 9901
+limits: {connections: 2}
+services:
+  shop: {http: 8080, address: "10.0.1.11"}
+origins:
+  local: {hosts: [127.0.0.1, localhost]}
+routes:
+  - {name: shop, prefix: /, to: shop}

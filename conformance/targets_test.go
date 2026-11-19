@@ -31,6 +31,10 @@ type target struct {
 	// nginx's plain images and those tagged -otel, each running the files its image loads, so the coverage checks judge
 	// the entries of one name and version together (versions).
 	version string
+	// mainRows holds, by a core key the target writes with a feature of its own, the names of the rows that run the
+	// key's main behaviour on it: the target runs no other row that holds the key (held), as the other rows assert the
+	// Envoy output's own answers, which such a feature need not give. Every entry of a target holds the same.
+	mainRows map[string][]string
 }
 
 // file is one proxyfile an entry runs: label names it in the subtests and in an exchange's on, and proxyfile is its
@@ -55,6 +59,15 @@ var (
 	// runs the rows of that scenario alone, as no other row is there for its limit of two.
 	limitsFile = file{label: "nginx-limits", proxyfile: "testdata/nginx-limits.yaml", scenarios: []string{backendLimits.name}}
 )
+
+// haproxyLimitsFile is the battery's file for HAProxy's connection limit, which Envoy's entry and each HAProxy entry
+// run: the rows of that scenario alone, as no other row is there for its limit of two.
+var haproxyLimitsFile = file{label: "haproxy-limits", proxyfile: "testdata/haproxy-limits.yaml", scenarios: []string{backendLimits.name}}
+
+// haproxyTrafficFile is the battery's file of the keys HAProxy writes with its own features, which Envoy's entry and
+// each HAProxy entry run: the scenarios of those keys alone, so no row of another scenario is held on it.
+var haproxyTrafficFile = file{label: "haproxy-traffic", proxyfile: "testdata/haproxy-traffic.yaml",
+	scenarios: []string{timeout.name, retry.name, rateLimit.name, hash.name, traffic.name}}
 
 // targets returns every proxy the battery runs. Envoy's image is read from the file scripts/validate-envoy.sh reads,
 // so an Envoy upgrade changes one line for both. Its admin listener answers /ready on 127.0.0.1 only, which is why
@@ -84,6 +97,8 @@ func targets(t testing.TB) []target {
 			{label: "nginx-file", proxyfile: "testdata/nginx.yaml"},
 			{label: "nginx-plain", proxyfile: "testdata/nginx-plain.yaml"},
 			{label: "haproxy-file", proxyfile: "testdata/haproxy.yaml"},
+			haproxyTrafficFile,
+			haproxyLimitsFile,
 			{label: "two-checks", proxyfile: "testdata/two-checks.yaml"},
 			{label: "nginx-checks", proxyfile: "testdata/nginx-checks.yaml"},
 			{label: "nginx-auth", proxyfile: "testdata/nginx-auth.yaml"},

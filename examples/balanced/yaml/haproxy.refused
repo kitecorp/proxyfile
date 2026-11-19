@@ -1,10 +1,1 @@
-examples/balanced/yaml/proxyfile.yaml:9:5: "services.<service name>.balance" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/balanced/yaml/proxyfile.yaml:10:5: "services.<service name>.health" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/balanced/yaml/proxyfile.yaml:10:14: "services.<service name>.health.path" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/balanced/yaml/proxyfile.yaml:14:5: "services.<service name>.balance" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/balanced/yaml/proxyfile.yaml:15:5: "services.<service name>.health" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/balanced/yaml/proxyfile.yaml:15:14: "services.<service name>.health.grpc" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/balanced/yaml/proxyfile.yaml:15:26: "services.<service name>.health.interval" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/balanced/yaml/proxyfile.yaml:15:41: "services.<service name>.health.timeout" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/balanced/yaml/proxyfile.yaml:15:54: "services.<service name>.health.healthy" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/balanced/yaml/proxyfile.yaml:15:66: "services.<service name>.health.unhealthy" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
+examples/balanced/yaml/proxyfile.yaml:15:14: "services.<service name>.health.grpc" is refused by --target haproxy: HAProxy has no gRPC health check: http-check send writes a text body, not the health service's gRPC message; write health.path on the service's http port

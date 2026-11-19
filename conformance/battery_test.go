@@ -132,7 +132,7 @@ func runFile(t *testing.T, tg target, f file, config string, lock func(*testing.
 		t.Fatal(err)
 	}
 	w := startWorld(t, tg, mounted, !slices.Contains(written, "tls"), bytes.Contains(source, []byte(holdAddress)), f.collector)
-	keys := fileKeys{label: f.label, keys: written, scenarios: f.scenarios}
+	keys := fileKeys{label: f.label, keys: written, scenarios: f.scenarios, mainRows: tg.mainRows}
 	limited := slices.Contains(written, "routes[].rate_limit")
 	// In order and never in parallel, but for the rows that overlap: a scenario's quiet and burst count on nothing else
 	// reaching the proxy.
@@ -157,8 +157,8 @@ func runFile(t *testing.T, tg target, f file, config string, lock func(*testing.
 				if !e.overlap {
 					continue
 				}
-				if e.refusing != "" || e.flood != nil || e.holds != nil || e.repeat > 0 || e.streams > 0 || e.refill > 0 {
-					panic(fmt.Sprintf("exchange %q overlaps the rows in sequence with a refused backend, a flood, holds, a repeat, streams or a refill", e.name))
+				if e.refusing != "" || e.settle > 0 || e.flood != nil || e.holds != nil || e.repeat > 0 || e.streams > 0 || e.refill > 0 {
+					panic(fmt.Sprintf("exchange %q overlaps the rows in sequence with a refused backend, a settle, a flood, holds, a repeat, streams or a refill", e.name))
 				}
 				t.Run(e.name, func(t *testing.T) {
 					l := literalFor(e, tg.name, f.label)
@@ -196,6 +196,7 @@ func runFile(t *testing.T, tg target, f file, config string, lock func(*testing.
 							accepts = append(accepts, w.refuse(t, role))
 						}
 					}
+					time.Sleep(e.settle)
 					var differences []string
 					var requests []sentRequest
 					switch {
@@ -436,9 +437,9 @@ func sendRepeated(w *world, e exchange, l literal, requests *[]sentRequest) []st
 		}
 	}
 	mark := 0
-	if l.want.counted != nil {
+	if l.want.counted != nil || l.want.lineAfter != nil {
 		if e.overlap {
-			panic(fmt.Sprintf("exchange %q counts lines a row beside it could write too, so it must not overlap", e.name))
+			panic(fmt.Sprintf("exchange %q reads lines a row beside it could write too, so it must not overlap", e.name))
 		}
 		mark = w.logMark()
 	}
@@ -497,6 +498,9 @@ func sendRepeated(w *world, e exchange, l literal, requests *[]sentRequest) []st
 				}
 			}
 		}
+	}
+	if p := l.want.lineAfter; p != nil && !w.lineAfter(mark, p) {
+		differences = append(differences, fmt.Sprintf("logged: no line the proxy wrote after the row began matches %s", p))
 	}
 	differences = append(differences, bothSeen(l.also, sawWant, sawAlso)...)
 	if len(instances) > 1 || instances["no service"] > 0 {
