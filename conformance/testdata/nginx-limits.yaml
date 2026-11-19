@@ -1,0 +1,15 @@
+# The conformance battery's file for nginx's connection limit and passive health check: a limit of two requests in
+# flight on the public listener and the shop service's two backends, so a row shows a request past the limit refused.
+# Its shop service writes health with unhealthy: 1, so on nginx one failed request takes a backend out for 10 s, which
+# a row reads right after a backend refused connections. Only the rows of the connection limit and failed backends run on it
+# (file.scenarios), the ones whose keys it writes. It writes no tls, so the battery's clients reach it in plain HTTP.
+# Every entry for plain nginx runs it, and Envoy's entry too, which measures its literals.
+listen: 10000
+admin: 9901
+limits: {connections: 2}
+services:
+  shop: {http: 8080, addresses: ["10.0.1.11", "10.0.1.12"], health: {path: /healthz, unhealthy: 1}}
+origins:
+  local: {hosts: [127.0.0.1, localhost]}
+routes:
+  - {name: shop, prefix: /, to: shop}

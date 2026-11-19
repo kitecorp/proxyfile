@@ -67,6 +67,9 @@ services:
     health: {path: /healthz}
 ```
 
+The nginx generator writes nginx's own passive check instead, which counts the service's failed requests
+([nginx](nginx.md#passive-health-checks)).
+
 A backend that fails `unhealthy` checks in a row leaves the pool, and comes back after it passes `healthy` checks in a
 row. A failed check is a refused connection, no answer within `timeout`, or, for `path`, an answer outside the 2xx. A
 backend's first check after the proxy starts decides its state on its own, in or out, and the two counts apply to every

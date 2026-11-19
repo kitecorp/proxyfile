@@ -209,7 +209,8 @@ func groupName(cluster string, n int) string {
 }
 
 // writeGroups writes the groups of service's port, an upstream of each backend when a retried route jumps to the next
-// backend of service, written as the service's upstream writes it with no balance line, as it has one backend.
+// backend of service, written as the service's upstream writes it with no balance line and no passive check, as it has
+// one backend (upstreamLines).
 func writeGroups(w *writer, v *values, service *model.Service, routes []route, port model.ServicePort, idle string, e edge) {
 	if service.DNS || !jumpedTo(service, routes) {
 		return

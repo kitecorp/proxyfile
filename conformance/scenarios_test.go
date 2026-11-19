@@ -16,7 +16,7 @@ import (
 // wait beside the rest of their own scenario alone: a later scenario's quiet and burst count on nothing else reaching
 // the proxy meanwhile. The rate limit runs last, so the requests the scenarios before it send to its route come first,
 // and its quiet lets that route's bucket fill again before its burst.
-var scenarios = []scenario{routing, mutualTLS, cors, auth, timeout, retry, gRPC, paths, asWritten, offRoute, clientKeys, hash, tracing, tracingRetried, rateLimit, cost}
+var scenarios = []scenario{routing, mutualTLS, cors, auth, timeout, retry, gRPC, paths, asWritten, offRoute, clientKeys, hash, tracing, tracingRetried, rateLimit, cost, backendLimits}
 
 // get is a GET over HTTP/1.1 to localhost, a host of the example's local environment.
 func get(path string) request {
@@ -3193,4 +3193,28 @@ var tracingRetried = scenario{name: "tracing a retried request",
 				spanned: map[string]*regexp.Regexp{"name": regexp.MustCompile(`^retried$`), "upstream_cluster": regexp.MustCompile(`^shop_http$`),
 					"http.status_code": regexp.MustCompile(`^200$`)}},
 			on: map[string]literal{"full": {want: answer{status: 200, service: "shop", instance: "shop-1"}}}},
+	}}
+
+// backendLimits: the connection limit and a service's failed backends, one behaviour of each. On nginx-limits, whose
+// limit is two, three requests are sent at once on one HTTP/2 connection, each held 1 s by the stub: nginx's own
+// limit_conn serves two and answers the third 503, and the Envoy output serves all three, in 2 s where each is held 1 s
+// (measured on Envoy 1.40.2). On examples/full, whose limit is 4096, which Envoy alone runs, all three are served.
+// Then a backend whose request failed takes no request for a while: four requests while shop-2 refuses connections
+// make nginx meet it, as round robin over two backends sends at least one of four to each, and the six sent right
+// after, back to back and well inside nginx's 10 s, all reach shop-1 on nginx, whose passive check took shop-2 out;
+// without it they would alternate. The Envoy output, which checks its backends itself, serves each of the six from
+// shop on both files (measured on Envoy 1.40.2), and the row asks no backend of it.
+var backendLimits = scenario{name: "connection limit and failed backends",
+	exchanges: []exchange{
+		{name: "three requests at once on one connection past a limit of two", keys: []string{"limits.connections"},
+			send:    request{proto: "h2", method: "GET", host: "localhost", path: "/products/1", headers: map[string]string{"x-stub-delay": "1s"}},
+			streams: 3, want: answer{status: 200, service: "shop"},
+			by: map[string]own{"nginx": {difference: "limits.connections", files: []string{"nginx-limits"},
+				literal: literal{want: answer{status: 200, service: "shop"}, also: &answer{status: 503}}}}},
+		{name: "requests while one backend refuses connections", keys: []string{"services.<service name>.health"},
+			send: get("/products/1"), refusing: "shop-2", repeat: 4, want: answer{status: 200, service: "shop"}},
+		{name: "requests right after a backend refused connections", keys: []string{"services.<service name>.health"},
+			send: get("/products/1"), repeat: 6, every: true, want: answer{status: 200, service: "shop"},
+			by: map[string]own{"nginx": {difference: "services.<service name>.health",
+				literal: literal{want: answer{status: 200, service: "shop", instance: "shop-1"}}}}},
 	}}

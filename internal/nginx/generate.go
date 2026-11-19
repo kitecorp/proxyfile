@@ -370,6 +370,26 @@ func headerDirectives(v *values, limits model.Limits) (directives []string, coun
 	}, counted
 }
 
+// connectionsKey is the key of the connection limit, as the support table names it.
+const connectionsKey = "limits.connections"
+
+// connectionLimit returns, for limits.connections, the http block's zone line and the line of each environment's
+// server, or nils without the key. It is nginx's own limit_conn with nginx's defaults for the rest (limit_conn_status
+// 503, limit_conn_log_level error, limit_conn_dry_run off), so it counts what nginx counts: a request in process whose
+// header was read, each HTTP/2 stream as one (ngx_http_limit_conn_module). The key is one text for every request, as a
+// rate limit's by: all zone writes it (zoneOf), since nginx counts no request whose key is empty. limit_conn runs in the
+// preaccess phase, after a return has ended a request, so it counts only a request a route location sends on to a
+// service, and the default server, each of whose answers is a return, gets no line. The line goes in each environment's
+// server rather than the http block, so the admin server's /stats and the tracing collector's relay server, which nginx
+// answers after that phase, are never answered 503.
+func connectionLimit(v *values, limits model.Limits) (zone, server []string) {
+	if limits.Connections == nil {
+		return nil, nil
+	}
+	number := v.token(connectionsKey, limits.Connections.Pos, strconv.FormatInt(limits.Connections.Number, 10))
+	return []string{`  limit_conn_zone "all" zone=pf_conn:1m;`}, []string{"    limit_conn pf_conn " + number + ";"}
+}
+
 // Generate returns the whole nginx.conf as the configuration and the script it loads, proxyfile.js. Its error is a
 // generator.Refused that names each value whose nginx form is longer than nginx reads, by its key; any other error
 // means a route goes to a service that is not declared or has no port of the kind the route needs, a pattern holds
@@ -443,6 +463,8 @@ func Generate(in generator.Input) ([]generator.File, error) {
 	w.lines(mapHashSizes(jumpKeys(routes), groupKeys(&v, g, routes), hashed)...)
 	w.lines(tracingHTTP(tracing, g, e, &v)...)
 	w.lines(headerLines(&v, g.Limits)...)
+	connectionZone, connectionServer := connectionLimit(&v, g.Limits)
+	w.lines(connectionZone...)
 	w.lines(
 		// nginx refuses a request body over 1 MiB by default (the core module page); the Envoy configuration writes no
 		// limit on a body's size. nginx also keeps a whole body before it sends any of it, where Envoy sends each part
@@ -648,6 +670,9 @@ func Generate(in generator.Input) ([]generator.File, error) {
 			"  server {",
 			"    listen "+listen+";",
 			"    http2 on;",
+		)
+		w.lines(connectionServer...)
+		w.lines(
 			"    server_name "+strings.Join(hosts, " ")+";",
 			// A route's location answers a refused service through a second error_page, which nginx follows only
 			// with this.

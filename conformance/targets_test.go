@@ -51,6 +51,9 @@ var (
 	tracingFile       = file{label: "nginx-tracing", proxyfile: "testdata/nginx-tracing.yaml", collector: true}
 	tracingByNameFile = file{label: "nginx-tracing-by-name", proxyfile: "testdata/nginx-tracing-by-name.yaml", collector: true,
 		scenarios: []string{tracing.name}}
+	// limitsFile is the battery's file for the connection limit, which Envoy's entry and each plain nginx entry run; it
+	// runs the rows of that scenario alone, as no other row is there for its limit of two.
+	limitsFile = file{label: "nginx-limits", proxyfile: "testdata/nginx-limits.yaml", scenarios: []string{backendLimits.name}}
 )
 
 // targets returns every proxy the battery runs. Envoy's image is read from the file scripts/validate-envoy.sh reads,
@@ -86,6 +89,7 @@ func targets(t testing.TB) []target {
 			{label: "nginx-auth", proxyfile: "testdata/nginx-auth.yaml"},
 			tracingFile,
 			tracingByNameFile,
+			limitsFile,
 		},
 		image: image,
 		// Envoy writes its log lines to stdout every 10 s by default; every 100 ms, a row that reads them (answer.logged)

@@ -1895,6 +1895,56 @@ func TestUpstreamIdle(t *testing.T) {
 	}
 }
 
+// TestConnectionLimit: limits.connections is nginx's own limit_conn, on one zone whose key is one text for every
+// request, in each environment's server, whose route locations send requests on to services. The default server holds
+// none, as each of its answers is a return, which ends a request before limit_conn runs, and the admin server none, so
+// /stats, which nginx answers itself after that phase, is never answered 503. Each row's literal is the lines that hold
+// limit_conn, in the file's order, and the number of admin servers the row finds, each holding none.
+func TestConnectionLimit(t *testing.T) {
+	const zone = `  limit_conn_zone "all" zone=pf_conn:1m;`
+	routed := "services:\n  app: {http: 3000}\nroutes:\n  - {name: app, prefix: /, to: app}\n"
+	cases := []struct {
+		name, file string
+		want       []string
+		admins     int
+	}{
+		{"without the key", smallFile("{name: app, prefix: /, to: app}"), nil, 0},
+		{"one environment", "limits: {connections: 100}\n" + smallFile("{name: app, prefix: /, to: app}"),
+			[]string{zone, "    limit_conn pf_conn 100;"}, 0},
+		{"two environments and an admin port", "listen: 8000\nadmin: 9901\nlimits: {connections: 100}\n" + routed +
+			"origins:\n  live: {hosts: [api.example.com]}\n  local: {hosts: [localhost]}\n",
+			[]string{zone, "    limit_conn pf_conn 100;", "    limit_conn pf_conn 100;"}, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := generate(t, c.file)
+			var got []string
+			for _, line := range lines(out) {
+				if strings.Contains(line, "limit_conn") {
+					got = append(got, line)
+				}
+			}
+			if !slices.Equal(got, c.want) {
+				t.Errorf("lines holding limit_conn = %q, want %q", got, c.want)
+			}
+			admins, held := 0, 0
+			for _, server := range blocks(lines(out), "  server {") {
+				if len(server) > 1 && server[1] == "    listen 127.0.0.1:9901;" {
+					admins++
+					for _, line := range server {
+						if strings.Contains(line, "limit_conn") {
+							held++
+						}
+					}
+				}
+			}
+			if admins != c.admins || held != 0 {
+				t.Errorf("%d admin servers holding %d lines with limit_conn, want %d holding 0", admins, held, c.admins)
+			}
+		})
+	}
+}
+
 // TestLogStatuses: log.status_from logs every status at or above it, as the Envoy output's filter does, written as
 // nginx's three digits, and 009, which nginx writes for an answer it reads with no status line: one whose status has
 // four digits, which Envoy logs at any status_from, and one with no status line at all, which Envoy answers 502 with the

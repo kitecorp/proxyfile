@@ -515,8 +515,8 @@ func TestNoTracingNoModule(t *testing.T) {
 			paths = append(paths, path)
 		}
 	}
-	if len(paths) != 12 {
-		t.Fatalf("found %d files, want the 6 examples that render for nginx and the 6 battery files: %q", len(paths), paths)
+	if len(paths) != 14 {
+		t.Fatalf("found %d files, want the 7 examples that render for nginx and the 7 battery files: %q", len(paths), paths)
 	}
 	for _, path := range paths {
 		t.Run(path, func(t *testing.T) {

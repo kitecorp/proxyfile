@@ -6,6 +6,7 @@ import (
 	"os"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -124,10 +125,18 @@ func TestTargetDeclarations(t *testing.T) {
 	}
 }
 
+// addressList is n IPv4 addresses, each once, as a YAML list's items between its brackets.
+func addressList(n int) string {
+	addresses := make([]string, n)
+	for i := range addresses {
+		addresses[i] = `"10.0.` + strconv.Itoa(i/256) + "." + strconv.Itoa(i%256) + `"`
+	}
+	return strings.Join(addresses, ", ")
+}
+
 // The words of nginx's refusals, which several rows of TestRefusals and TestNginxTracingRefusals repeat.
 const (
 	jwtWords      = "is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy"
-	healthWords   = "is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool"
 	xrayWords     = "is refused by --target nginx: nginx has no X-Ray tracer; write the otel provider and send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter, or render it for envoy"
 	inURLWords    = "without path_in_url: true is refused by --target nginx: nginx's tracer always puts the request's path and query in the span, which path_in_url: false keeps out; write path_in_url: true, or render it for envoy"
 	zoneWords     = "nginx reads no zone in a backend's address; give the service an address without one"
@@ -228,11 +237,12 @@ func TestRefusals(t *testing.T) {
 		{name: "a whole-request limit", spec: Proxyfile, target: nginxTarget, document: m.Inserted(7, "timeouts: {request: 30s}"),
 			want: []string{`g.yaml:7:12: "timeouts.request" a time is refused by --target nginx: nginx has no limit on a whole request (its time limits count the time between two reads or writes); write timeouts.request: none, or render it for envoy`}},
 		{name: "no whole-request limit", spec: Proxyfile, target: nginxTarget, document: m.Inserted(7, "timeouts: {request: none}"), want: nil},
-		// nginx closes a client's idle connection to take a new one, and drops a request in flight, where the Envoy
-		// output refuses the new connection (measured with worker_connections 6 on nginx 1.30.6 and 1.31.8 beside
-		// Envoy 1.40.2); the header limits beside it are written.
-		{name: "a connection limit", spec: Proxyfile, target: nginxTarget, document: m.Inserted(7, "limits: {connections: 6, request_headers: {size: 4KiB, count: 20}}"),
-			want: []string{`g.yaml:7:10: "limits.connections" is refused by --target nginx: nginx counts its own listening sockets and every connection to a service against one limit, and closes a client's idle connection to take a new one, so no nginx setting holds client connections to a number; remove limits.connections, or render it for envoy`}},
+		// nginx's limit_conn takes the number, with the header limits beside it, up to 65535: its source refuses a larger
+		// one when nginx loads the file (ngx_http_limit_conn_module.c, "connection limit must be less 65536").
+		{name: "a connection limit", spec: Proxyfile, target: nginxTarget, document: m.Inserted(7, "limits: {connections: 6, request_headers: {size: 4KiB, count: 20}}"), want: nil},
+		{name: "a connection limit of 65535", spec: Proxyfile, target: nginxTarget, document: m.Inserted(7, "limits: {connections: 65535}"), want: nil},
+		{name: "a connection limit above 65535", spec: Proxyfile, target: nginxTarget, document: m.Inserted(7, "limits: {connections: 65536}"),
+			want: []string{`g.yaml:7:10: "limits.connections" above 65535 is refused by --target nginx: nginx's limit_conn takes at most 65535; write 65535 or less, or render it for envoy`}},
 		{name: "header limits", spec: Proxyfile, target: nginxTarget, document: m.Inserted(7, "limits: {request_headers: {size: 4KiB, count: 20}}"), want: nil},
 		// nginx reads a $ in a certificate's or a key's path as the start of a variable, and a CA's path as written
 		// (measured on nginx 1.30.6 and 1.31.8).
@@ -300,8 +310,14 @@ func TestRefusals(t *testing.T) {
 		// Neither refusal fires on a name that only holds one of the framing names inside it.
 		{name: "names in full that nginx does not frame the request by", spec: Proxyfile, target: nginxTarget,
 			document: m.Inserted(7, "remove_from_clients: [x-client-id, x-host]"), want: nil},
-		{name: "health", spec: Proxyfile, target: nginxTarget, document: m.Replaced(3, 3, "  app: {http: 3000, health: {path: /health}}"),
-			want: []string{`g.yaml:3:21: "services.<service name>.health" ` + healthWords, `g.yaml:3:30: "services.<service name>.health.path" ` + healthWords}},
+		// nginx's own passive check takes health with every key under it, and reads unhealthy alone, on a service of
+		// at most 1,000 addresses, which the zone it keeps the service's backends in holds.
+		{name: "health", spec: Proxyfile, target: nginxTarget, document: m.Replaced(3, 3, "  app: {http: 3000, health: {path: /health}}"), want: nil},
+		{name: "health on 1,000 addresses", spec: Proxyfile, target: nginxTarget,
+			document: m.Replaced(3, 3, "  app: {http: 3000, health: {path: /health}, addresses: ["+addressList(1000)+"]}"), want: nil},
+		{name: "health on 1,001 addresses", spec: Proxyfile, target: nginxTarget,
+			document: m.Replaced(3, 3, "  app: {http: 3000, health: {path: /health}, addresses: ["+addressList(1001)+"]}"),
+			want:     []string{`g.yaml:3:21: "services.<service name>.health" on a service with more than 1,000 addresses is refused by --target nginx: nginx's passive check keeps a service's backends in a zone of 1 MiB, which holds 1,000 of them; give the service 1,000 addresses or fewer, remove health, or render it for envoy`}},
 		// auth.jwt as examples/jwt writes it: a line for each key under it, and none for auth itself, which nginx writes.
 		{name: "a token verified at the proxy", spec: Proxyfile, target: nginxTarget,
 			document: m.Inserted(7, "auth:\n  jwt:\n    issuer: https://login.example.com\n    audiences: [api.example.com]\n"+

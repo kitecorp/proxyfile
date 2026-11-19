@@ -7,17 +7,19 @@ so the released program never carries them. It runs each target of this version:
 
 ## What the battery proves
 
-Each entry of the battery is a proxy image and the proxyfiles it runs. Envoy's entry, `envoy-1.40`, runs ten:
+Each entry of the battery is a proxy image and the proxyfiles it runs. Envoy's entry, `envoy-1.40`, runs eleven:
 [`examples/full/hocon/Proxyfile`](../examples/full/hocon/Proxyfile), which writes every key but the few its opening
 comment names, [`examples/portable/hocon/Proxyfile`](../examples/portable/hocon/Proxyfile), which writes in the same
-world only the keys every generator is to render alike, nginx's own six files,
+world only the keys every generator is to render alike, nginx's own seven files,
 [`conformance/testdata/nginx.yaml`](../conformance/testdata/nginx.yaml) and
 [`conformance/testdata/nginx-plain.yaml`](../conformance/testdata/nginx-plain.yaml), the same with no pattern route, and,
 with an auth check, [`conformance/testdata/nginx-checks.yaml`](../conformance/testdata/nginx-checks.yaml) and
 [`conformance/testdata/nginx-auth.yaml`](../conformance/testdata/nginx-auth.yaml), and, with tracing,
 [`conformance/testdata/nginx-tracing.yaml`](../conformance/testdata/nginx-tracing.yaml) and
 [`conformance/testdata/nginx-tracing-by-name.yaml`](../conformance/testdata/nginx-tracing-by-name.yaml), its collector
-found by name, and HAProxy's own two, [`conformance/testdata/haproxy.yaml`](../conformance/testdata/haproxy.yaml) and
+found by name, and, with a connection limit,
+[`conformance/testdata/nginx-limits.yaml`](../conformance/testdata/nginx-limits.yaml),
+and HAProxy's own two, [`conformance/testdata/haproxy.yaml`](../conformance/testdata/haproxy.yaml) and
 [`conformance/testdata/two-checks.yaml`](../conformance/testdata/two-checks.yaml).
 The nginx entries `nginx-1.30` and `nginx-1.31` run on the two images pinned in `scripts/nginx-images`, one entry for
 each line, and run nginx's own files but the two with tracing, `examples/full`, which nginx refuses, and
@@ -66,6 +68,12 @@ only of a request with an `x-api-key` header, which HAProxy's script passes on l
 `authorization` is one it joins into one line, so a row that sends neither is served as on `nginx-plain.yaml`; it
 accepts `x-user-check` alone, in which the stub's check reports what it was told; and `remove_from_clients` also names
 the prefix `ho*`, which covers `Host`.
+
+nginx's `nginx-limits.yaml` writes `limits: {connections: 2}` and the shop service at its two addresses behind one
+route,
+with no `tls`, and runs the rows of the scenario connection limit and failed backends alone. It writes `health: {path:
+/healthz, unhealthy: 1}` on shop, so on nginx one failed request takes a backend out for 10 s. Envoy's entry and each
+nginx entry on the plain image run it.
 
 nginx's `nginx-checks.yaml` is `two-checks.yaml` for nginx: the same check service with two addresses, `when_unavailable:
 deny`, the `x-api-key` condition and `send_request: true`, with `remove_from_clients` naming `x-request-id` alone, because
@@ -127,14 +135,15 @@ nginx's exporter and the Envoy output's tracer each send the spans they hold eve
 scenario waits one second before it is sent, so the route's bucket fills again between the 10 of the scenario's rows
 that route serves before it and the 11 from it on, however fast a runner sends them; routing's and CORS's rows send it 9
 more before them, so 19 reach the route before that wait on `portable`, whose bucket holds 20. The scenarios run in this
-order: in Envoy's entry 592 rows on `full`, 506 on `portable`, 343 on `nginx-file`, 259 on `nginx-plain`, 378 on
-`nginx-checks`, 520 on `nginx-auth`, 566 on `nginx-tracing` and 39 on `nginx-tracing-by-name`, nginx's own files, and
-464 on `haproxy-file` and 361 on `two-checks`, HAProxy's own; in each nginx entry on the plain image the same 343, 259,
-378 and 520 on `nginx-file`, `nginx-plain`, `nginx-checks` and `nginx-auth`, and the same 506 on `portable`; in each
-nginx entry on the image tagged `-otel` the same 566 on `nginx-tracing` and 39 on `nginx-tracing-by-name`; and in each
-HAProxy entry the same 464 on `haproxy-file` and 361 on `two-checks`. That is 4,028 rows in Envoy's entry, 2,006 in each
-nginx entry on the plain image, 605 in each on the image tagged `-otel` and 825 in each HAProxy entry, 10,900 in all,
-and each passes. Before nginx wrote rate limits, RPC retries, balance, hash and DNS names the same entries ran 3,041,
+order: in Envoy's entry 595 rows on `full`, 506 on `portable`, 343 on `nginx-file`, 259 on `nginx-plain`, 378 on
+`nginx-checks`, 520 on `nginx-auth`, 566 on `nginx-tracing`, 39 on `nginx-tracing-by-name` and 3 on `nginx-limits`,
+nginx's own files, and 464 on `haproxy-file` and 361 on `two-checks`, HAProxy's own; in each nginx entry on the plain
+image the same 343, 259, 378, 520 and 3 on `nginx-file`, `nginx-plain`, `nginx-checks`, `nginx-auth` and
+`nginx-limits`, and the same 506 on `portable`; in each nginx entry on the image tagged `-otel` the same 566 on
+`nginx-tracing` and 39 on `nginx-tracing-by-name`; and in each HAProxy entry the same 464 on `haproxy-file` and 361 on
+`two-checks`. That is 4,034 rows in Envoy's entry, 2,009 in each nginx entry on the plain image, 605 in each on the
+image tagged `-otel` and 825 in each HAProxy entry, 10,912 in all, and each passes. Before nginx wrote rate limits, RPC
+retries, balance, hash and DNS names the same entries ran 3,041,
 1,310 and 791 rows: 40 rows were added, among them the scenarios client keys and hash, nginx's files gained the traffic
 keys those rows need, and each nginx entry runs `examples/portable`, where it ran no file of that world. Before nginx
 wrote HTTP retries they ran 3,273, 1,937 and 823: 13 rows were added, those of a retried route in the scenarios retry,
@@ -152,7 +161,9 @@ on the image tagged `-otel` run the 25 rows of the scenario tracing that its key
 span only for a target sent as written, read the client's trace as Envoy reads it and sent the client's bytes of it on,
 they ran 3,965, 2,001, 570 and 823: one row was added in the scenario routing, an absolute target of another scheme than
 `http` and `https`, which runs on every file, and 20 in the scenario tracing, of which 14 run on
-`nginx-tracing-by-name`. In order:
+`nginx-tracing-by-name`. Before nginx wrote the connection limit and the passive health check they ran 4,028, 2,006,
+605 and 825: `nginx-limits.yaml` was added, and three rows in the scenario connection limit and failed backends, one of
+`limits.connections` and two of `health`, each on `full` and `nginx-limits`. In order:
 
 | Scenario | Keys | What its rows check |
 |---|---|---|
@@ -172,6 +183,7 @@ they ran 3,965, 2,001, 570 and 823: one row was added in the scenario routing, a
 | tracing a retried request | `tracing`, `routes[].retries` | With `shop-2` refusing connections, 40 traced requests to the retried route `/retried/` are each answered by `shop-1` and have one span, named `retried`, with `upstream_cluster` `shop_http` and the status `200`, whose trace and span ids are those of the `traceparent` the service read on the try that served it. |
 | rate limit | `routes[].rate_limit`, `routes[].rate_limit.requests`, `routes[].rate_limit.per`, `routes[].rate_limit.burst`, `routes[].rate_limit.by`, `auth.ask` | After 2.5 s with no request to the route, 60 requests to `/catalog/items` back to back: the first 30 on `full`, `nginx-file` and `nginx-auth` (20 a second and a burst of 10) and the first 20 on `portable` (20 a second and no burst) answer `200`, and at least one of the rest `429`; then, of 60 requests over the limit that carry a token the check denies and one the token filter refuses, at least one is answered `429`, not `401`, so the limit is applied before the token and the check; of 60 `POST`s over the limit with a body of 5 bytes, at least one is answered `429`, and of 60 more with the next request written after the body, at least one ends its connection, so that next request gets no answer (each row after the first sends 60, as a row of 10 that finds the bucket full, which the row before may leave it, gets no `429`); of 60 gRPC calls over HTTP/1.1, told by their content type, with a body and the next request written after it, at least one ends its connection too; of 60 gRPC calls over HTTP/2, at least one is answered `200` with `grpc-status` `8` and `content-type: application/grpc`, and of 60 Connect calls, `POST`s that carry `connect-protocol-version`, at least one `429` with `content-type: application/json`; another route is not limited; and after 2 s with no request to the route, of 40 requests the check denies, the first 30, or 20 on `portable`, are answered `401` and at least one of the rest `429`, so a request the check denies spends a token. On `nginx-file`'s route `/retried-limited/`, which admits 10 requests a minute for all and retries once, with one shop backend refusing connections, the first 10 of 40 requests are answered `200` and at least one of the rest `429`, so a request whose first try was refused spends one token, not two and not none; `full`, `nginx-auth` and `nginx-plain` serve the path by their shop routes, so there at least one answer comes from the backend that is up. Ten rows: all on `full` and `nginx-auth`, nine on `portable`, which writes no retries, eight on `nginx-file`, which writes no check, and two on `nginx-plain`, whose route `/limited/` has no burst: another route is not limited, and the row of a limited route whose first connections were refused, which its shop route serves. |
 | cost | `routes[].pattern`, `routes[].prefix`, `origins.<environment name>.patterns`, `limits.request_headers.size` | A path of 14,000 bytes that 24 pattern routes read, sent with an origin a pattern covers, reaches the prefix route's service with `access-control-allow-origin` within 500 ms, and an `Origin` of 8,000 bytes that 64 patterns of two `*` read is answered `403` within 500 ms; the request after each is served, which only a proxy still running answers. Each stopped HAProxy before its patterns ran in steps and its origin patterns were written so they cannot backtrack ([HAProxy](haproxy.md#what-a-pattern-route-costs)). On `nginx-file` the long path is served as on the other files, nginx's header buffers reading a request line as long as the header limit ([nginx](nginx.md#the-header-limits)), and so is a path of 61,000 bytes, about the longest nginx reads at the file's 60 KiB, a head of 61,133 bytes under the 61,376 it reads ("a path of 61,000 bytes, about the longest nginx reads at 60 KiB, that 24 pattern routes read"): every file but `haproxy-file` serves it with `access-control-allow-origin` within 500 ms, and HAProxy answers `414`, a declared difference; an `Origin` of 6,420 bytes that the last of the 64 patterns takes reaches the service with `access-control-allow-origin`, where HAProxy answers `403` before the service, as it answers any admitted `Origin` longer than it echoes, a declared difference, and one of 6,321 bytes that the 64 read is answered `403`, each within 500 ms on `haproxy-file` and `nginx-file`, the files that name an environment with its host, rows of their own because nginx's first form of the patterns refused the first and held a worker past the bound with the second ([nginx](nginx.md#what-a-pattern-route-and-an-origin-pattern-cost)). Two more `Origin`s sit past the bound nginx sets on the origin patterns. One of 16,384 bytes that the last of the 64 patterns takes ("an Origin of 16,384 bytes that the last of 64 patterns of two * takes") and one of 16,385 bytes ("an Origin of 16,385 bytes that the last of 64 patterns of two * takes") are served and echoed within 500 ms by Envoy and answered `403` within 500 ms by nginx, which matches no `Origin` longer than 8,192 bytes against the patterns, a declared difference on `origins.<environment name>.patterns`; HAProxy answers both `431`, as it answers any head that outgrows its buffer, a declared difference. A path of 53,005 bytes that the 24 pattern routes read, with an `Origin` of 8,192 bytes that the last pattern takes, the longest nginx matches, in a head of 61,326 bytes ("a path of 53,005 bytes and an Origin of 8,192 bytes that the last of 64 patterns of two * takes, about the longest head nginx reads at 60 KiB"), is served with the `Origin` echoed within 500 ms on `nginx-file` and `nginx-auth`, the files that write `limits.request_headers.size` and name the `Origin`'s host, and answered `404` on `full` and `portable`. On `full` and `portable`, which name no environment with the long `Origin`'s host, each long `Origin` is answered `404`. Then 3,000 requests over 24 connections at once, each to a path of `/k01/` to `/k40/` and 1,000 random `a` and `b`, which 40 pattern routes of `haproxy-file` read, are each served by the prefix route's service, and the proxy's memory, read through Docker's API, grows by less than 96 MiB and 4 MiB for each CPU Docker gives a container, 144 MiB with 12: HAProxy runs a thread for each CPU, and each keeps the states of its own patterns, where Envoy's RE2 keeps a cache for each pattern. On `haproxy-file` with 12 CPUs, HAProxy grew past the bound on the code before the states of a thread shared one budget and with a budget of about 8 MB a thread, and stays under it with the script's, of about 1 MB. It runs on every file that writes pattern and prefix routes, which `haproxy-file`, `nginx-file` and `nginx-auth`, the files with the 40 routes, share with `full` and `portable`. The row logs the memory it read on every run. Last, 2,000 connections are opened as a raw request's would be, over TLS with the client certificate on the files that write `tls`, and each sends the 65 bytes `GET /products/1 HTTP/1.1`, a line break, `Host: localhost`, a line break, `x-pad: ` and 15 `a`, one more than nginx's first header buffer of 64 bytes, and then nothing ("connections each holding a head just over 64 bytes keep the proxy's memory bounded", on `full`, `portable`, `nginx-file` and `nginx-auth`, the files that write `limits.request_headers.size`). The proxy's memory, read through Docker's API before the first connection opens and 3 s after the last, must grow by less than 64 KiB for each connection, 125 MiB for the 2,000, and every connection must still be open with no answer right after. In the eighteen runs whose times are given below, Envoy grew by 27.4 to 33.5 KiB a connection, median 30.6 KiB, and nginx 1.30.6 and 1.31.8 by 23.3 to 26.5 KiB, median 24.7 KiB, on `nginx-auth`, 27.1 to 30.7 KiB, median 28.8 KiB, on `nginx-file` and 48.5 to 52.1 KiB, median 51.2 KiB, on `portable`. One header buffer of 8 MiB in place of nginx's buffers fails the row with 2,000 connections and passes it with 500, so the row keeps 2,000. The row catches that one large buffer only where the kernel's transparent huge pages are `always`, as Docker Desktop's are, because the buffer then takes a whole huge page of 2 MiB; with `madvise` or `never` such a buffer costs the pages a head touches and can pass the row. On every kernel the row bounds the memory a connection holds, and the generator's own test holds the buffers' form. The row logs the memory it read. Every one runs on `nginx-file` and `nginx-auth`. |
+| connection limit and failed backends | `limits.connections`, `services.<service name>.health` | On `nginx-limits`, whose limit is two, three requests sent at once on one HTTP/2 connection, each held 1 s by the service: nginx's own `limit_conn` serves two and answers the third `503`, a declared difference, and the Envoy output serves all three. On `full`, whose limit is 4096, all three are served. Then four requests while `shop-2` refuses connections, at least one served, and six right after it takes them again, each served by `shop`: on nginx, whose passive check took `shop-2` out for 10 s, each by `shop-1`, a declared difference. Three rows, on `full` and `nginx-limits`. |
 
 The stub reports each header the service received with its lines joined by a line break, which no value holds, and the
 bytes of each header whose value is not well-formed UTF-8 in hexadecimal, so a row tells one line holding a comma from
@@ -194,8 +206,9 @@ A target that refuses a key a file writes cannot render that file, so the exampl
 configuration, the lines render prints: `<target>.refused` beside the proxyfile. For such a file the battery starts no
 proxy: it passes when render exits 1 and prints exactly those lines, and a file render writes although its folder
 commits a refusal fails. In this version nginx and HAProxy refuse every key their generators do not write yet, so
-`examples/dns`, `examples/grpc`, `examples/limited`, `examples/minimal`, `examples/portable` and `examples/tls` commit
-`nginx.conf` with `proxyfile.js`, and every other example commits `nginx.refused`, and every example but
+`examples/balanced`, `examples/dns`, `examples/grpc`, `examples/limited`, `examples/minimal`, `examples/portable` and
+`examples/tls` commit `nginx.conf` with `proxyfile.js`, and every other example commits `nginx.refused`, and every
+example but
 `examples/minimal`, `examples/grpc`, `examples/tls` and `examples/tracing/envoy-tracing` commits `haproxy.refused`.
 
 ## The world
@@ -290,8 +303,7 @@ signs, and one the clients CA signed whose validity ended a day before the run, 
   namespace that refused one connection: the retry went to the same backend and was answered `200`, five times of
   five.
 - Keys no scenario names. The rendered file carries them, and the proxy loads it, but no row checks what they do:
-  among others `auth.jwt` but its `claims`, `limits.connections`, `timeouts.request`, `timeouts.upstream_idle`,
-  `log` and `services.<service name>.health`.
+  among others `auth.jwt` but its `claims`, `timeouts.request` and `timeouts.upstream_idle`.
   No row sends a valid token, so of `auth.jwt.claims` only the removal of a client's own copy is checked. The table
   above names every key a scenario exercises.
 - Spaces and tabs around a header value over HTTP/1.1. Envoy removes them and nginx passes a tab on, as
