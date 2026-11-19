@@ -8,17 +8,12 @@ its script, with `haproxy -c` on HAProxy 3.2.26 and 3.4.7, the two images
 [`scripts/haproxy-images`](../scripts/haproxy-images) pins, a warning counted as an error. `proxyfile check` compares
 both files.
 
-This version writes routing, TLS, CORS and the auth check: the listener, the admin port's `/ready`, `tls` with the
-clients CA, `client_address`, the services with their HTTP and gRPC ports, their IP addresses (with no zone) and
-`host_header`, `remove_from_clients` by name and by prefix, `cors`, each environment's hosts, origins and patterns, the
-routes by prefix, path, pattern and method with their rewrites, the rpc entry with its methods, and `auth` with `ask`,
-`timeout`, `enabled`, `when_unavailable`, `only_with_header`, `send`, `accept` and `send_request`, `routes[].auth`, and
-`rpc.methods[].action` and `rpc.methods[].reports`. It refuses every other core key a file writes, naming the key where
-it is written, so a file that needs one is never rendered as if the key were not there: `limits`, a time in
-`timeouts.request`, `timeouts.idle`, `timeouts.upstream_idle`, a DNS name in a service's address, `dns`, `auth.jwt`, a
-service's `balance`, `hash` and `health`, `retries` and `rate_limit` on a route or the rpc entry, `log` and `tracing`.
-HAProxy's column in [Portability](portability.md#support-by-proxy-from-the-generators) says how it writes each key and,
-for a key it refuses, what to write instead. [The auth check](#the-auth-check) says how it asks a check service.
+HAProxy's column in [Portability](portability.md#support-by-proxy-from-the-generators) says, for each key, whether
+this version writes it and how, and for a key or a form it refuses, what to write instead. A render refuses such a key
+where the file writes it, so a file that needs one is never rendered as if the key were not there. A key HAProxy has a
+directive of its own for is written with that directive, the file's values and HAProxy's defaults for the rest: the
+sections from [Limits and timeouts](#limits-and-timeouts) on name each directive. [The auth check](#the-auth-check)
+says how it asks a check service.
 
 ## Running the file
 
@@ -697,21 +692,149 @@ serves them. A client's own
 check and the service
 ([the differences of the auth check](#where-haproxy-answers-the-check-otherwise-than-the-envoy-output)).
 
+## Limits and timeouts
+
+- `limits.connections` is HAProxy's own [`maxconn`](https://docs.haproxy.org/3.4/configuration.html#4.2-maxconn) on the
+  listener and on each server line of a service: a connection past the listener's waits in the listen queue, and a
+  request past a server's waits in HAProxy's queue for up to 5 s, `timeout connect` when
+  [`timeout queue`](https://docs.haproxy.org/3.4/configuration.html#4.2-timeout%20queue) is not written, and is then
+  answered `503`.
+- `limits.request_headers` is HAProxy's own
+  [`tune.bufsize`](https://docs.haproxy.org/3.4/configuration.html#3.2-tune.bufsize), the size and the 1,024 bytes
+  HAProxy keeps for rewrites, and
+  [`tune.http.maxhdr`](https://docs.haproxy.org/3.4/configuration.html#3.2-tune.http.maxhdr), the count and one for the
+  request line; a request past either is answered `400`. A size below 15KiB is refused, as HTTP/2 needs a buffer of
+  16,384 bytes, and a count above 32766, the most `tune.http.maxhdr` takes. Every buffer of every connection takes the
+  size, so the memory each connection takes grows with it, and the manual asks for fewer connections when the buffers
+  grow.
+- `timeouts.idle` is HAProxy's own
+  [`timeout client`](https://docs.haproxy.org/3.4/configuration.html#4.2-timeout%20client) and
+  [`timeout server`](https://docs.haproxy.org/3.4/configuration.html#4.2-timeout%20server), the time without data on
+  each side, the server's the shorter of it and the 15 s, or 5 minutes, written without the key; `none` is
+  2147483647 ms, HAProxy's longest timer, and a longer time is refused.
+- `timeouts.upstream_idle` writes no line: HAProxy opens a connection to a service for each request and closes it after
+  the answer, so no connection to a service waits idle.
+
+## Services found by name
+
+- A service whose `address` is a DNS name is HAProxy's own [`server-template`](https://docs.haproxy.org/3.4/configuration.html#4.2-server-template) of 100
+  servers, which the [`resolvers`](https://docs.haproxy.org/3.4/configuration.html#5.2-resolvers) section `proxyfile` fills with up to 100 of the name's
+  addresses; each server starts down with no address ([`init-addr none`](https://docs.haproxy.org/3.4/configuration.html#5.2-init-addr)) until the
+  resolvers answer.
+- The section asks the name server `dns.resolver` names ([`nameserver`](https://docs.haproxy.org/3.4/configuration.html#5.3.2-nameserver)), or without the
+  key the name servers of the host's `/etc/resolv.conf` ([`parse-resolv-conf`](https://docs.haproxy.org/3.4/configuration.html#5.3.2-parse-resolv-conf)),
+  and looks each name up every second, HAProxy's default. It takes DNS answers of up to 4,096 bytes
+  ([`accepted_payload_size`](https://docs.haproxy.org/3.4/configuration.html#5.3.2-accepted_payload_size)): with
+  HAProxy's default size an answer held 30 IPv4 addresses of a name, and with 4,096 bytes a name of 100 was served by 99
+  to 100 of them (measured on HAProxy 3.2.26 and 3.4.7).
+- When the name server stops answering, HAProxy keeps the addresses it has for 30 s, its default
+  ([`hold`](https://docs.haproxy.org/3.4/configuration.html#5.3.2-hold)), and then takes the name's servers down, so
+  the service has no backend until the name server answers again.
+- The servers take the addresses of one family, IPv6 when the name has one
+  ([`resolve-prefer`](https://docs.haproxy.org/3.4/configuration.html#5.2-resolve-prefer)), where the Envoy output takes both; a file whose every service is
+  at IP addresses writes no resolvers section.
+
+## Balance and hash
+
+Each backend of a service takes HAProxy's own [`balance`](https://docs.haproxy.org/3.4/configuration.html#4.2-balance), and `hash-type` stays at HAProxy's
+default, map-based:
+
+| The file writes | HAProxy's own | Which backend takes a request |
+|---|---|---|
+| no `balance`, or `round_robin` | no line: `roundrobin`, HAProxy's default | the backends in turn |
+| `least_requests` | `balance leastconn` | the one with the fewest connections, one a request here |
+| `random` | `balance random(1)` | one drawn at random, one draw |
+| `hash: {header: <name>}` | `balance hdr(<name>)` | the one the header's value hashes to; without the header, or with it empty, the backends in turn |
+| `hash: {client: true}` | `balance source` under `client_address: connection`, `balance hash req.hdr_ip(x-forwarded-for,-1)` under `forwarded` | the one the client's address hashes to, the last `X-Forwarded-For` address under `forwarded`; with no such address, the backends in turn |
+
+The check relay of the service `auth.ask` names takes `leastconn` and `random(1)` as its backends do, and goes round
+robin for a hash: it is a TCP section whose one client is HAProxy itself.
+
+## Health checks
+
+- `health.path` is HAProxy's own [`option httpchk`](https://docs.haproxy.org/3.4/configuration.html#4.2-option%20httpchk) `GET <path>` in the service's http
+  backend and in the check relay, sent over HTTP/1.0 with no Host header, with
+  [`http-check expect`](https://docs.haproxy.org/3.4/configuration.html#4.2-http-check%20expect) `status 200-299`; each server takes
+  [`check`](https://docs.haproxy.org/3.4/configuration.html#5.2-check) with [`inter`](https://docs.haproxy.org/3.4/configuration.html#5.2-inter), `fall` and `rise` from `interval`, `unhealthy` and
+  `healthy`, and is in the pool from HAProxy's start until it fails its checks.
+- `health.timeout` is HAProxy's own [`timeout check`](https://docs.haproxy.org/3.4/configuration.html#4.2-timeout%20check), the wait for the answer; the
+  connection has the shorter of 5 s and the interval. An interval or a timeout above 2147483647 ms, HAProxy's longest
+  timer, is refused.
+- The gRPC backend of a service at IP addresses leaves each server out with the http server at its address
+  ([`track`](https://docs.haproxy.org/3.4/configuration.html#5.2-track)); a service found by a DNS name keeps every gRPC backend, as a server-template tracks no
+  server.
+- `health.grpc` is refused: [`http-check send`](https://docs.haproxy.org/3.4/configuration.html#4.2-http-check%20send) writes a text body, not the health
+  service's gRPC message, so HAProxy has no gRPC health check; write `health.path` on the service's http port.
+
+## Retries
+
+- A route's `retries` is HAProxy's own
+  [`http-request set-retries`](https://docs.haproxy.org/3.4/configuration.html#4.4-set-retries) in the service's
+  backend, for that route's requests alone; a count above 100, the most `set-retries` takes, is refused.
+- HAProxy tries a request again when its connection to the service failed
+  ([`retry-on`](https://docs.haproxy.org/3.4/configuration.html#4.2-retry-on) `conn-failure`, its default), with
+  [`option redispatch`](https://docs.haproxy.org/3.4/configuration.html#4.2-option%20redispatch). Measured on HAProxy
+  3.2.26 and 3.4.7 with one of two addresses refusing connections: a service that balances round robin or by
+  `least_requests` sent the retry at once to the other address, and a hashed service sent every try to the address its
+  hash picks. A service of one address is tried again after a pause of the shorter of `timeout connect` and 1 s
+  ([`retries`](https://docs.haproxy.org/3.4/configuration.html#4.2-retries)).
+- The rpc entry's `retries` is refused: with `retry-on` at its default, HAProxy did not send a gRPC call again after its
+  connection to the service failed, and `retry-on all-retryable-errors`, which did, also sends again a request a
+  service may have read.
+
+## Rate limits
+
+- A route's `rate_limit`, and the rpc entry's for all its routes, is HAProxy's own
+  [`stick-table`](https://docs.haproxy.org/3.4/configuration.html#4.2-stick-table) `backend proxyfile_rate<n>`, which
+  counts the route's requests over `per`
+  ([`sc_http_req_rate`](https://docs.haproxy.org/3.4/configuration.html#7.3.3-sc_http_req_rate)), refused ones too, so
+  a client that keeps sending stays refused.
+- [`track-sc0`](https://docs.haproxy.org/3.4/configuration.html#4.4-track-sc0) keys each request by the client's
+  address, the connection's peer or under `forwarded` the last `X-Forwarded-For` address, in a table of up to 100k
+  clients that forgets its oldest when full, or with `by: all` by one key for every client. An IPv6 client is counted
+  by its /64 network ([`ipmask(32,64)`](https://docs.haproxy.org/3.4/configuration.html#7.3.1-ipmask)), so a client
+  that moves inside its own network keeps its count.
+- A request past `requests`, a gRPC call too, gets HAProxy's own `429`
+  ([`http-request deny`](https://docs.haproxy.org/3.4/configuration.html#4.4-deny)), after the origin is admitted and
+  before the auth check.
+- `burst` above 0 is refused, as HAProxy's rate counts the requests of a period and has no burst, and so is a `per`
+  above 2147483647 ms, HAProxy's longest timer.
+
+## The request log
+
+- Every file logs each request of the public listener on standard output
+  ([`log`](https://docs.haproxy.org/3.4/configuration.html#4.2-log) `stdout format raw daemon`), with no `log` key too,
+  in HAProxy's own [`log-format`](https://docs.haproxy.org/3.4/configuration.html#4.2-log-format) of its own fields: the
+  date, the frontend, the backend and server, the timers, the status, the bytes each way, the termination state, the
+  method, the HTTP version and the request id, quoted and escaped, as under `forwarded` it is the client's own. The
+  version is read from the first 1,024 bytes of the request line that HAProxy keeps for the log
+  ([`tune.http.logurilen`](https://docs.haproxy.org/3.4/configuration.html#3.2-tune.http.logurilen)), so a longer
+  request line is logged with `HTTP/0.9`.
+- No line holds a path, a query, the client's address, a user agent or a referrer, as [Defaults](defaults.md) promises
+  of every proxy: a connection that fails before its request, such as a failed TLS handshake, and a request HAProxy's
+  parser refuses are logged by
+  [`error-log-format`](https://docs.haproxy.org/3.4/configuration.html#4.2-error-log-format) with the same fields and
+  HAProxy's error, where HAProxy's default line holds the client's address; a refused request's line holds its status,
+  `400`, and `<BADREQ>` in place of its method and version.
+- With `log`, [`set-log-level silent`](https://docs.haproxy.org/3.4/configuration.html#4.4-set-log-level) drops a
+  request answered below `status_from` unless HAProxy's own
+  [`rand(100)`](https://docs.haproxy.org/3.4/configuration.html#7.3.2-rand) draws below `sample`, a draw for each
+  request.
+
 ## What HAProxy writes with no key
 
 Each of these is in every file the HAProxy generator writes. Each was measured on HAProxy 3.2.26 and 3.4.7, and
 Envoy's answers on Envoy 1.40.2, unless it says otherwise.
 
-- **No request is tried again** (`retries 0`): without the line, HAProxy 3.4.7 tried a connection the service refused
-  three more times, where the Envoy output tries a request again only when a route's `retries` asks, a key this
-  version refuses.
+- **No request is tried again** (`retries 0`) but on a route whose `retries` asks ([Retries](#retries)): without the
+  line, HAProxy 3.4.7 tried a connection the service refused three more times.
 - **A service has 5 s to take the connection** (`timeout connect 5s`), Envoy's default connect timeout (Envoy
   answered a service that never took the connection after 5.01 s). A gRPC service has 15 s: HAProxy does not bound an
   HTTP/2 connection to a service by `timeout connect`, so one that never takes the connection is answered after the
   15 s a service that sends nothing gets (15.02 s), a gRPC call as below and any other request `504`, where Envoy's
   answer to it is an empty `502` (declared on `services.<service name>.grpc`).
 - **5 minutes with no data from the client end a request** (`timeout client 300s`), Envoy's default stream idle
-  timeout (read in each proxy's documentation, not run). **A service that sends nothing for 15 s is answered `504`**
+  timeout (read in each proxy's documentation, not run), when `timeouts.idle` is not written. **A service that sends nothing for 15 s is answered `504`**
   (`timeout server 15s`), at the same time as by the Envoy output, which ends a request 15 s after it starts when
   `timeouts.request` is not written (measured over HTTP/1.1 and HTTP/2: `504` after 15.01 s, Envoy's after 15.00 s).
   The `504` carries Envoy's body, `upstream request timeout` as `text/plain`, and Envoy's reason, `Gateway Timeout`,
@@ -767,9 +890,8 @@ Envoy's answers on Envoy 1.40.2, unless it says otherwise.
 - **Every response carries `x-request-id`**, as with Envoy: a version 4 UUID HAProxy makes (`uuid(4)`), as Envoy
   makes one, or with `client_address: forwarded` the client's own, which the service receives too; with `connection`
   a client's own id is replaced, as Envoy replaces it.
-- **HAProxy logs no request**, where the Envoy output logs every request with no `log` key: the file writes no `log`
-  line, a key this version refuses, as HAProxy's row of `log` says, so no request line, path or query reaches HAProxy's
-  output. A worker that stopped on a signal 11 printed
+- **Every request is logged** on standard output ([The request log](#the-request-log)), as by the Envoy output with no
+  `log` key. A worker that stopped on a signal 11 printed
   `Current worker (8) exited with code 139 (Segmentation fault)`, and HAProxy then stopped every process and exited
   with 139. HAProxy sets its connection limit from the limit on open files at start and prints it
   (`Automatically setting global.maxconn to 120.` with 300 files): with the table full, a new connection waited

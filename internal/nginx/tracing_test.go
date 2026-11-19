@@ -494,7 +494,9 @@ func TestTracingAround(t *testing.T) {
 
 // TestNoTracingNoModule: a file without tracing loads no tracing module and writes none of its lines, so the plain
 // images keep running it and its configuration keeps the bytes it had before tracing was written: every committed
-// example that renders for nginx and every battery file.
+// example that renders for nginx and every battery file. The files it leaves out are checked against the folders
+// rather than counted, so a new example or battery file needs no change here: an example it leaves out commits
+// nginx.refused, and the battery files it leaves out are exactly those named for tracing.
 func TestNoTracingNoModule(t *testing.T) {
 	examples, err := filepath.Glob("../../examples/*/*/proxyfile.yaml")
 	if err != nil {
@@ -502,21 +504,35 @@ func TestNoTracingNoModule(t *testing.T) {
 	}
 	var paths []string
 	for _, path := range examples {
-		if _, err := os.Stat(filepath.Join(filepath.Dir(path), "nginx.conf")); err == nil {
+		dir := filepath.Dir(path)
+		if _, err := os.Stat(filepath.Join(dir, "nginx.conf")); err == nil {
 			paths = append(paths, path)
+		} else if _, err := os.Stat(filepath.Join(dir, "nginx.refused")); err != nil {
+			t.Errorf("%s commits neither nginx.conf nor nginx.refused", dir)
 		}
 	}
 	battery, err := filepath.Glob("../../conformance/testdata/*.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
+	var left []string
 	for _, path := range battery {
-		if !strings.Contains(string(testsupport.ReadFile(t, path)), "tracing") {
+		if strings.Contains(string(testsupport.ReadFile(t, path)), "tracing") {
+			left = append(left, path)
+		} else {
 			paths = append(paths, path)
 		}
 	}
-	if len(paths) != 14 {
-		t.Fatalf("found %d files, want the 7 examples that render for nginx and the 7 battery files: %q", len(paths), paths)
+	named, err := filepath.Glob("../../conformance/testdata/*tracing*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(left, named) {
+		t.Errorf("left out the battery files %q, want those named for tracing: %q", left, named)
+	}
+	// A pattern that matches nothing would leave nothing to check.
+	if len(examples) == 0 || len(battery) == 0 {
+		t.Fatalf("found %d examples and %d battery files, want both read", len(examples), len(battery))
 	}
 	for _, path := range paths {
 		t.Run(path, func(t *testing.T) {

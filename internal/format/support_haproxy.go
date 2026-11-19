@@ -1,7 +1,6 @@
 package format
 
 import (
-	"net/netip"
 	"slices"
 	"strings"
 
@@ -12,8 +11,6 @@ import (
 // HAProxy's refusals that several keys share. Each is named for HAProxy because every target declares its keys in this
 // package, and another target's refusals say what that proxy offers instead.
 var (
-	// haproxyNotWritten declares a key HAProxy could carry that this version's generator does not write yet.
-	haproxyNotWritten = Support{Level: Refused, Note: "not written by this version's HAProxy generator; render it for envoy"}
 	// jwt_verify checks a token's signature against one PEM key file or HMAC secret read with the configuration, and
 	// checks no exp, iss or aud claim (HAProxy 3.4 configuration manual, jwt_verify), so it cannot verify the token the
 	// format describes: keys from a key set or a URL, an issuer and audiences.
@@ -33,6 +30,64 @@ var (
 	haproxyRemovalPrefix = Refusal{Form: "holding a * prefix that covers content-length, connection or upgrade", Instead: haproxyRemovalWords,
 		Applies: func(value, _ *tree.Node) bool { _, prefix := coveredBy(value, HAProxyNotRemovable); return prefix }}
 )
+
+// HAProxy's bounds on values the format admits, which its declaration refuses past them and its generator refuses too.
+const (
+	// HAProxyRewriteRoom is tune.maxrewrite's default, the bytes of each buffer HAProxy keeps for rewrites: a request
+	// head larger than tune.bufsize less these is answered 400 (HAProxy 3.2 and 3.4 configuration manual, tune.bufsize).
+	HAProxyRewriteRoom = 1024
+	// HAProxySmallestHeaders is the smallest limits.request_headers.size HAProxy writes: HTTP/2 mandates a tune.bufsize
+	// of 16384 or more (the manual, tune.bufsize), of which HAProxyRewriteRoom is kept, 15KiB.
+	HAProxySmallestHeaders = 16384 - HAProxyRewriteRoom
+	// HAProxyMostHeaderFields is the most limits.request_headers.count HAProxy writes: tune.http.maxhdr takes 1 to
+	// 32767 lines and counts the request line among them (the manual, tune.http.maxhdr).
+	HAProxyMostHeaderFields = 32766
+	// HAProxyLongestTime is the longest time an HAProxy timer holds, in milliseconds: the validator loaded timeout
+	// client 2147483647ms and refused 2147483648ms with "timer overflow ... (maximum value is 2147483647 ms or ~24.8
+	// days)" on HAProxy 3.2.26 and 3.4.7.
+	HAProxyLongestTime = 2147483647
+	// HAProxyMostRetries is the most retries HAProxy writes: http-request set-retries takes 0 to 100 (the manual,
+	// http-request set-retries).
+	HAProxyMostRetries = 100
+)
+
+// haproxyRetries is how routes[].retries is written: HAProxy's own retries with retry-on at its default, conn-failure,
+// and option redispatch, which lets a try go to another server (the manual, retries, retry-on and option redispatch).
+// Where the try goes was measured on HAProxy 3.2.26 and 3.4.7 with one of two addresses refusing connections: round
+// robin and leastconn sent the first retry at once to the other, a hash sent every try to the address it picks, and a
+// service of one address was tried again after 1 s, min(timeout connect, 1 s).
+var haproxyRetries = Support{Level: Partial,
+	Note:    "HAProxy's own retries: a request whose connection failed is tried again, at once on another address of a service that balances round robin or by least_requests, on the address its hash picks again for a hashed service, and on the same address after a pause of up to 1 s for a service of one address",
+	Refuses: []Refusal{{Form: "above 100", Instead: "HAProxy's set-retries takes 0 to 100; write 100 or less", Applies: countAbove(HAProxyMostRetries)}}}
+
+// The rows of a rate limit, the same for an entry of routes and for its rpc: HAProxy's own stick table, which counts
+// every started request over the period, refused ones too (the manual, sc_http_req_rate: "This includes every started
+// request, valid or not"), and http-request deny with 429 past the requests. Its rate counts the requests of the last
+// period and keeps nothing for a burst, and its period is a timer: the validator refused
+// http_req_rate(2147483648ms) and http_req_rate(1000h), and loaded http_req_rate(2147483647ms), on HAProxy 3.2.26 and
+// 3.4.7.
+var (
+	haproxyRateLimit = Support{Level: Partial,
+		Note: "HAProxy's own stick table and http_req_rate: requests are counted over the last period, refused ones too, so a client that keeps sending stays refused, and a request over the limit, a gRPC call too, gets HAProxy's own 429"}
+	haproxyRatePer = Support{Level: Partial, Note: "the period of HAProxy's own http_req_rate, at most 2147483647 ms",
+		Refuses: []Refusal{{Form: "a time above 2147483647 ms", Instead: "HAProxy's timers hold at most 2147483647 ms; write a shorter period, or render it for envoy",
+			Applies: longerThanHAProxyTimers}}}
+	haproxyRateBurst = Support{Level: Partial,
+		Note: "written as 0 alone, as HAProxy's own http_req_rate admits the requests of each period and no burst above them",
+		Refuses: []Refusal{{Form: "above 0", Instead: "HAProxy's rate counts the requests of a period and has no burst; write burst: 0 or leave it out, or render it for envoy",
+			Applies: countAbove(0)}}}
+	// The key of a client is HAProxy's own ipmask(32,64) on its address (the generator's clientNetwork).
+	haproxyRateBy = Support{Level: Partial, Note: "an IPv4 client is counted by its address and an IPv6 client by its /64 network, HAProxy's own ipmask(32,64), so the addresses of one IPv6 network share a count"}
+)
+
+// haproxyTimer refuses a time an HAProxy timer does not hold.
+var haproxyTimer = Refusal{Form: "a time above 2147483647 ms", Instead: "HAProxy's timers hold at most 2147483647 ms; write a shorter time, or render it for envoy", Applies: longerThanHAProxyTimers}
+
+// longerThanHAProxyTimers reports whether a time is longer than HAProxyLongestTime, the most an HAProxy timer holds.
+func longerThanHAProxyTimers(value, _ *tree.Node) bool {
+	millis, ok := model.ParseTime(value.Text)
+	return ok && millis > HAProxyLongestTime
+}
 
 // HAProxyFramedBy are the headers HAProxy frames or routes a request by, so the auth check's answer never sets them on
 // the request it passes on: a check service must never be able to change how HAProxy frames that request. Envoy 1.40.2
@@ -88,11 +143,26 @@ var haproxyTarget = Target{Name: "haproxy", Title: "HAProxy", Keys: map[string]S
 	"client_address": {Level: Partial,
 		Note: "under forwarded, a client's own X-Request-Id longer than 980 bytes, or than 908 bytes less an echoed Origin and cors.expose_headers, is answered 400 before the check and the service, where the Envoy output serves it: HAProxy echoes the id in the 1,024 bytes it keeps for the lines it adds to an answer; over HTTP/2 an X-Forwarded-Proto of spaces alone is answered 404, where the Envoy output serves it"},
 
-	"limits":                       haproxyNotWritten,
-	"limits.connections":           haproxyNotWritten,
-	"limits.request_headers":       haproxyNotWritten,
-	"limits.request_headers.size":  haproxyNotWritten,
-	"limits.request_headers.count": haproxyNotWritten,
+	"limits": {Level: Supported},
+	// maxconn on a server queues the requests past it, for timeout queue, which takes timeout connect's 5 s when not
+	// written (the manual, maxconn and timeout queue). The validator loaded maxconn 4294967295, the format's largest
+	// count, on the listener and on a server line with no warning on HAProxy 3.2.26 and 3.4.7.
+	"limits.connections": {Level: Partial,
+		Note: "HAProxy's own maxconn on the listener and on each server: a connection past it waits in the listen queue, and a request past a server's waits up to 5 s in HAProxy's queue and is then answered 503; the limit to a service counts on each of its addresses"},
+	"limits.request_headers": {Level: Supported},
+	"limits.request_headers.size": {Level: Partial,
+		Note: "HAProxy's own tune.bufsize, the size of every buffer, written as the size and the 1,024 bytes HAProxy keeps for rewrites: a request whose head does not fit is answered 400, an answer whose head does not fit 502, and the byte bounds the other rows of this column give were found with HAProxy's default buffer of 16,384 bytes",
+		Refuses: []Refusal{{Form: "below 15KiB",
+			Instead: "HTTP/2 needs a buffer of 16,384 bytes, of which HAProxy keeps 1,024 for rewrites, so its smallest header limit is 15KiB; write 15KiB or more, or render it for envoy",
+			Applies: func(value, _ *tree.Node) bool {
+				size, ok := model.ParseSize(value.Text)
+				return ok && size < HAProxySmallestHeaders
+			}}}},
+	"limits.request_headers.count": {Level: Partial,
+		Note: "HAProxy's own tune.http.maxhdr, written as the count and one because it counts the request line: a request over it is answered 400",
+		Refuses: []Refusal{{Form: "above 32766",
+			Instead: "HAProxy's tune.http.maxhdr takes at most 32,767 lines, the request line among them; write 32766 or less",
+			Applies: countAbove(HAProxyMostHeaderFields)}}},
 
 	"timeouts": {Level: Supported},
 	// timeout server limits the time without data, not the whole response: measured on HAProxy 3.4.7, a service that
@@ -103,8 +173,14 @@ var haproxyTarget = Target{Name: "haproxy", Title: "HAProxy", Keys: map[string]S
 		Refuses: []Refusal{{Form: "a time",
 			Instead: "HAProxy has no limit on a whole request (timeout server is the time without data, timeouts.idle); write timeouts.request: none",
 			Applies: func(value, _ *tree.Node) bool { return value.Text != "none" }}}},
-	"timeouts.idle":          haproxyNotWritten,
-	"timeouts.upstream_idle": haproxyNotWritten,
+	"timeouts.idle": {Level: Partial,
+		Note: "HAProxy's own timeout client and timeout server, the time without data on each side; timeout client also closes a kept-alive client connection idle that long, and none is HAProxy's longest timer, 2147483647 ms",
+		Refuses: []Refusal{{Form: "a time above 2147483647 ms",
+			Instead: "HAProxy's timers hold at most 2147483647 ms; write a shorter time, or none",
+			Applies: longerThanHAProxyTimers}}},
+	// option http-server-close and max-reuse 0 give each request a connection of its own (haproxy.cfg.tmpl).
+	"timeouts.upstream_idle": {Level: Partial,
+		Note: "HAProxy opens a connection to a service for each request and closes it after the answer, so no connection to a service waits idle and the key writes no line"},
 
 	"services":                     {Level: Supported},
 	"services.<service name>":      {Level: Supported},
@@ -116,35 +192,50 @@ var haproxyTarget = Target{Name: "haproxy", Title: "HAProxy", Keys: map[string]S
 	"services.<service name>.grpc": {Level: Partial,
 		Note: "a service that never takes the connection is answered after 15 s, where Envoy answers after its 5 s connect timeout, a gRPC call with 200 and grpc-status 14 as by Envoy and any other request with 504 and upstream request timeout, where Envoy's is an empty 502: HAProxy does not bound an HTTP/2 connection to a service by its connect timeout, and the 15 s a service that sends nothing gets end the wait (measured without timeouts.request); a gRPC call HAProxy alone refuses before any service, such as one with a client's X-Request-Id of 1,000 bytes under forwarded, gets HAProxy's plain answer, here 400, where Envoy serves the call; a request that is not a gRPC call, to a gRPC service that resets its stream or answers in HTTP/1.1, is answered 502 with no body, where the Envoy output answers the stream reset 503 and the HTTP/1.1 answer 502, each with the text upstream connect error or disconnect/reset before headers. reset reason: remote reset, or protocol error, as text/plain"},
 	"services.<service name>.host_header": {Level: Supported},
-	// A name HAProxy looks up again while it runs takes a resolvers section and a server-template, which this version
-	// does not write yet, so it takes an IP address alone. Applies tells the two apart as the reader does: an address
-	// netip.ParseAddr reads is an IP address, and any other a DNS name.
-	"services.<service name>.address": {Level: Partial, Note: "an IP address with no zone",
-		Refuses: []Refusal{{Form: "a DNS name",
-			Instead: "this version's HAProxy generator writes no DNS name; give the service's IP address, or render it for envoy",
-			Applies: func(value, _ *tree.Node) bool {
-				_, err := netip.ParseAddr(value.Text)
-				return err != nil
-			}},
-			{Form: "a zoned IPv6 address", Instead: haproxyNoZone, Applies: func(value, _ *tree.Node) bool { return zoned(value.Text) }}}},
+	// A DNS name is a server-template of 100 servers that HAProxy's own resolvers fill; resolve-prefer is ipv6 when not
+	// written, so they take the name's IPv6 addresses when it has any, and its IPv4 ones otherwise (the manual,
+	// server-template, resolvers, resolve-prefer and the resolvers section's timeout resolve, 1s). The section takes DNS
+	// answers of 4096 bytes (accepted_payload_size), as HAProxy's default of 512 held 30 IPv4 addresses of a name.
+	"services.<service name>.address": {Level: Partial,
+		Note:    "an IP address with no zone, or a DNS name HAProxy's own resolvers look up every second, with up to 100 of its addresses, of one family, IPv6 when the name has one, from DNS answers of up to 4,096 bytes, which held 99 to 100 of a name's 100 IPv4 addresses where HAProxy's default answer size held 30",
+		Refuses: []Refusal{{Form: "a zoned IPv6 address", Instead: haproxyNoZone, Applies: func(value, _ *tree.Node) bool { return zoned(value.Text) }}}},
 	"services.<service name>.addresses": {Level: Partial, Note: "IP addresses with no zone",
 		Refuses: []Refusal{{Form: "holding a zoned IPv6 address", Instead: haproxyNoZone, Applies: func(value, _ *tree.Node) bool {
 			return slices.ContainsFunc(value.Items, func(item *tree.Node) bool { return zoned(item.Text) })
 		}}}},
-	"services.<service name>.balance":          haproxyNotWritten,
-	"services.<service name>.hash":             haproxyNotWritten,
-	"services.<service name>.hash.header":      haproxyNotWritten,
-	"services.<service name>.hash.client":      haproxyNotWritten,
-	"services.<service name>.health":           haproxyNotWritten,
-	"services.<service name>.health.path":      haproxyNotWritten,
-	"services.<service name>.health.grpc":      haproxyNotWritten,
-	"services.<service name>.health.interval":  haproxyNotWritten,
-	"services.<service name>.health.timeout":   haproxyNotWritten,
-	"services.<service name>.health.healthy":   haproxyNotWritten,
-	"services.<service name>.health.unhealthy": haproxyNotWritten,
+	// balance in each backend of the service (the generator's balance); the check relay takes leastconn and random(1)
+	// alone, as a TCP section whose one client is HAProxy itself (spread).
+	"services.<service name>.balance": {Level: Partial,
+		Note: "HAProxy's own balance: round_robin is roundrobin, its default, least_requests leastconn, which counts connections, one a request here, and random random(1), one draw"},
+	"services.<service name>.hash": {Level: Supported},
+	"services.<service name>.hash.header": {Level: Partial,
+		Note: "HAProxy's own balance hdr(): a request without the header, or with it empty, goes round robin; the check relay of the service auth.ask names, whose one client is HAProxy itself, goes round robin"},
+	"services.<service name>.hash.client": {Level: Partial,
+		Note: "HAProxy's own balance source, or under forwarded a hash of the last X-Forwarded-For address; a request with no such address goes round robin; the check relay of the service auth.ask names, whose one client is HAProxy itself, goes round robin"},
+	// option httpchk, http-check expect, timeout check and check inter fall rise in the service's http backend and in
+	// the check relay, and track in its gRPC backend (the generator's health and checked). init-state is left at
+	// HAProxy's default, none, so a server is up from the start until it fails its checks (the manual, init-state).
+	"services.<service name>.health": {Level: Supported},
+	"services.<service name>.health.path": {Level: Partial,
+		Note: "HAProxy's own option httpchk, GET over HTTP/1.0 with no Host header, and a backend is in the pool from HAProxy's start until it fails its checks; the gRPC backends of a service at IP addresses leave the pool with its HTTP ones (track), where a service found by a DNS name keeps every gRPC backend"},
+	// http-check send writes a body as text or a log-format string (the manual, http-check send), where the health
+	// service takes a gRPC message.
+	"services.<service name>.health.grpc": {Level: Refused,
+		Note: "HAProxy has no gRPC health check: http-check send writes a text body, not the health service's gRPC message; write health.path on the service's http port"},
+	// check inter and timeout check are timers.
+	"services.<service name>.health.interval": {Level: Partial, Note: "HAProxy's own check inter, at most 2147483647 ms",
+		Refuses: []Refusal{haproxyTimer}},
+	// timeout check bounds the wait for the answer once connected, and the connect takes the shorter of timeout
+	// connect and inter (the manual, timeout check).
+	"services.<service name>.health.timeout": {Level: Partial,
+		Note:    "HAProxy's own timeout check, the wait for the answer, where the connection has the shorter of 5 s and the interval",
+		Refuses: []Refusal{haproxyTimer}},
+	"services.<service name>.health.healthy":   {Level: Supported},
+	"services.<service name>.health.unhealthy": {Level: Supported},
 
-	"dns":          haproxyNotWritten,
-	"dns.resolver": haproxyNotWritten,
+	// The resolvers section's nameserver, or its parse-resolv-conf without dns.resolver.
+	"dns":          {Level: Supported},
+	"dns.resolver": {Level: Supported},
 
 	// The check is a Lua action in proxyfile.lua that asks the check service through a TCP listen section of the file.
 	// Each limit below is the script's own: HAProxy gives a Lua action no HTTP client of its own, so the script
@@ -225,14 +316,18 @@ var haproxyTarget = Target{Name: "haproxy", Title: "HAProxy", Keys: map[string]S
 	"origins.<environment name>.patterns": {Level: Partial,
 		Note: "an admitted Origin longer than 872 bytes less the length of cors.expose_headers is answered 403 with the body Invalid CORS request before the check and the service, where the Envoy output echoes it: HAProxy has 1,024 bytes for the lines it adds to an answer"},
 
-	"routes":                                    {Level: Supported},
-	"routes[].rpc":                              {Level: Supported},
-	"routes[].rpc.retries":                      haproxyNotWritten,
-	"routes[].rpc.rate_limit":                   haproxyNotWritten,
-	"routes[].rpc.rate_limit.requests":          haproxyNotWritten,
-	"routes[].rpc.rate_limit.per":               haproxyNotWritten,
-	"routes[].rpc.rate_limit.burst":             haproxyNotWritten,
-	"routes[].rpc.rate_limit.by":                haproxyNotWritten,
+	"routes":       {Level: Supported},
+	"routes[].rpc": {Level: Supported},
+	// With a route's retries lines in the gRPC backend and retry-on at its default, conn-failure, each call whose first
+	// connection a backend refused was answered grpc-status 14 and not sent again, on HAProxy 3.2.26 and 3.4.7. retry-on
+	// all-retryable-errors sent it again, but it also sends again a request a service may have read, which the format's
+	// retries never do.
+	"routes[].rpc.retries":                      {Level: Refused, Note: "with retry-on at HAProxy's default, a gRPC call whose connection to the service failed was not sent again, and the wider retry-on that sends it also sends again a request a service may have read; leave retries out of the rpc entry, or render it for envoy"},
+	"routes[].rpc.rate_limit":                   haproxyRateLimit,
+	"routes[].rpc.rate_limit.requests":          {Level: Supported},
+	"routes[].rpc.rate_limit.per":               haproxyRatePer,
+	"routes[].rpc.rate_limit.burst":             haproxyRateBurst,
+	"routes[].rpc.rate_limit.by":                haproxyRateBy,
 	"routes[].rpc.to":                           {Level: Supported},
 	"routes[].rpc.to.<package pattern>":         {Level: Supported},
 	"routes[].rpc.to.<package pattern>.service": {Level: Supported},
@@ -250,12 +345,12 @@ var haproxyTarget = Target{Name: "haproxy", Title: "HAProxy", Keys: map[string]S
 	"routes[].to":                  {Level: Supported},
 	"routes[].rewrite":             {Level: Supported},
 	"routes[].auth":                {Level: Supported},
-	"routes[].retries":             haproxyNotWritten,
-	"routes[].rate_limit":          haproxyNotWritten,
-	"routes[].rate_limit.requests": haproxyNotWritten,
-	"routes[].rate_limit.per":      haproxyNotWritten,
-	"routes[].rate_limit.burst":    haproxyNotWritten,
-	"routes[].rate_limit.by":       haproxyNotWritten,
+	"routes[].retries":             haproxyRetries,
+	"routes[].rate_limit":          haproxyRateLimit,
+	"routes[].rate_limit.requests": {Level: Supported},
+	"routes[].rate_limit.per":      haproxyRatePer,
+	"routes[].rate_limit.burst":    haproxyRateBurst,
+	"routes[].rate_limit.by":       haproxyRateBy,
 
 	"rpc":                   {Level: Supported},
 	"rpc.methods":           {Level: Supported},
@@ -267,12 +362,14 @@ var haproxyTarget = Target{Name: "haproxy", Title: "HAProxy", Keys: map[string]S
 	"rpc.proto.roots":       {Level: Supported},
 	"rpc.proto.option":      {Level: Supported},
 
-	// Envoy logs every request with no log key; HAProxy logs none, which lets nothing more through, but is a
-	// difference.
-	"log": {Level: Refused,
-		Note: "not written by this version's HAProxy generator, and without it HAProxy logs no request, where the Envoy output logs every request; render it for envoy"},
-	"log.status_from": haproxyNotWritten,
-	"log.sample":      haproxyNotWritten,
+	// Every file logs every request of the public listener on standard output, as the Envoy output does with no log key,
+	// in a log-format of HAProxy's own fields that leaves out what defaults.md promises no line holds; with log,
+	// http-after-response set-log-level silent drops a request below status_from that its draw of rand(100) does not
+	// keep (the manual, set-log-level and rand).
+	"log": {Level: Partial,
+		Note: "HAProxy's own log-format on standard output, one line a request of HAProxy's own fields: the date, the frontend, the backend and server, the timers, the status, the bytes each way, the termination state, the method, the HTTP version and the request id, quoted, where the Envoy output writes a JSON line of its own fields; a request below status_from is logged by its sample alone, where the Envoy output also logs each one with a response flag"},
+	"log.status_from": {Level: Supported},
+	"log.sample":      {Level: Partial, Note: "drawn for each request with HAProxy's own rand, where the Envoy output chooses by the request id"},
 
 	"tracing":                                     haproxyNoTracing,
 	"tracing.provider":                            haproxyNoTracing,

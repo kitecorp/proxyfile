@@ -1,4 +1,1 @@
 examples/partial/yaml/proxyfile.yaml:6:3: "timeouts.request" a time is refused by --target haproxy: HAProxy has no limit on a whole request (timeout server is the time without data, timeouts.idle); write timeouts.request: none
-examples/partial/yaml/proxyfile.yaml:26:1: "log" is refused by --target haproxy: not written by this version's HAProxy generator, and without it HAProxy logs no request, where the Envoy output logs every request; render it for envoy
-examples/partial/yaml/proxyfile.yaml:26:7: "log.status_from" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy
-examples/partial/yaml/proxyfile.yaml:26:25: "log.sample" is refused by --target haproxy: not written by this version's HAProxy generator; render it for envoy

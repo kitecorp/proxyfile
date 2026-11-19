@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=../../schema/proxyfile.schema.json
+# The conformance battery's file of the keys HAProxy writes with its own directives: header limits of 96 KiB and 150
+# lines, an idle time of 2 s, retries on the shop route, an rpc entry without retries, which HAProxy refuses, a rate
+# limit of 30 requests a second for each client on the catalog route, a service hashed by x-session-id and one with
+# health checks every second, both at shop's two addresses, and a log of every answer of 400 or more. HAProxy runs
+# each key's main rows alone on it (haproxyMainRows). Envoy runs it too, so each row's literal on it is Envoy's.
+listen: 10000
+admin: 9901
+client_address: connection
+limits:
+  request_headers: {size: 96KiB, count: 150}
+timeouts:
+  idle: 2s
+services:
+  shop: {http: 8080, grpc: 8081, addresses: ["10.0.1.11", "10.0.1.12"]}
+  catalog: {http: 8090, address: "10.0.2.21"}
+  sessions: {http: 8080, addresses: ["10.0.1.11", "10.0.1.12"], balance: hash, hash: {header: x-session-id}}
+  checked:
+    http: 8080
+    addresses: ["10.0.1.11", "10.0.1.12"]
+    health: {path: /healthz, interval: 1s, timeout: 500ms, healthy: 2, unhealthy: 2}
+origins:
+  local:
+    hosts: [127.0.0.1, localhost]
+    origins: []
+routes:
+  - rpc:
+      to:
+        example.shop.*: {service: shop, name: shop}
+  - {name: catalog, prefix: /catalog/, to: catalog, rate_limit: {requests: 30, per: 1s, burst: 0, by: client}}
+  - {name: sessions, prefix: /sessions/, to: sessions}
+  - {name: checked, prefix: /checked/, to: checked}
+  - {name: shop, prefix: /, to: shop, retries: 1}
+log: {status_from: 400, sample: 0%}
+rpc:
+  methods:
+    - {service: example.shop.v1.CartService, method: GetCart}

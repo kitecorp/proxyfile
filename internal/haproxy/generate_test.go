@@ -2,6 +2,7 @@ package haproxy_test
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -129,10 +130,18 @@ func beforeApp(route string, lines ...string) string {
 
 const batteryFile = "../../conformance/testdata/haproxy.yaml"
 
+// update rewrites testdata/haproxy-file.cfg from the generator's output for the battery's proxyfile:
+// go test ./internal/haproxy -run TestBatteryFile -update
+var update = flag.Bool("update", false, "rewrite testdata/haproxy-file.cfg from the battery's proxyfile")
+
 // The battery's file gives the configuration the conformance battery passed on HAProxy 3.2 and 3.4, byte for byte,
-// and the same bytes every time.
+// and the same bytes every time. The file is the generator's output, which -update writes, committed so a change to
+// the generator shows in a pull request as a change to the whole configuration.
 func TestBatteryFile(t *testing.T) {
 	proxyfile := string(testsupport.ReadFile(t, batteryFile))
+	if *update {
+		testsupport.WriteFile(t, "testdata/haproxy-file.cfg", generate(t, proxyfile))
+	}
 	want := string(testsupport.ReadFile(t, "testdata/haproxy-file.cfg"))
 	first := generate(t, proxyfile)
 	if difference := testsupport.FirstDifferenceMessage(first, want); difference != "" {
@@ -603,12 +612,7 @@ func TestForms(t *testing.T) {
 			"",
 		}
 	}
-	cases := []struct {
-		name      string
-		proxyfile string
-		want      [][]string
-		none      []string // no line holds any of these
-	}{
+	cases := []form{
 		{name: "minimal", proxyfile: small(),
 			want: [][]string{
 				{"  bind :8000"},
@@ -872,6 +876,22 @@ func TestForms(t *testing.T) {
 			})},
 			none: []string{"use_backend", "set-var(txn.route)"}},
 	}
+	runForms(t, cases)
+}
+
+// form is one row of a test of the configuration's lines: the proxyfile, the blocks of whole lines the configuration
+// holds in their order (FirstMissingBlock), and texts no line holds.
+type form struct {
+	name      string
+	proxyfile string
+	want      [][]string
+	none      []string // no line holds any of these
+}
+
+// runForms runs each row as a subtest: the configuration Generate writes for its proxyfile holds the row's blocks, in
+// their order, and no line holds a text of none.
+func runForms(t *testing.T, cases []form) {
+	t.Helper()
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			out := generate(t, c.proxyfile)
@@ -1133,30 +1153,45 @@ func TestRefusedForms(t *testing.T) {
 	cases := []struct {
 		name, proxyfile, want string
 	}{
-		{"an address naming a host", smallFile.Replaced(3, 3, "  app: {http: 3000, address: app.internal}"),
-			`haproxy: service app: address "app.internal" is not an IP address`},
 		{"a whole request's time", small("timeouts: {request: 30s}"),
 			"haproxy: timeouts.request as a time is not written in this version"},
+		// HTTP/2 needs a buffer of 16,384 bytes, of which HAProxy keeps 1,024 for rewrites; tune.http.maxhdr takes at most
+		// 32,767 lines, the request line among them; and HAProxy's timers hold at most 2147483647 ms.
+		{"a header block below 15KiB", small("limits: {request_headers: {size: 14KiB, count: 100}}"),
+			"haproxy: limits.request_headers.size below 15KiB is not written in this version"},
+		{"more than 32766 header fields", small("limits: {request_headers: {size: 96KiB, count: 32767}}"),
+			"haproxy: limits.request_headers.count 32767 is not written in this version"},
+		{"an idle time above 2147483647 ms", small("timeouts: {idle: 2147484s}"),
+			"haproxy: timeouts.idle above 2147483647ms is not written in this version"},
+		{"a health interval above 2147483647 ms", smallFile.Replaced(3, 3, "  app: {http: 3000, health: {path: /healthz, interval: 2147484s}}"),
+			"haproxy: service app: health.interval above 2147483647ms is not written in this version"},
+		// A timeout is shorter than its interval, so a timeout past the bound comes with an interval past it.
+		{"a health timeout above 2147483647 ms", smallFile.Replaced(3, 3, "  app: {http: 3000, health: {path: /healthz, interval: 2147485s, timeout: 2147484s}}"),
+			strings.Join([]string{
+				"haproxy: service app: health.interval above 2147483647ms is not written in this version",
+				"haproxy: service app: health.timeout above 2147483647ms is not written in this version",
+			}, "\n")},
+		// set-retries takes 0 to 100.
+		{"more than 100 retries", smallFile.Replaced(7, 7, "  - {name: app, prefix: /, to: app, retries: 101}"),
+			`haproxy: route "app": retries 101 is not written in this version`},
+		// With retry-on at its default, conn-failure, HAProxy 3.2.26 and 3.4.7 did not send a gRPC call again after its
+		// connection to the service failed, with the lines a route's retries writes in the gRPC backend.
+		{"retries of an RPC call", rpcFile.String(), "haproxy: the rpc entry: retries is not written in this version"},
+		// HAProxy's rate counts the requests of a period and has no burst, and a stick table's period is a timer.
+		{"a burst above 0", smallFile.Replaced(7, 7, "  - {name: app, prefix: /, to: app, rate_limit: {requests: 30, per: 1s, burst: 1}}"),
+			`haproxy: route "app": rate_limit.burst 1 is not written in this version`},
+		{"a burst above 0 on the rpc entry", rpcFile.Replaced(9, 9, `  - rpc: {rate_limit: {requests: 30, per: 1s, burst: 2}, to: {"example.shop.*": shop, "*": cart}}`),
+			"haproxy: the rpc entry: rate_limit.burst 2 is not written in this version"},
+		{"a period above 2147483647 ms", smallFile.Replaced(7, 7, "  - {name: app, prefix: /, to: app, rate_limit: {requests: 30, per: 2147484s}}"),
+			`haproxy: route "app": rate_limit.per above 2147483647ms is not written in this version`},
 		{"every other key of the full example this version does not write",
 			string(testsupport.ReadFile(t, "../../examples/full/yaml/proxyfile.yaml")),
 			strings.Join([]string{
-				"haproxy: limits.connections is not written in this version",
-				"haproxy: limits.request_headers is not written in this version",
-				"haproxy: timeouts.idle is not written in this version",
-				"haproxy: timeouts.upstream_idle is not written in this version",
-				"haproxy: dns.resolver is not written in this version",
 				"haproxy: auth.jwt is not written in this version",
-				"haproxy: log is not written in this version",
 				"haproxy: tracing is not written in this version",
-				"haproxy: service shop: balance least_requests is not written in this version",
-				"haproxy: service shop: health is not written in this version",
-				`haproxy: service catalog: address "catalog.internal.example" is not an IP address`,
-				"haproxy: service catalog: balance hash is not written in this version",
-				"haproxy: service catalog: hash is not written in this version",
+				"haproxy: service shop: health.grpc is not written in this version",
 				"haproxy: the rpc entry: retries is not written in this version",
-				"haproxy: the rpc entry: rate_limit is not written in this version",
-				`haproxy: route "catalog": rate_limit is not written in this version`,
-				`haproxy: route "shop": retries is not written in this version`,
+				`haproxy: route "catalog": rate_limit.burst 10 is not written in this version`,
 			}, "\n")},
 		// Envoy 1.40.2 removes Content-Length under a prefix and sends the body chunked, which HAProxy cannot write: with
 		// the header removed it sent content-length: 0 and lost the body. Under a prefix that covers Connection or Upgrade
@@ -1195,4 +1230,356 @@ func TestRefusedForms(t *testing.T) {
 			}
 		})
 	}
+}
+
+// limits and the idle timeouts, each written with HAProxy's own directive and the file's value: timeout client and
+// timeout server for the idle time, the shorter of it and the one written without the key on the server's side;
+// maxconn on the listener and on each server line of a service; tune.bufsize, the size and the 1,024 bytes HAProxy keeps
+// for rewrites; and tune.http.maxhdr, the count and one for the request line, which the HTTP/2 count of the fields
+// follows. upstream_idle writes no line: each connection to a service carries one request.
+func TestTimeoutsAndLimits(t *testing.T) {
+	runForms(t, []form{
+		{name: "an idle time shorter than 15 s on both sides", proxyfile: small("timeouts: {idle: 2s}"),
+			want: [][]string{{"  timeout connect 5s", "  timeout client 2s", "  timeout server 2s"}}},
+		{name: "an idle time in milliseconds", proxyfile: small("timeouts: {idle: 1500ms}"),
+			want: [][]string{{"  timeout connect 5s", "  timeout client 1500ms", "  timeout server 1500ms"}}},
+		{name: "an idle time longer than 15 s without timeouts.request", proxyfile: small("timeouts: {idle: 90s}"),
+			want: [][]string{{"  timeout connect 5s", "  timeout client 90s", "  timeout server 15s"}}},
+		{name: "an idle time longer than 5 minutes with timeouts.request none", proxyfile: small("timeouts: {request: none, idle: 600s}"),
+			want: [][]string{{"  timeout connect 5s", "  timeout client 600s", "  timeout server 300s"}}},
+		{name: "no idle time", proxyfile: small("timeouts: {idle: none}"),
+			want: [][]string{{"  timeout connect 5s", "  timeout client 2147483647ms", "  timeout server 15s"}}},
+		{name: "upstream_idle writes no line", proxyfile: small("timeouts: {upstream_idle: 45s}"),
+			want: [][]string{{"  timeout connect 5s", "  timeout client 300s", "  timeout server 15s"}},
+			none: []string{"pool-purge-delay", "45s", "http-reuse"}},
+		{name: "connections on the listener and on each server of a service", proxyfile: small("limits: {connections: 4096}"),
+			want: [][]string{
+				slices.Concat([]string{"frontend public"}, requestLog, []string{"  bind :8000", "  maxconn 4096"}),
+				{"backend app_http", "  server app1 127.0.0.1:3000 maxconn 4096"},
+			},
+			none: []string{"global maxconn", "timeout queue"}},
+		{name: "connections on each server of the check service", proxyfile: small("limits: {connections: 4096}",
+			"auth: {ask: app /check, timeout: 1s, enabled: true, when_unavailable: deny}"),
+			want: [][]string{
+				slices.Concat([]string{"frontend public"}, requestLog, []string{"  bind :8000", "  maxconn 4096"}),
+				{"backend app_http", "  server app1 127.0.0.1:3000 maxconn 4096"},
+				{"listen check", "  bind abns@proxyfile-8000-check", "  timeout connect 1000ms", "  timeout client 1000ms",
+					"  timeout server 1000ms", "  retries 0", "  option nolinger", "  server app1 127.0.0.1:3000 maxconn 4096"},
+			}},
+		{name: "no connection limit without the key", proxyfile: small(), none: []string{"maxconn"}},
+		{name: "a header block of 96KiB", proxyfile: small("limits: {request_headers: {size: 96KiB, count: 100}}"),
+			want: [][]string{{"  tune.http.maxhdr 101", "  tune.bufsize 99328"}}},
+		{name: "the smallest header block HAProxy takes", proxyfile: small("limits: {request_headers: {size: 15KiB, count: 100}}"),
+			want: [][]string{{"  tune.http.maxhdr 101", "  tune.bufsize 16384"}}},
+		{name: "150 header fields", proxyfile: small("limits: {request_headers: {size: 96KiB, count: 150}}"),
+			want: [][]string{
+				{"  tune.http.maxhdr 151", "  tune.bufsize 99328"},
+				{"  http-request return status 400 if { req.ver 2.0 } { req.fhdr_cnt,add(txn.cookies) ge 148 }"},
+			},
+			none: []string{"tune.http.maxhdr 101", "ge 98"}},
+		{name: "100 header fields and HAProxy's own buffer without the key", proxyfile: small(),
+			want: [][]string{
+				{"  tune.http.maxhdr 101"},
+				{"  http-request return status 400 if { req.ver 2.0 } { req.fhdr_cnt,add(txn.cookies) ge 98 }"},
+			},
+			none: []string{"tune.bufsize"}},
+	})
+}
+
+// A service found by a DNS name is HAProxy's own server-template, looked up through HAProxy's own resolvers: the name
+// server dns.resolver names, its address written as net.JoinHostPort writes it, or the host's resolv.conf without it.
+// Each server of the template starts down with no address (init-addr none) until the resolvers answer. A file whose
+// every address is an IP address writes no resolvers section.
+func TestNamesByDNS(t *testing.T) {
+	named := smallFile.Replaced(3, 3, "  app: {http: 3000, address: app.internal}")
+	runForms(t, []form{
+		{name: "the name server dns.resolver names", proxyfile: named + `dns: {resolver: "10.0.0.2:53"}` + "\n",
+			want: [][]string{
+				{"resolvers proxyfile", "  nameserver ns1 10.0.0.2:53", "  accepted_payload_size 4096"},
+				{"backend app_http", "  server-template app 1-100 app.internal:3000 resolvers proxyfile init-addr none"},
+			}},
+		{name: "an IPv6 name server with a port", proxyfile: named + `dns: {resolver: "[fd00::53]:5353"}` + "\n",
+			want: [][]string{{"resolvers proxyfile", "  nameserver ns1 [fd00::53]:5353"}}},
+		{name: "a name server with no port", proxyfile: named + `dns: {resolver: "10.0.0.2"}` + "\n",
+			want: [][]string{{"resolvers proxyfile", "  nameserver ns1 10.0.0.2:53"}}},
+		{name: "the host's resolv.conf without dns.resolver", proxyfile: named,
+			want: [][]string{
+				{"resolvers proxyfile", "  parse-resolv-conf", "  accepted_payload_size 4096"},
+				{"backend app_http", "  server-template app 1-100 app.internal:3000 resolvers proxyfile init-addr none"},
+			},
+			none: []string{"nameserver"}},
+		{name: "a gRPC port", proxyfile: smallFile.Replaced(3, 3, "  app: {http: 3000, grpc: 3001, address: app.internal}"),
+			want: [][]string{
+				{"backend app_http", "  server-template app 1-100 app.internal:3000 resolvers proxyfile init-addr none"},
+				{"backend app_grpc", "  server-template app 1-100 app.internal:3001 resolvers proxyfile init-addr none proto h2 max-reuse 0"},
+			}},
+		{name: "a connection limit", proxyfile: named + "limits: {connections: 4096}\n",
+			want: [][]string{{"backend app_http", "  server-template app 1-100 app.internal:3000 resolvers proxyfile init-addr none maxconn 4096"}}},
+		{name: "the check service by name", proxyfile: named + "auth: {ask: app /check, timeout: 1s, enabled: true, when_unavailable: deny}\n",
+			want: [][]string{
+				{"backend app_http", "  server-template app 1-100 app.internal:3000 resolvers proxyfile init-addr none"},
+				{"listen check", "  bind abns@proxyfile-8000-check", "  timeout connect 1000ms", "  timeout client 1000ms",
+					"  timeout server 1000ms", "  retries 0", "  option nolinger",
+					"  server-template app 1-100 app.internal:3000 resolvers proxyfile init-addr none"},
+			}},
+		{name: "a service by name beside one by address", proxyfile: smallFile.Replaced(3, 3, "  app: {http: 3000, address: app.internal}",
+			"  other: {http: 4000, address: 10.0.0.7}"),
+			want: [][]string{
+				{"backend app_http", "  server-template app 1-100 app.internal:3000 resolvers proxyfile init-addr none"},
+				{"backend other_http", "  server other1 10.0.0.7:4000"},
+			}},
+		{name: "no name, no resolvers section", proxyfile: small(`dns: {resolver: "10.0.0.2:53"}`),
+			want: [][]string{{"backend app_http", "  server app1 127.0.0.1:3000"}},
+			none: []string{"resolvers", "nameserver", "parse-resolv-conf", "server-template"}},
+	})
+}
+
+// balance and hash are HAProxy's own balance in each backend of the service: round_robin is roundrobin, HAProxy's
+// default, which needs no line; least_requests leastconn; random random(1), one draw; a header's hash hdr(<name>); and
+// the client's address source under connection, or a hash of the last X-Forwarded-For address under forwarded. None
+// writes hash-type, so the hash is HAProxy's default, map-based. The check relay of the service auth.ask names, a TCP
+// section whose one client is HAProxy itself, takes leastconn and random(1) alone and goes round robin for a hash.
+func TestBalance(t *testing.T) {
+	service := func(fields string) string {
+		return smallFile.Replaced(3, 3, "  app: {http: 3000, grpc: 3001, addresses: [\"10.0.0.1\", \"10.0.0.2\"], "+fields+"}")
+	}
+	checked := func(fields string) string {
+		return service(fields) + "auth: {ask: app /check, timeout: 1s, enabled: true, when_unavailable: deny}\n"
+	}
+	both := func(line string) [][]string {
+		return [][]string{
+			{"backend app_http", line, "  server app1 10.0.0.1:3000", "  server app2 10.0.0.2:3000"},
+			{"backend app_grpc", line, "  server app1 10.0.0.1:3001 proto h2 max-reuse 0", "  server app2 10.0.0.2:3001 proto h2 max-reuse 0"},
+		}
+	}
+	relay := func(line string) []string {
+		block := []string{"listen check", "  bind abns@proxyfile-8000-check", "  timeout connect 1000ms", "  timeout client 1000ms",
+			"  timeout server 1000ms", "  retries 0", "  option nolinger"}
+		if line != "" {
+			block = append(block, line)
+		}
+		return append(block, "  server app1 10.0.0.1:3000", "  server app2 10.0.0.2:3000")
+	}
+	runForms(t, []form{
+		{name: "round_robin, HAProxy's default", proxyfile: service("balance: round_robin"),
+			want: [][]string{{"backend app_http", "  server app1 10.0.0.1:3000"}}, none: []string{"balance", "hash-type"}},
+		{name: "least_requests", proxyfile: service("balance: least_requests"), want: both("  balance leastconn"), none: []string{"hash-type"}},
+		{name: "random", proxyfile: service("balance: random"), want: both("  balance random(1)"), none: []string{"hash-type"}},
+		{name: "a header's hash", proxyfile: service("balance: hash, hash: {header: x-session-id}"), want: both("  balance hdr(x-session-id)"),
+			none: []string{"hash-type"}},
+		{name: "the client's address under connection", proxyfile: service("balance: hash, hash: {client: true}") + "client_address: connection\n",
+			want: both("  balance source"), none: []string{"hash-type"}},
+		{name: "the client's address under forwarded", proxyfile: service("balance: hash, hash: {client: true}"),
+			want: both("  balance hash req.hdr_ip(x-forwarded-for,-1)"), none: []string{"hash-type", "balance source"}},
+		{name: "least_requests on the check relay", proxyfile: checked("balance: least_requests"),
+			want: [][]string{relay("  balance leastconn")}},
+		{name: "random on the check relay", proxyfile: checked("balance: random"), want: [][]string{relay("  balance random(1)")}},
+		{name: "a header's hash leaves the check relay round robin", proxyfile: checked("balance: hash, hash: {header: x-session-id}"),
+			want: [][]string{relay("")}},
+		{name: "the client's address leaves the check relay round robin", proxyfile: checked("balance: hash, hash: {client: true}") + "client_address: connection\n",
+			want: [][]string{relay("")}},
+	})
+}
+
+// health.path is HAProxy's own HTTP check in the service's http backend: option httpchk with the path, quoted,
+// http-check expect for a 2xx, timeout check for health.timeout and check inter fall rise on each server for
+// health.interval, health.unhealthy and health.healthy. The gRPC backend of a service at IP addresses tracks each
+// server of the http one; a server-template tracks no server, as HAProxy 3.2.26 and 3.4.7 looked for one named as the
+// template's prefix and refused the file, so the gRPC side of a service found by a DNS name keeps every backend. The
+// check relay of the service auth.ask names checks its servers as the http backend does. No line holds init-state, so
+// a server is in the pool from HAProxy's start until it fails its checks.
+func TestHealthChecks(t *testing.T) {
+	health := func(service string) string { return smallFile.Replaced(3, 3, "  app: {"+service+"}") }
+	checkLines := []string{"  option httpchk GET '/healthz'", "  http-check expect status 200-299", "  timeout check 2s"}
+	runForms(t, []form{
+		{name: "a path, with the default times and counts", proxyfile: health("http: 3000, health: {path: /healthz}"),
+			want: [][]string{slices.Concat([]string{"backend app_http"}, checkLines, []string{"  server app1 127.0.0.1:3000 check inter 5s fall 3 rise 2"})},
+			none: []string{"init-state"}},
+		{name: "written times and counts", proxyfile: health("http: 3000, health: {path: /healthz, interval: 10s, timeout: 1500ms, healthy: 4, unhealthy: 5}"),
+			want: [][]string{{"backend app_http", "  option httpchk GET '/healthz'", "  http-check expect status 200-299", "  timeout check 1500ms",
+				"  server app1 127.0.0.1:3000 check inter 10s fall 5 rise 4"}}},
+		// A timeout is shorter than its interval, so the longest is a millisecond under HAProxy's longest timer.
+		{name: "the longest interval and timeout HAProxy's timers hold", proxyfile: health("http: 3000, health: {path: /healthz, interval: 2147483647ms, timeout: 2147483646ms}"),
+			want: [][]string{{"backend app_http", "  option httpchk GET '/healthz'", "  http-check expect status 200-299", "  timeout check 2147483646ms",
+				"  server app1 127.0.0.1:3000 check inter 2147483647ms fall 3 rise 2"}}},
+		{name: "two addresses and a gRPC port tracked", proxyfile: health(`http: 3000, grpc: 3001, addresses: ["10.0.0.1", "10.0.0.2"], health: {path: /healthz}`),
+			want: [][]string{
+				slices.Concat([]string{"backend app_http"}, checkLines, []string{"  server app1 10.0.0.1:3000 check inter 5s fall 3 rise 2",
+					"  server app2 10.0.0.2:3000 check inter 5s fall 3 rise 2"}),
+				{"backend app_grpc", "  server app1 10.0.0.1:3001 proto h2 max-reuse 0 track app_http/app1",
+					"  server app2 10.0.0.2:3001 proto h2 max-reuse 0 track app_http/app2"},
+			}},
+		{name: "a host_header, a balance and a connection limit", proxyfile: health("http: 3000, host_header: api.internal, balance: least_requests, health: {path: /healthz}") +
+			"limits: {connections: 4096}\n",
+			want: [][]string{{"backend app_http", "  balance leastconn", "  option httpchk GET '/healthz'", "  http-check expect status 200-299",
+				"  timeout check 2s", "  http-request set-header host 'api.internal'", "  server app1 127.0.0.1:3000 maxconn 4096 check inter 5s fall 3 rise 2"}}},
+		{name: "a service found by a DNS name", proxyfile: health("http: 3000, grpc: 3001, address: app.internal, health: {path: /healthz}"),
+			want: [][]string{
+				slices.Concat([]string{"backend app_http"}, checkLines,
+					[]string{"  server-template app 1-100 app.internal:3000 resolvers proxyfile init-addr none check inter 5s fall 3 rise 2"}),
+				{"backend app_grpc", "  server-template app 1-100 app.internal:3001 resolvers proxyfile init-addr none proto h2 max-reuse 0"},
+			},
+			none: []string{"track"}},
+		{name: "the check relay", proxyfile: health("http: 3000, health: {path: /healthz}") +
+			"auth: {ask: app /check, timeout: 1s, enabled: true, when_unavailable: deny}\n",
+			want: [][]string{
+				slices.Concat([]string{"backend app_http"}, checkLines, []string{"  server app1 127.0.0.1:3000 check inter 5s fall 3 rise 2"}),
+				slices.Concat([]string{"listen check", "  bind abns@proxyfile-8000-check", "  timeout connect 1000ms", "  timeout client 1000ms",
+					"  timeout server 1000ms", "  retries 0", "  option nolinger"}, checkLines,
+					[]string{"  server app1 127.0.0.1:3000 check inter 5s fall 3 rise 2"}),
+			}},
+		{name: "a path that holds a quote", proxyfile: health(`http: 3000, health: {path: "/it's"}`),
+			want: [][]string{{"backend app_http", `  option httpchk GET '/it'\''s'`}}},
+		{name: "no health", proxyfile: small(), none: []string{"httpchk", "http-check", "timeout check", "check inter", "track"}},
+	})
+}
+
+// rpcFile is a file whose rpc entry, line 9, reaches two gRPC services, so it gives routes 1 (cart) and 2 (shop), and
+// whose route app, line 10, is route 3.
+var rpcFile = testsupport.Document{
+	"listen: 8000",
+	"services:",
+	"  app: {http: 3000, address: 127.0.0.1}",
+	"  cart: {grpc: 3001, address: 127.0.0.1}",
+	"  shop: {grpc: 3002, address: 127.0.0.1}",
+	"origins:",
+	"  all: {hosts: [localhost]}",
+	"routes:",
+	`  - rpc: {retries: 2, to: {"example.shop.*": shop, "*": cart}}`,
+	"  - {name: app, prefix: /, to: app}",
+	"rpc:",
+	"  methods:",
+	"    - {service: example.cart.v1.CartService, method: GetCart}",
+	"    - {service: example.shop.v1.ShopService, method: GetShop}",
+}
+
+// retries is HAProxy's own retries, set for each request by its route in each backend a retried route reaches
+// (http-request set-retries) beside option redispatch, which sends the last try to another server: defaults keeps
+// retries 0 for every other route, and retry-on stays at HAProxy's default, conn-failure.
+func TestRetries(t *testing.T) {
+	runForms(t, []form{
+		{name: "a retried route", proxyfile: smallFile.Replaced(7, 7, "  - {name: app, prefix: /, to: app, retries: 1}"),
+			want: [][]string{
+				{"defaults", "  mode http", "  retries 0"},
+				{"backend app_http", "  option redispatch", "  http-request set-retries 1 if { var(txn.route) -m str 1 }",
+					"  server app1 127.0.0.1:3000"},
+			},
+			none: []string{"  retry-on"}},
+		{name: "two retried routes to one service", proxyfile: smallFile.Replaced(7, 7, "  - {name: a, prefix: /a/, to: app, retries: 2}",
+			"  - {name: app, prefix: /, to: app, retries: 1}"),
+			want: [][]string{{"backend app_http", "  option redispatch", "  http-request set-retries 2 if { var(txn.route) -m str 1 }",
+				"  http-request set-retries 1 if { var(txn.route) -m str 2 }", "  server app1 127.0.0.1:3000"}}},
+		{name: "a route without retries beside a retried one", proxyfile: smallFile.Replaced(3, 7, "  app: {http: 3000}",
+			"  other: {http: 4000}", "origins:", "  all: {hosts: [localhost]}", "routes:", "  - {name: other, prefix: /o/, to: other, retries: 0}",
+			"  - {name: app, prefix: /, to: app, retries: 100}"),
+			want: [][]string{
+				{"backend app_http", "  option redispatch", "  http-request set-retries 100 if { var(txn.route) -m str 2 }",
+					"  server app1 127.0.0.1:3000"},
+				{"backend other_http", "  server other1 127.0.0.1:4000"},
+			}},
+
+		{name: "no retries", proxyfile: small(), none: []string{"redispatch", "set-retries"}},
+	})
+}
+
+// rate_limit is HAProxy's own stick table, one for each limited entry of the routes, named by its first route: it counts
+// the requests of each of its routes over per (http_req_rate), each client on its own or every client as one, and a
+// request past requests is denied with HAProxy's own 429. The lines come after the route is picked and the origin
+// admitted, and before the auth check.
+func TestRateLimits(t *testing.T) {
+	const (
+		check   = "auth: {ask: app /check, timeout: 1s, enabled: true, when_unavailable: deny}"
+		comment = "  # rate limits: each limited route's requests, counted in its stick table over its period, refused with 429 past the limit"
+		route   = "  http-request set-var(txn.route) str(1) if !{ var(txn.route) -m found } { path_beg '/' }"
+	)
+	limited := func(limit string, lines ...string) string {
+		return smallFile.Replaced(7, 7, slices.Concat([]string{"  - {name: app, prefix: /, to: app, rate_limit: " + limit + "}"}, lines)...)
+	}
+	runForms(t, []form{
+		{name: "a route limited by the client, the connection's peer", proxyfile: limited("{requests: 30, per: 1s}", "client_address: connection", check),
+			want: [][]string{
+				{route},
+				{comment,
+					"  http-request track-sc0 src,ipmask(32,64) table proxyfile_rate1 if { var(txn.route) -m str 1 }",
+					"  http-request deny deny_status 429 if { var(txn.route) -m str 1 } { sc_http_req_rate(0) gt 30 }",
+					"  # the auth check"},
+				{"  server app1 127.0.0.1:3000", "", "backend proxyfile_rate1", "  stick-table type ipv6 size 100k store http_req_rate(1s)"},
+			}},
+		{name: "a period of a minute and a burst of 0", proxyfile: limited("{requests: 5, per: 1m, burst: 0}", "client_address: connection"),
+			want: [][]string{
+				{comment,
+					"  http-request track-sc0 src,ipmask(32,64) table proxyfile_rate1 if { var(txn.route) -m str 1 }",
+					"  http-request deny deny_status 429 if { var(txn.route) -m str 1 } { sc_http_req_rate(0) gt 5 }"},
+				{"backend proxyfile_rate1", "  stick-table type ipv6 size 100k store http_req_rate(60s)"},
+			}},
+		{name: "every client counted as one", proxyfile: limited("{requests: 30, per: 1s, by: all}"),
+			want: [][]string{
+				{comment,
+					"  http-request track-sc0 int(1) table proxyfile_rate1 if { var(txn.route) -m str 1 }",
+					"  http-request deny deny_status 429 if { var(txn.route) -m str 1 } { sc_http_req_rate(0) gt 30 }"},
+				{"backend proxyfile_rate1", "  stick-table type integer size 1 store http_req_rate(1s)"},
+			},
+			none: []string{"req.hdr_ip"}},
+		{name: "the client under forwarded, the last X-Forwarded-For address or the peer", proxyfile: limited("{requests: 30, per: 1s}", check),
+			want: [][]string{
+				{route},
+				{comment,
+					"  http-request track-sc0 req.hdr_ip(x-forwarded-for,-1),ipmask(32,64) table proxyfile_rate1 if { var(txn.route) -m str 1 } { req.hdr_ip(x-forwarded-for,-1) -m found }",
+					"  http-request track-sc0 src,ipmask(32,64) table proxyfile_rate1 if { var(txn.route) -m str 1 } !{ req.hdr_ip(x-forwarded-for,-1) -m found }",
+					"  http-request deny deny_status 429 if { var(txn.route) -m str 1 } { sc_http_req_rate(0) gt 30 }",
+					"  # the auth check"},
+			}},
+		{name: "the rpc entry's one table for each of its routes, beside a route's own",
+			proxyfile: rpcFile.Replaced(9, 10, `  - rpc: {rate_limit: {requests: 100, per: 1s, by: all}, to: {"example.shop.*": shop, "*": cart}}`,
+				"  - {name: app, prefix: /, to: app, rate_limit: {requests: 5, per: 1m}}"),
+			want: [][]string{
+				{comment,
+					"  http-request track-sc0 int(1) table proxyfile_rate1 if { var(txn.route) -m str 1 }",
+					"  http-request deny deny_status 429 if { var(txn.route) -m str 1 } { sc_http_req_rate(0) gt 100 }",
+					"  http-request track-sc0 int(1) table proxyfile_rate1 if { var(txn.route) -m str 2 }",
+					"  http-request deny deny_status 429 if { var(txn.route) -m str 2 } { sc_http_req_rate(0) gt 100 }",
+					"  http-request track-sc0 req.hdr_ip(x-forwarded-for,-1),ipmask(32,64) table proxyfile_rate3 if { var(txn.route) -m str 3 } { req.hdr_ip(x-forwarded-for,-1) -m found }",
+					"  http-request track-sc0 src,ipmask(32,64) table proxyfile_rate3 if { var(txn.route) -m str 3 } !{ req.hdr_ip(x-forwarded-for,-1) -m found }",
+					"  http-request deny deny_status 429 if { var(txn.route) -m str 3 } { sc_http_req_rate(0) gt 5 }"},
+				{"backend proxyfile_rate1", "  stick-table type integer size 1 store http_req_rate(1s)", "",
+					"backend proxyfile_rate3", "  stick-table type ipv6 size 100k store http_req_rate(60s)"},
+			},
+			none: []string{"proxyfile_rate2"}},
+		{name: "no rate limit", proxyfile: small(), none: []string{"rate limits", "track-sc0", "stick-table", "sc_http_req_rate", "proxyfile_rate"}},
+	})
+}
+
+// requestLog is the request log every file writes first in the public frontend: HAProxy's own log line on standard
+// output, a log-format of HAProxy's own fields that holds no path, query, client address, user agent or referrer, with
+// the request id quoted and escaped, as a client may write it, and an error-log-format of the same fields and HAProxy's
+// error for a connection that fails before its request and a request HAProxy's parser refuses, whose default line
+// holds the client's address.
+var requestLog = []string{
+	"  # the request log on standard output, a line of HAProxy's own fields: no path, query, client address, user agent or referrer",
+	"  log stdout format raw daemon",
+	`  log-format "[%tr] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %U %tsc %HM %HV %{+Q,+E}[var(txn.request_id)]"`,
+	`  error-log-format "[%tr] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %U %tsc %HM %HV %{+Q,+E}[var(txn.request_id)] %[fc_err_str]"`,
+}
+
+// The request log is written in every file for the public listener alone (requestLog). log silences, after every other
+// answer rule, a request below status_from that its draw of rand(100) does not keep.
+func TestRequestLog(t *testing.T) {
+	const use = "  use_backend app_http if { var(txn.route) -m str 1 }"
+	runForms(t, []form{
+		{name: "every request of the public listener without log", proxyfile: small("admin: 9901", "auth: {ask: app /check, timeout: 1s, enabled: true, when_unavailable: deny}"),
+			want: [][]string{
+				slices.Concat([]string{"frontend admin", "  bind 127.0.0.1:9901", "  monitor-uri /ready", "  http-request return status 404", "",
+					"frontend public"}, requestLog, []string{"  bind :8000"}),
+				{"listen check", "  bind abns@proxyfile-8000-check", "  timeout connect 1000ms", "  timeout client 1000ms", "  timeout server 1000ms",
+					"  retries 0", "  option nolinger", "  server app1 127.0.0.1:3000", ""},
+			},
+			none: []string{"set-log-level"}},
+		{name: "a status from which every request is logged and a sample of the others", proxyfile: small("log: {status_from: 400, sample: 1%}"),
+			want: [][]string{
+				slices.Concat([]string{"frontend public"}, requestLog, []string{"  bind :8000"}),
+				{"  http-after-response set-log-level silent if { status lt 400 } !{ rand(100) lt 1 }", use},
+			}},
+		{name: "a sample of none", proxyfile: small("log: {status_from: 500, sample: 0%}"),
+			want: [][]string{{"  http-after-response set-log-level silent if { status lt 500 } !{ rand(100) lt 0 }", use}}},
+	})
 }

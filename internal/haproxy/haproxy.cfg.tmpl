@@ -17,10 +17,15 @@ global
   warned at every start (measured). */}}
   tune.lua.bool-sample-conversion normal
   lua-load-per-thread proxyfile.lua
-  {{- /* Envoy admits 100 request header lines and refuses 101. HAProxy counts the request line among its lines: with
-  100 here it refused 100 header lines, and with 101, its default, it served 100 and refused 101 (measured on HAProxy
-  3.2.26 and 3.4.7 beside Envoy 1.40.2). */}}
-  tune.http.maxhdr 101
+  {{- /* limits.request_headers.count, or Envoy's 100 without it, and one more: HAProxy counts the request line among
+  its lines, so with 100 here it refused 100 header lines, and with 101, its default, it served 100 and refused 101
+  (measured on HAProxy 3.2.26 and 3.4.7 beside Envoy 1.40.2). */}}
+  tune.http.maxhdr {{.MaxHeaders}}
+{{- with .BufSize}}
+  {{- /* limits.request_headers.size and the 1,024 bytes tune.maxrewrite keeps for rewrites: HAProxy answers 400 to a
+  request head larger than tune.bufsize less tune.maxrewrite (the configuration manual, tune.bufsize). */}}
+  tune.bufsize {{.}}
+{{- end}}
 {{- if .TLS}}
   {{- /* Without this line HAProxy 3.4.7 also accepted TLS 1.2 suites Envoy 1.40.2 refuses, such as AES128-SHA; with
   it, only the ECDHE AES-GCM and ChaCha20 suites, as Envoy (measured). */}}
@@ -32,8 +37,8 @@ global
 
 defaults
   mode http
-  {{- /* With no retries line HAProxy 3.4.7 tried a refused connection 3 more times (measured); Envoy's file retries
-  only where a route asks, which this version does not write. */}}
+  {{- /* With no retries line HAProxy 3.4.7 tried a refused connection 3 more times (measured), so a request is tried
+  again only on a route that writes retries, whose backend sets its count (http-request set-retries). */}}
   retries 0
   {{- /* HAProxy kept its connections to a service and, when the service closed one it reused before its answer, sent
   the request again on a new one: over HTTP/1.1 by closing the client's connection, which the client tried again, and
@@ -55,8 +60,9 @@ defaults
   output ends a request 15 s after it (a route's default timeout), which HAProxy cannot write for a whole answer: 15 s
   with no data from the service gives one that says nothing a 504 at the same time (measured), and lets an answer
   that keeps coming run past 15 s, the difference timeouts.request's declaration names. With timeouts.request: none
-  only the 5 minutes are left. */}}
-  timeout client 300s
+  only the 5 minutes are left. timeouts.idle is HAProxy's own time without data on each side in their place, on the
+  server's side when shorter (generate.go, timeouts). */}}
+  timeout client {{.ClientTimeout}}
   timeout server {{.ServerTimeout}}
   {{- /* Envoy sends the body of a request on and no trailer of it, where HAProxy passed a trailer to the service over
   HTTP/1.1 and HTTP/2 without this line (measured). */}}
@@ -74,6 +80,20 @@ defaults
 crt-store
   load crt {{.Certificate}} key {{.Key}} alias public
 {{- end}}
+{{- with .Resolvers}}
+{{- /* A service found by a DNS name is looked up here (generate.go, resolversView). */}}
+
+resolvers {{.Name}}
+{{- with .Nameserver}}
+  nameserver ns1 {{.}}
+{{- else}}
+  parse-resolv-conf
+{{- end}}
+  {{- /* HAProxy announces DNS answers of 512 bytes when not told otherwise, which held 30 IPv4 addresses of a name, and
+  a name whose answer did not fit gave the service no backend; 4096, the manual's value for UDP (accepted_payload_size),
+  held 99 to 100 of a name's 100 (measured on HAProxy 3.2.26 and 3.4.7). */}}
+  accepted_payload_size 4096
+{{- end}}
 {{- with .Admin}}
 
 frontend admin
@@ -83,7 +103,23 @@ frontend admin
 {{- end}}
 
 frontend public
+  # the request log on standard output, a line of HAProxy's own fields: no path, query, client address, user agent or referrer
+  {{- /* docs/defaults.md promises of every proxy that no log line holds a path, query, address, user agent or
+  referrer, so the line is a log-format of HAProxy's own fields rather than option httplog, whose line holds the client's
+  address and the request line. The request id is the client's own under forwarded, so it is written quoted and
+  escaped (+Q,+E), one field whatever it holds. A connection that fails before its request, such as a TLS handshake
+  that fails, and a request HAProxy's parser refuses are logged by error-log-format, whose default line holds the
+  client's address and port (the manual, error log format): it writes the same fields and HAProxy's error.
+  HAProxy reads these settings wherever the section writes them; with log, the rule that drops a request from the log
+  is the last answer rule (below). */}}
+  log stdout format raw daemon
+  log-format "[%tr] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %U %tsc %HM %HV %{+Q,+E}[var(txn.request_id)]"
+  error-log-format "[%tr] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %U %tsc %HM %HV %{+Q,+E}[var(txn.request_id)] %[fc_err_str]"
   bind :{{.Listen}}{{with .TLS}} ssl crt @/public alpn h2,http/1.1{{with .ClientsCA}} verify required ca-file {{.}}{{end}}{{end}}
+{{- with .MaxConn}}
+  {{- /* limits.connections: a connection past it waits in the listen queue (the configuration manual, maxconn). */}}
+  maxconn {{.}}
+{{- end}}
   # a control byte in a header value, refused before any other rule, as Envoy's parser refuses it
   {{- /* Envoy 1.40.2 answers 400 over HTTP/1, and closes the connection over HTTP/2, to a header value that holds a byte
   from 0x01 to 0x08, 0x0b, 0x0c, 0x0e to 0x1f or 0x7f, a header remove_from_clients names too, where HAProxy 3.2.26
@@ -141,9 +177,9 @@ frontend public
   http-request return status 400 if { req.hdrs -m reg '[ ][ ][ \t]' } || !{ req.hdrs -m found }
   {{- /* Over HTTP/2 Envoy admits 100 header fields with the 4 pseudo-headers of a request and refuses one more, where
   HAProxy writes :authority as one Host line, counted below, and joins every cookie field into one line, so each
-  cookie counts as a field. */}}
+  cookie counts as a field; limits.request_headers.count takes the place of the 100. */}}
   http-request set-var(txn.cookies) req.cook_cnt
-  http-request return status 400 if { req.ver 2.0 } { req.fhdr_cnt,add(txn.cookies) ge 98 }
+  http-request return status 400 if { req.ver 2.0 } { req.fhdr_cnt,add(txn.cookies) ge {{.FieldsRefused}} }
   {{- /* Envoy sends TE: trailers in any letter case when Connection names te, and HAProxy only as written in lower case.
   Envoy sends no Connection header on but a WebSocket upgrade's, nor Keep-Alive, and passes a service's Keep-Alive to
   no client, which HAProxy 3.2.26 and 3.4.7 passed on over HTTP/1.1 (measured): it speaks of the service's connection,
@@ -168,8 +204,9 @@ frontend public
   "wait-for-body") sends the 100 and removes the header for a request with a body (src/http_ana.c,
   http_handle_expect_hdr), and at-least 1 lets the request go on at its first byte, so nothing is held but the
   headers until the body starts: a 128 MiB upload with Expect took the time and memory one without it took. It
-  answers 408 after time, Envoy's stream idle timeout of 5 minutes, which timeout client 300s matches. A request with
-  no body gets no 100, which no client waits for, and its Expect is removed by the second line. */}}
+  answers 408 after time, 5 minutes, which is timeout client's when the file writes no timeouts.idle; with
+  timeouts.idle the wait stays 5 minutes, and a shorter idle time ends it first. A request with no body gets no 100,
+  which no client waits for, and its Expect is removed by the second line. */}}
   http-request wait-for-body time 300s at-least 1 if { req.hdr(expect) -i -m str 100-continue }
   http-request del-header expect if { req.hdr(expect) -i -m str 100-continue }
   # client_address: {{.ClientAddress}}
@@ -337,6 +374,23 @@ frontend public
 {{- end}}
   http-request return status 400 if { var(txn.request_id) -m len gt {{.LongestID}} }
 {{- end}}
+{{- with .RateLimits}}
+  # rate limits: each limited route's requests, counted in its stick table over its period, refused with 429 past the limit
+  {{- /* After the route is picked and the origin admitted, before the auth check, as the Envoy output's local rate limit
+  filter comes after its CORS filter and before its check. track-sc0 counts the request it tracks (the manual,
+  track-sc0), and the first track-sc0 line that runs is the one HAProxy tracks; under forwarded the two lines ask
+  opposite conditions, so exactly one of them runs. */}}
+{{- range .}}
+{{- $limit := .}}
+{{- range .Routes}}
+{{- $route := .}}
+{{- range $limit.Track}}
+  http-request track-sc0 {{.Key}} table {{$limit.Table}} if { var(txn.route) -m str {{$route}} }{{with .Condition}} {{.}}{{end}}
+{{- end}}
+  http-request deny deny_status 429 if { var(txn.route) -m str {{.}} } { sc_http_req_rate(0) gt {{$limit.Requests}} }
+{{- end}}
+{{- end}}
+{{- end}}
 {{- with .Check}}
   # the auth check
   {{- /* Envoy asks its check after CORS and before the route that answers a dot segment (measured on Envoy 1.40.2), so
@@ -433,18 +487,34 @@ frontend public
   http-after-response set-header grpc-message "upstream connect error or disconnect/reset before headers. reset reason: protocol error" if { var(txn.unreached) -m bool } { bc_glitches gt 0 }
   {{- /* Envoy's answer in one header frame carries no content-length, as the file's own refusal (txn.grpc_answer). */}}
   http-after-response del-header content-length if { var(txn.unreached) -m bool } { fc_http_major 2 }
+{{- with .Sample}}
+  {{- /* log: the last answer rule, so it reads the status the client is sent. */}}
+  http-after-response set-log-level silent if { status lt {{.StatusFrom}} } !{ rand(100) lt {{.Percent}} }
+{{- end}}
 {{- range .Routes}}
   use_backend {{.Backend}} if { var(txn.route) -m str {{.ID}} }
 {{- end}}
 {{- range .Backends}}
 
 backend {{.Name}}
+{{- template "pool" .}}
+{{- with .Retries}}
+  option redispatch
+{{- range .}}
+  http-request set-retries {{.Count}} if { var(txn.route) -m str {{.Route}} }
+{{- end}}
+{{- end}}
 {{- with .HostHeader}}
   http-request set-header host {{.}}
 {{- end}}
 {{- range .Servers}}
-  server {{.}}
+  {{.}}
 {{- end}}
+{{- end}}
+{{- range .RateLimits}}
+
+backend {{.Table}}
+  stick-table type {{.Type}} store http_req_rate({{.Period}})
 {{- end}}
 {{- with .Check}}
 
@@ -464,7 +534,20 @@ listen check
   timeout server {{.Millis}}ms
   retries 0
   option nolinger
+{{- template "pool" .}}
 {{- range .Servers}}
-  server {{.}}
+  {{.}}
+{{- end}}
+{{- end}}
+{{- /* pool is the balance and the health check of a service's servers, the same in its backends and in the check
+relay: its Balance (balance, spread) and Health (healthView). */}}
+{{- define "pool"}}
+{{- with .Balance}}
+  balance {{.}}
+{{- end}}
+{{- with .Health}}
+  option httpchk GET {{.Path}}
+  http-check expect status 200-299
+  timeout check {{.Timeout}}
 {{- end}}
 {{- end}}

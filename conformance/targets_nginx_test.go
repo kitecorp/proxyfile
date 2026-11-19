@@ -23,15 +23,19 @@ import (
 // The coverage checks judge the two entries of one version together (versions), so neither is held to the rows the
 // other runs.
 // The admin listener answers /ready on 127.0.0.1 only, as Envoy's does.
+//
+// A service's health is nginx's own passive check, so the row of an active check, which takes a backend out before a
+// request reaches it, does not run on nginx (nginxMainRows).
 func nginxEntries(t testing.TB) []target {
 	nginx, _ := render.TargetNamed("nginx")
 	entry := func(p pin, files []file) target {
 		return target{
-			name:    "nginx",
-			label:   p.label,
-			version: p.version,
-			files:   files,
-			image:   p.image,
+			name:     "nginx",
+			label:    p.label,
+			version:  p.version,
+			files:    files,
+			mainRows: nginxMainRows,
+			image:    p.image,
 			// The image's entrypoint runs its arguments as the command, so they start with the program; daemon off
 			// keeps nginx in the foreground, where Docker watches it.
 			args:  []string{"nginx", "-c", "/config/" + nginx.Config, "-g", "daemon off;"},
@@ -56,4 +60,10 @@ func nginxEntries(t testing.TB) []target {
 		entries = append(entries, entry(p, []file{tracingFile, tracingByNameFile}))
 	}
 	return entries
+}
+
+// nginxMainRows are the rows that run the main behaviour of each key nginx writes with a feature of its own whose
+// answers the Envoy output's rows of the key need not give, the only rows of those keys nginx runs (target.mainRows).
+var nginxMainRows = map[string][]string{
+	"services.<service name>.health": {"requests while one backend refuses connections", "requests right after a backend refused connections"},
 }

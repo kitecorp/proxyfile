@@ -2,8 +2,9 @@
 # The conformance battery's file for HAProxy: the world of examples/portable with only the keys this version's HAProxy
 # generator writes, and the pattern routes and the prefix route with a rewrite of nginx's battery file, whose rows test
 # the patterns and the path as the client wrote it; the test environment has a host with a dot at its start and one
-# with a dot at its end, which HAProxy compares as written, as Envoy does. catalog is reached at its IP address, as the
-# generator writes no DNS name yet; the check, the auth-off routes and the RPC question are `examples/portable`'s. The
+# with a dot at its end, which HAProxy compares as written, as Envoy does. catalog is found by its DNS name through
+# dns.resolver, the world's resolver at 10.0.0.2, which answers catalog.internal.example with 10.0.2.21, the address
+# catalog has in the world; the check, the auth-off routes and the RPC question are `examples/portable`'s. The
 # 24 asset routes and the 64 patterns of many hold what a long path and a long Origin cost: one request of each stopped
 # HAProxy before its patterns ran in steps and its origin patterns were written so they cannot backtrack. The 40 routes
 # k01 to k40 hold what a flood of new paths costs in memory: HAProxy kept up to 2,000 states of each pattern on each
@@ -19,7 +20,8 @@ client_address: connection
 services:
   shop: {http: 8080, grpc: 8081, addresses: ["10.0.1.11", "10.0.1.12"]}
   accounts: {grpc: 7070, http: 7070, host_header: "127.0.0.1:7070"}
-  catalog: {http: 8090, address: 10.0.2.21}
+  catalog: {http: 8090, address: catalog.internal.example}
+dns: {resolver: "10.0.0.2:53"}
 auth:
   ask: accounts /auth/check
   timeout: 1500ms
