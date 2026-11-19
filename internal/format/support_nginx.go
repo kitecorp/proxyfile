@@ -14,15 +14,14 @@ import (
 // nginx's refusals that several keys share. Each is named for nginx because every target declares its keys in this
 // package, and another target's refusals say what that proxy offers instead.
 var (
-	// nginxNotWritten declares a key nginx could carry that this version's generator does not write yet.
-	nginxNotWritten = Support{Level: Refused, Note: "not written by this version's nginx generator; render it for envoy"}
-	nginxNoHealth   = Support{Level: Refused,
+	nginxNoHealth = Support{Level: Refused,
 		Note: "nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool"}
-	// A refusal's advice names no key this version also refuses: the otel provider is written by a later version.
 	nginxNoJWT = Support{Level: Refused,
 		Note: "nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy"}
+	// The official images hold one tracer, ngx_otel_module, in the images tagged -otel, which exports OTLP alone (the
+	// modules folder of nginx 1.31.8-otel holds no other).
 	nginxNoXRay = Support{Level: Refused,
-		Note: "nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter"}
+		Note: "nginx has no X-Ray tracer; write the otel provider and send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter, or render it for envoy"}
 	// nginxNoZone is what nginx says of a backend address that carries an IPv6 zone, such as fe80::1%en0: the reader
 	// takes it as an IP address (netip.ParseAddr), and nginx refuses to load it in an upstream ("invalid IPv6 address
 	// in upstream", measured on nginx 1.30.6 and 1.31.8).
@@ -163,18 +162,30 @@ var (
 		"x-envoy-downstream-service-node", "x-envoy-original-host", "x-envoy-original-path"}
 )
 
+// NginxRemovedTraced are the headers the nginx output removes from every client's request with the otel provider,
+// under either client_address, sorted, which the nginx generator reads too: a client's copy would name the span or
+// fill its downstream_cluster, and reach the service. The Envoy output removes them with otel (downstreamHeaders and
+// decoratorHeader in internal/envoy) in the same early header removal as NginxRemovedFromClients
+// (downstreamRemoved in internal/envoy), which Envoy runs before every filter, the check's
+// only_with_header condition among them, so it never asks the check about a client's copy, where nginx's handler reads
+// the client's own copy and asks (asked in proxyfile.js): read from the code, where the other names' removal was
+// measured. With client_address connection they are among NginxRemovedFacingClients already.
+var NginxRemovedTraced = []string{"x-envoy-decorator-operation", "x-envoy-downstream-service-cluster", "x-envoy-downstream-service-node"}
+
 // nginxOnlyWithListed refuses auth.only_with_header naming a header the proxy removes from clients: one
-// remove_from_clients or auth.accept also covers, or one of NginxRemovedFromClients, or of NginxRemovedFacingClients
-// with client_address connection, which a file with tls has when it writes none. The Envoy output removes that header
-// before its check reads it, so it never asks the check, where nginx's handler reads the client's own copy and asks
-// (measured on Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8).
+// remove_from_clients or auth.accept also covers, or one of NginxRemovedFromClients, of NginxRemovedFacingClients with
+// client_address connection, which a file with tls has when it writes none, or of NginxRemovedTraced with the otel
+// provider. The Envoy output removes that header before its check reads it, so it never asks the check, where nginx's
+// handler reads the client's own copy and asks (measured on Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8).
 var nginxOnlyWithListed = Refusal{Form: "naming a header that remove_from_clients, auth.accept or the proxy itself removes from clients",
 	Instead: "the Envoy output removes that header before it reads it and never asks the check, where nginx asks it; name a header the proxy passes on",
 	Applies: func(value, proxyfile *tree.Node) bool {
 		name := strings.ToLower(value.Text)
 		mode := proxyfile.GetText("client_address")
 		facing := mode == "connection" || mode == "" && proxyfile.Get("tls") != nil
-		if slices.Contains(NginxRemovedFromClients, name) || facing && slices.Contains(NginxRemovedFacingClients, name) {
+		traced := proxyfile.Get("tracing").Get("provider").Get("otel") != nil
+		if slices.Contains(NginxRemovedFromClients, name) || facing && slices.Contains(NginxRemovedFacingClients, name) ||
+			traced && slices.Contains(NginxRemovedTraced, name) {
 			return true
 		}
 		for _, list := range []*tree.Node{proxyfile.Get("remove_from_clients"), proxyfile.Get("auth").Get("accept")} {
@@ -197,6 +208,74 @@ var (
 		Instead: "nginx writes this header itself on the request it passes on, to frame or route it or to keep a client's copy from the service, x-forwarded-for, x-envoy-external-address and the five x-envoy- names Envoy removes from clients only with client_address: connection, and a check service must never change how nginx frames or routes that request; each is refused with either client_address, so a list stays valid when it changes; remove the name from auth.accept",
 		Applies: func(value, _ *tree.Node) bool { whole, _ := coveredBy(value, NginxNotAccepted); return whole }}
 )
+
+// nginxTracingInURL refuses tracing without path_in_url: true. nginx's tracer adds the request's target, query
+// included, to every span as http.target, and an otel_span_attr of that name is added beside it, not over it (with
+// otel_span_attr http.target "" a span carried both, the target and its query first, measured on nginx 1.31.8), so
+// no line keeps the path out of a span as path_in_url: false keeps it out of the Envoy output's.
+var nginxTracingInURL = Refusal{Form: "without path_in_url: true",
+	Instead: "nginx's tracer always puts the request's path and query in the span, which path_in_url: false keeps out; write path_in_url: true, or render it for envoy",
+	// A file with the xray provider is refused for its provider alone (nginxNoXRay).
+	Applies: func(value, _ *tree.Node) bool {
+		return value.Get("provider").Get("otel") != nil && value.GetText("path_in_url") != "true"
+	}}
+
+// traceHeaders are the headers nginx writes from the trace on every request it passes on, to a service and to the
+// check, whatever the client sent (traceHeaders and the check location in internal/nginx).
+var traceHeaders = []string{"traceparent", "tracestate"}
+
+// nginxTraceNamed refuses tracing beside a list that names or covers a header of traceHeaders: nginx writes each of
+// them from the trace, so what such a list asks for, a client's copy removed, the check's value set or the client's own
+// copy sent to the check, is not what nginx sends, and it was not compared with the Envoy output.
+var nginxTraceNamed = Refusal{Form: "beside a remove_from_clients, auth.accept or auth.send that names traceparent or tracestate",
+	Instead: "nginx writes both headers from the trace for the service and the check; leave the name out, or render it for envoy",
+	Applies: func(_, proxyfile *tree.Node) bool {
+		auth := proxyfile.Get("auth")
+		for _, list := range []*tree.Node{proxyfile.Get("remove_from_clients"), auth.Get("accept"), auth.Get("send")} {
+			if list == nil {
+				continue
+			}
+			if whole, prefix := coveredBy(list, traceHeaders); whole || prefix {
+				return true
+			}
+		}
+		return false
+	}}
+
+// nginxCollectorWithoutResolver refuses a collector's DNS name in a file with no dns.resolver, in the words of a
+// service's name (nginxNameWithoutResolver), with the collector's IP address as the other way: the relay that follows
+// the name looks it up through dns.resolver, and the tracer's own lookup, in each worker as it starts, sent no span to
+// the collector the name moved to in 300 s, until a reload (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2).
+var nginxCollectorWithoutResolver = Refusal{Form: nginxNameWithoutResolver.Form,
+	Instead: nginxNameWithoutResolver.Instead + ", or write the collector's IP address",
+	Applies: func(value, proxyfile *tree.Node) bool {
+		_, _, name, ok := model.ParseEndpoint(value.Text)
+		return ok && name && proxyfile.Get("dns").Get("resolver") == nil
+	}}
+
+// nginxTagWritten are the headers nginx writes itself on the request it passes on, beyond the ones a tag reads from the
+// variable nginx writes them from or finds removed (tagSource in internal/nginx): nginx's value of each was not
+// compared with the value the Envoy output's tag reads.
+var nginxTagWritten = []string{"host", "origin", "te", "connection", "upgrade", "http2-settings", "content-length",
+	"transfer-encoding", "keep-alive", "x-envoy-auth-failure-mode-allowed", "x-envoy-external-address", "traceparent", "tracestate"}
+
+// nginxTagOnReferer and nginxTagOnExpect refuse a tag on a header the Envoy output changes before its tags read the
+// request, each in words of its own: it removes a Referer it does not accept (its rule in source/common/http/
+// utility.cc), and answers an Expect itself and removes it, where nginx's tag would read the client's line.
+var (
+	nginxTagOnReferer = Refusal{Form: "naming referer",
+		Instead: "the Envoy output removes a Referer it does not accept before its tags read the request, where nginx's tag would read the client's line; tag another header",
+		Applies: func(value, _ *tree.Node) bool { return value.Text == "referer" }}
+	nginxTagOnExpect = Refusal{Form: "naming expect",
+		Instead: "the Envoy output answers an Expect itself and removes it before its tags read the request, where nginx's tag would read the client's line; tag another header",
+		Applies: func(value, _ *tree.Node) bool { return value.Text == "expect" }}
+)
+
+// nginxTagOnWritten refuses a tag on a header of nginxTagWritten. Its words name the headers, from that list, so the
+// support table's cell and the message a file meets say which they are.
+var nginxTagOnWritten = Refusal{Form: "naming a header nginx writes itself",
+	Instead: "nginx rewrites each of " + joined(nginxTagWritten, "and") + " for the service, and its value in a span was not compared with the Envoy output's; tag another header",
+	Applies: func(value, _ *tree.Node) bool { return slices.Contains(nginxTagWritten, value.Text) }}
 
 // zoned reports whether text is an IPv6 address with a zone, read as the reader reads an address.
 func zoned(text string) bool {
@@ -384,7 +463,7 @@ var nginxTarget = Target{Name: "nginx", Title: "nginx", Keys: map[string]Support
 	"remove_from_clients": {Level: Partial, Note: "names written in full, none of them a header nginx frames or routes the request by",
 		Refuses: []Refusal{{Form: "holding a name with a * prefix", Instead: "nginx takes each header by name; write each name in full",
 			Applies: func(value, _ *tree.Node) bool { return holdsPrefix(value) }},
-			{Form: "holding " + strings.Join(nginxFramedBy[:len(nginxFramedBy)-1], ", ") + " or " + nginxFramedBy[len(nginxFramedBy)-1],
+			{Form: "holding " + joined(nginxFramedBy, "or"),
 				Instead: "nginx reads these headers itself to frame and route the request; remove the name from remove_from_clients",
 				Applies: func(value, _ *tree.Node) bool {
 					return slices.ContainsFunc(value.Items, func(item *tree.Node) bool { return slices.Contains(nginxFramedBy, item.Text) })
@@ -510,8 +589,11 @@ var nginxTarget = Target{Name: "nginx", Title: "nginx", Keys: map[string]Support
 	"log.status_from": {Level: Supported},
 	"log.sample":      {Level: Partial, Note: "the share is drawn by a hash of the request id, not by its first eight hex digits"},
 
-	"tracing":                                     nginxNotWritten,
-	"tracing.provider":                            nginxNotWritten,
+	// The tracer is ngx_otel_module, which the official images tagged -otel hold and the plain ones do not: on them nginx
+	// -t stops at its load_module, "dlopen() ... failed" (measured on nginx 1.30.6 and 1.31.8). A file without tracing
+	// loads no module and keeps its bytes.
+	"tracing":                                     {Level: Partial, Note: "needs ngx_otel_module, in the nginx images tagged -otel, where the plain images stop at load_module", Refuses: []Refusal{nginxTracingInURL, nginxTraceNamed}},
+	"tracing.provider":                            {Level: Supported},
 	"tracing.provider.xray":                       nginxNoXRay,
 	"tracing.provider.xray.agent":                 nginxNoXRay,
 	"tracing.provider.xray.segment":               nginxNoXRay,
@@ -524,17 +606,48 @@ var nginxTarget = Target{Name: "nginx", Title: "nginx", Keys: map[string]Support
 	"tracing.provider.xray.sample.rules[].path":   nginxNoXRay,
 	"tracing.provider.xray.sample.rules[].first":  nginxNoXRay,
 	"tracing.provider.xray.sample.rules[].rate":   nginxNoXRay,
-	"tracing.provider.otel":                       nginxNotWritten,
-	"tracing.provider.otel.endpoint":              nginxNotWritten,
-	"tracing.provider.otel.service":               nginxNotWritten,
-	"tracing.provider.otel.sample":                nginxNotWritten,
-	"tracing.provider.otel.sample.rate":           nginxNotWritten,
-	"tracing.tags":                                nginxNotWritten,
-	"tracing.tags.<tag name>":                     nginxNotWritten,
-	"tracing.tags.<tag name>.env":                 nginxNotWritten,
-	"tracing.tags.<tag name>.header":              nginxNotWritten,
-	"tracing.tags.<tag name>.default":             nginxNotWritten,
-	"tracing.path_in_url":                         nginxNotWritten,
+	// Measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2: the draw on 2,000 ids and 17 crafted ones, 15 forms of a
+	// client's traceparent and tracestate, and 32 at the check, every field of a span over HTTP/1.1, HTTP/2, with a body,
+	// a 503, no route and gRPC, the requests either proxy refuses, a retried route, and the collector up, stopped, slow,
+	// answering an error and refusing connections, which no request waited on. The module cannot continue a parent of
+	// another version than 00: with otel_trace_context propagate it started a trace of its own for a version 01 or ff
+	// parent (nginx 1.31.8), where the Envoy output kept the client's trace id, so such a parent goes on with no span.
+	// Each of the ten kinds of refusal measured that the Envoy output writes no span for gets none from nginx either.
+	"tracing.provider.otel": {Level: Partial,
+		Note: "spans carry the Envoy output's attribute names with nginx's own beside them, http.route holding the name of the location nginx generated; http.status_code is a number, response_flags, error and the gRPC attributes are not set, and an attribute with no value, such as upstream_cluster on a request no route takes, is sent empty, where Envoy sets none; over HTTP/2 http.url holds the connection's scheme, where Envoy writes the client's :scheme when it is http or https; a span's tracestate holds the client's first tracestate line, where Envoy's holds the lines joined; a traceparent of another version than 00, or one whose line or first tracestate line has a tab at either end over HTTP/1.1, reaches the service and the check with the client's version, trace id and parent id and the sampled flag the Envoy output sends, and no span is written, where Envoy continues the trace with version 00, a parent id and a span of its own; a request whose User-Agent has a tab at either end over HTTP/1.1, which nginx's own http.user_agent would hold, gets no span and is sent on not sampled, where Envoy traces it; a gRPC call whose malformed traceparent comes with a second traceparent or tracestate line is answered 400 and reaches no service, where Envoy passes each line on as a field of its own; the auth check gets the trace, with the request's span as its parent, but no span of its own, where Envoy writes a span for the check; a preflight and a request refused for its origin get a span named ingress with upstream_cluster empty, where the Envoy output names the span after the route and sets its service; and no empty tracestate line is sent to the service or the check, where Envoy adds one beside each traceparent of its own when no tracestate goes on, nor a traceparent or tracestate sent as one empty line, which Envoy passes on beside a malformed traceparent"},
+	// A collector's name goes through the relay the file writes for it (collectorLines), whose upstream is written as a
+	// service's name is, in a zone of 1 MiB, which held a name of 1,000 addresses and not one of 2,000 (no memory in
+	// upstream zone, on nginx 1.30.6 and 1.31.8). stub_status, the admin port's /stats, counts every request nginx serves
+	// and has no directive that leaves a server out, so it counts each call of the tracer through the relay (after 5
+	// traced requests and a read of /stats its requests had grown by 11, the tracer's 5 calls among them, on both
+	// versions). After the first collector left and a second started at the name, and after the name moved with the first
+	// still up, the spans reached the second 6.8 to 8.7 s after the change through nginx, where the Envoy output's did in
+	// 0.2 to 0.4 s, and none was lost in the second case, so the seconds are the page's alone (three runs of each event on
+	// nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2). The relay's socket file is left by a kill as the check relay's is, and
+	// nginx then does not start until the file is removed or /run is a tmpfs (measured on both versions).
+	"tracing.provider.otel.endpoint":    {Level: Partial, Note: "an IP address, or a DNS name with dns.resolver, which nginx follows through a relay of its own, a name giving at most about 1,000 addresses, as a service's does; the admin port's /stats counts each call of the tracer through the relay as a request; the relay listens on a socket file, /run/proxyfile-<listen>/collector.sock, which nginx removes when it stops and a kill leaves, and nginx then does not start, its bind() to the file failing (98: Address already in use), until the file is removed or /run is a tmpfs", Refuses: []Refusal{nginxCollectorWithoutResolver}},
+	"tracing.provider.otel.service":     {Level: Supported},
+	"tracing.provider.otel.sample":      {Level: Supported},
+	"tracing.provider.otel.sample.rate": {Level: Supported},
+	"tracing.tags":                      {Level: Supported},
+	"tracing.tags.<tag name>":           {Level: Supported},
+	// A tag named like a field of the Envoy output's span takes the field's place, and where its source gives none and
+	// it has no default, or gives an empty value, keeps the field's value, as the Envoy output keeps its own. njs leaves
+	// a variable named like a property every object has (__proto__, constructor, valueOf, toString, hasOwnProperty,
+	// propertyIsEnumerable, isPrototypeOf) out of process.env, so the script reads it as unset, where Envoy read
+	// toString=ts1 (measured on njs 1.0.2 of both images beside Envoy 1.40.2).
+	"tracing.tags.<tag name>.env": {Level: Partial,
+		Note: "a variable set to an empty value, or unset with no default, gives the span an empty tag, where Envoy sets none, except a tag named like a field of the Envoy output's span, such as component, which keeps the field's value, as through Envoy; a variable named like a property every object has, such as constructor or toString, is read as unset, where Envoy reads it"},
+	"tracing.tags.<tag name>.header": {Level: Partial,
+		Note:    "a header absent with no default, or sent empty, gives the span an empty tag, where Envoy sets none, except a tag named like a field of the Envoy output's span, such as component, which keeps the field's value, as through Envoy",
+		Refuses: []Refusal{nginxTagOnWritten, nginxTagOnReferer, nginxTagOnExpect}},
+	"tracing.tags.<tag name>.default": {Level: Supported},
+	// nginx's tracer adds the target as the client wrote it, as http.target, so a span is written only for a target
+	// nginx sends on as written and of at most 256 bytes, beside no client's x-envoy-original-path under forwarded and
+	// on a route with no rewrite; such a request is sent on not sampled. Over a table of targets on Envoy 1.40.2 beside
+	// nginx 1.30.6 and 1.31.8, each http.url and http.target nginx wrote held bytes of the Envoy output's http.url.
+	"tracing.path_in_url": {Level: Partial,
+		Note: "true only; a span is written only for a request whose target nginx sends on as the client wrote it, at most 256 bytes, on a route with no rewrite and, under client_address forwarded, with no x-envoy-original-path, and any other is sent on not sampled with no span, where Envoy writes the path it normalised, escaped or rewrote, cut to 256 characters, or a client's x-envoy-original-path"},
 
 	"the request's path normalised before a route is picked": {Level: Partial,
 		Note: "a path that holds //, a dot segment, an escaped unreserved character or %2F and also an escape Envoy keeps, such as %3B, is answered 400, and so is one that holds such an escape beside a character Envoy escapes before it matches (\" < > ^ ` { | } or one outside ASCII), where Envoy normalises the path and keeps the escape; an empty query, a ? with nothing after it, after a path that needs normalising or holds such a character is answered 400, where Envoy sends the ? on; a backslash, %5C and a control character, written or escaped, are answered 400, and so is an invalid escape such as %zz, which Envoy passes on; a path with an empty segment before a dot-dot segment, / and . written or escaped, such as /catalog//../products/1, is answered 400, where Envoy resolves the dot-dot segment before it merges the slashes and routes /catalog/products/1"},
@@ -579,6 +692,13 @@ var nginxLessStrict = []LessStrict{
 		Measured: "A request holding the line `nocolon`, with no colon, is served over HTTP/1.1, and the service receives `nocolon: `, where Envoy answers `400`. nginx stores such a line as a header with an empty value, as it stores `nocolon:`, which Envoy serves too, so neither `nginx.conf` nor `proxyfile.js` can tell the two apart."},
 	{Row: requestLine, Name: "a request with no body reaches the service without content-length: 0",
 		Measured: "A `POST` with no body reaches the service with no `Content-Length`, over HTTP/1.1 and HTTP/2, where Envoy adds `content-length: 0`."},
+	// The Envoy output's rule is isValidRefererValue (source/common/http/utility.cc at v1.40.2, which
+	// conn_manager_utility.cc calls on every request): a value its URL parser, http_parser_parse_url, reads as a URL
+	// with a scheme or a host is kept when it holds no fragment and no user information, and any other only when each
+	// byte is one of RFC 3986's query and fragment characters and no colon comes before its first slash. The code of the
+	// parser Envoy links was not at hand, and the published grammar does not give Envoy's answers, so no rule is written.
+	{Row: requestLine, Name: "a Referer the Envoy output removes reaches the service",
+		Measured: "Of 104 forms of one Referer line, Envoy removed 46 before the service, such as `a:b`, `/a#f`, `a b`, `/é`, `{`, `http://u@a/`, `http://a/#f`, `http://a:65536/`, `http://a_b/`, `http://[1:2:3]/` and `about:blank`, and nginx passed every one on. The Envoy output removes a Referer that its URL parser reads as a URL with a fragment or user information, or that the parser does not read and that holds a byte outside RFC 3986's query and fragment characters or a colon before its first slash. A rule written from the published grammar of that parser, nodejs's http_parser, answered forms of the 104 otherwise than Envoy: in its strict build it removed `h2://a/` and `x-y://a/`, whose scheme Envoy reads with a digit or a `-` in it, and in its lenient build it also kept `http://a_b/` and `http://a/é`. nginx answers two Referer lines `400`, as the request line's row says."},
 	{Row: requestLine, Name: "a WebSocket upgrade a service answers without switching passes the service's body",
 		Measured: "A WebSocket upgrade a service answers `200` without switching reaches the client with the service's body, where Envoy passes the status and headers with no body."},
 	// A script filter on every answer (js_header_filter with js_body_filter) turned the second and third into 502 with

@@ -58,13 +58,15 @@ type route struct {
 // (generator.RemovedFromClients: remove_from_clients, then with auth.ask the question headers and each accept name),
 // and remove its entries in order, which every route location and the check location empty, checked or not and with
 // the check switched off too; mark is true with auth.ask, whose unchecked mark they empty after the others. accept
-// holds the accept names the handler sets (handlerAccepts).
+// holds the accept names the handler sets (handlerAccepts). traced is true with tracing: every location that passes a
+// request sends the trace and removes format.NginxRemovedTraced under either client_address.
 type edge struct {
 	connection bool
 	removed    map[string]bool
 	remove     []removal
 	mark       bool
 	accept     []model.Header
+	traced     bool
 }
 
 // removal is an entry of the early header removal, with the key its name is refused by when nginx cannot read it, or
@@ -75,7 +77,8 @@ type removal struct {
 }
 
 func edgeOf(g *model.Gateway) edge {
-	e := edge{connection: g.ClientAddress == model.ClientConnection, removed: map[string]bool{}, mark: g.Auth != nil, accept: handlerAccepts(g.Auth)}
+	e := edge{connection: g.ClientAddress == model.ClientConnection, removed: map[string]bool{}, mark: g.Auth != nil, accept: handlerAccepts(g.Auth),
+		traced: otelTracing(g) != nil}
 	for i, header := range generator.RemovedFromClients(g) {
 		key := "auth.accept"
 		switch {
@@ -341,6 +344,16 @@ const (
 // max_headers counts the header lines of HTTP/1.1 and the fields of HTTP/2 but its pseudo-headers and cookies, so the
 // script counts those (headerNames) against $pf_header_count.
 func headerLines(v *values, limits model.Limits) []string {
+	directives, counted := headerDirectives(v, limits)
+	var lines []string
+	for _, directive := range directives {
+		lines = append(lines, "  "+directive)
+	}
+	return append(lines, `  map "" $pf_header_count { default `+counted+"; }")
+}
+
+// headerDirectives are headerLines' directives, without their indent, and the count as the file writes it.
+func headerDirectives(v *values, limits model.Limits) (directives []string, counted string) {
 	size, count := headerLimits(limits)
 	var sizePos, countPos model.Pos
 	if written := limits.RequestHeaders; written != nil {
@@ -348,14 +361,13 @@ func headerLines(v *values, limits model.Limits) []string {
 	}
 	rest := size - firstHeaderBuffer
 	buffers := (rest + largestHeaderBuffer - 1) / largestHeaderBuffer
-	counted := v.token(headerCountKey, countPos, strconv.Itoa(count))
+	counted = v.token(headerCountKey, countPos, strconv.Itoa(count))
 	return []string{
-		"  max_headers " + counted + ";",
-		"  client_header_buffer_size " + strconv.Itoa(firstHeaderBuffer) + ";",
-		"  large_client_header_buffers " + v.keyToken(headerSizeKey, sizePos, strconv.Itoa(buffers)) + " " +
+		"max_headers " + counted + ";",
+		"client_header_buffer_size " + strconv.Itoa(firstHeaderBuffer) + ";",
+		"large_client_header_buffers " + v.keyToken(headerSizeKey, sizePos, strconv.Itoa(buffers)) + " " +
 			v.token(headerSizeKey, sizePos, strconv.Itoa(rest/buffers)) + ";",
-		`  map "" $pf_header_count { default ` + counted + "; }",
-	}
+	}, counted
 }
 
 // Generate returns the whole nginx.conf as the configuration and the script it loads, proxyfile.js. Its error is a
@@ -373,19 +385,23 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		return nil, err
 	}
 	tm := timersOf(&v, g.Timeouts)
+	tracing := otelTracing(g)
 	var w writer
 	w.WriteString(generator.Header)
-	w.lines(
-		// The script reads each header's name, which no directive of nginx's own reads (writeRequestChecks); the
-		// version is the one the pinned images ship, which the battery and the validator run.
-		"# Needs the njs module, 1.0.2 or later.",
-		"load_module modules/ngx_http_js_module.so;",
-	)
+	// The script reads each header's name, which no directive of nginx's own reads (writeRequestChecks); the version is
+	// the one the pinned images ship, which the battery and the validator run. A file with tracing names the tracer's
+	// module too (tracingNeeds).
+	needs := "# Needs the njs module, 1.0.2 or later."
+	if tracing != nil {
+		needs = tracingNeeds
+	}
+	w.lines(needs, "load_module modules/ngx_http_js_module.so;")
 	checkHTTP, checkStream := checkLines(in, &v, e)
 	if checkStream != nil {
 		// The relay that asks the check is a stream server of the same script.
 		w.lines("load_module modules/ngx_stream_js_module.so;")
 	}
+	w.lines(tracingTop(tracing)...)
 	// The official image's own nginx.conf writes 1024 connections a worker; nginx's default is 512. With the check, each
 	// checked request in flight holds four of one worker's connections: the client's, the check location's to the
 	// relay's socket, the relay's from it and the relay's to the check. A worker with none left cannot open the
@@ -425,6 +441,7 @@ func Generate(in generator.Input) ([]generator.File, error) {
 		hashed = append(hashed, upstream)
 	}
 	w.lines(mapHashSizes(jumpKeys(routes), groupKeys(&v, g, routes), hashed)...)
+	w.lines(tracingHTTP(tracing, g, e, &v)...)
 	w.lines(headerLines(&v, g.Limits)...)
 	w.lines(
 		// nginx refuses a request body over 1 MiB by default (the core module page); the Envoy configuration writes no
@@ -543,7 +560,7 @@ func Generate(in generator.Input) ([]generator.File, error) {
 	w.lines(clientKeyLine(g, e)...)
 	zones := limitZones(routes, e)
 	w.lines(zones...)
-	writeRouteChoice(&w, routes, asked(g) != nil)
+	w.lines(tracingRoutes(tracing, writeRouteChoice(&w, routes, asked(g) != nil))...)
 	once := retryOnce(routes)
 	w.lines(once...)
 	w.lines(retryMaps(&v, g, routes, tm)...)
@@ -562,6 +579,7 @@ func Generate(in generator.Input) ([]generator.File, error) {
 			}
 		}
 	}
+	w.lines(collectorLines(&v, g, e)...)
 	w.lines("")
 	listen := strconv.FormatInt(g.Listen.Number, 10)
 	if g.TLS != nil {
@@ -576,7 +594,7 @@ func Generate(in generator.Input) ([]generator.File, error) {
 			"  server {",
 			"    listen 127.0.0.1:"+strconv.FormatInt(g.Admin.Number, 10)+";",
 		)
-		w.lines(adminLines()...)
+		w.lines(adminLines(tracing != nil)...)
 		w.lines("  }", "")
 	}
 	// A Host that no environment names gets 404 with no body and no Content-Type, as Envoy answers a request no virtual
@@ -946,10 +964,16 @@ func statusesFrom(status int64) string {
 // if sends a refused request on to location /, which names its answer by $pf_refusal, as the default server's does: a
 // client's own request for / still gets the 404 of any other path. Envoy's admin answers every absolute target 404,
 // where nginx answers the path it names, or 400 when the public listener's flags refuse it, which admin's row of the
-// support table says. The server writes no request log line, as Envoy's admin writes none.
-func adminLines() []string {
+// support table says. The server writes no request log line, as Envoy's admin writes none, and with tracing no span,
+// as Envoy's admin writes none either, where it would inherit the http block's otel_trace.
+func adminLines(traced bool) []string {
+	var span []string
+	if traced {
+		span = []string{"    otel_trace off;"}
+	}
 	return slices.Concat([]string{
 		"    access_log off;",
+	}, span, []string{
 		"    error_page 405 = @pf_admin_405;",
 		"    if ($pf_refusal) {",
 		// A path no exact location takes, so location / answers it, by $pf_refusal.
@@ -1063,6 +1087,12 @@ func writeRequestChecks(w *writer, e edge) {
 		// A request line $pf_authority does not read gets 400. A version $pf_f_426 reads is left to its own 426, which
 		// Envoy answers whatever its line holds.
 		`  map "$pf_f_426:$pf_authority" $pf_f_authority { `+regexKey(`^1:`)+` 0; `+regexKey(`^0:.`)+` 0; default 1; }`,
+		// Envoy answers 400 with the body Bad Request to an absolute target of any scheme but http and https, which it
+		// reads in any letter case, whatever the host and before the 426 of HTTP/1.0, where nginx serves it as one of
+		// http (measured on Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8 with ftp, ws, wss, gopher, h2c, file, x-y+z.1,
+		// https1 and htt, a port, a host no environment names and HTTP/1.0). Envoy's admin listener answers every
+		// absolute target 404, where the admin server, which reads these flags too, answers such a line 400.
+		`  map $request $pf_f_scheme { `+quoted(`~*^[^ ]+ +https?://`)+` 0; `+regexKey(`^[^ ]+ +[A-Za-z][A-Za-z0-9+.-]*://`)+` 1; default 0; }`,
 		// Envoy answers 400 to a header name outside RFC 9110's token characters, such as x@at, x(p) or one holding a
 		// byte above 0x7F, and closes an HTTP/2 connection that sends one, where nginx sends it on (ignore_invalid_headers
 		// off) or drops it and serves the request. The script's headerNames is "0" when every name is token
@@ -1082,7 +1112,7 @@ func writeRequestChecks(w *writer, e edge) {
 		// with a # or a QUERY with no Content-Type and HTTP/1.10, gets the first set's answer (measured on Envoy 1.40.2
 		// beside nginx 1.30.6 and 1.31.8, on the public listener and the admin one; requestChecks, adminLines).
 		// $pf_refusal names the location of each, and of the 426 after them ($pf_f_426).
-		`  map "$pf_f_method$pf_f_connection$pf_f_raw$pf_f_h2_connection$pf_f_h2_te$pf_f_authority$pf_f_names$pf_f_version" $pf_f_request { `+
+		`  map "$pf_f_method$pf_f_connection$pf_f_raw$pf_f_h2_connection$pf_f_h2_te$pf_f_authority$pf_f_scheme$pf_f_names$pf_f_version" $pf_f_request { `+
 			regexKey(`1`)+` 1; default 0; }`,
 		`  map "$pf_f_method$pf_f_fragment" $pf_f_refused { `+regexKey(`^2|1\z`)+` 1; default 0; }`,
 		`  map "$pf_f_request$pf_f_refused$pf_f_426" $pf_refusal { `+regexKey(`^1`)+` bad-request; `+regexKey(`^01`)+` refused; `+
@@ -1117,8 +1147,9 @@ func writeRequestChecks(w *writer, e edge) {
 // writeUpgradeMaps writes the upgrade rule. Envoy reads a request as an upgrade only when its Connection names upgrade:
 // it passes a WebSocket upgrade on, serves an h2c upgrade as a plain request without it and its HTTP2-Settings, and
 // answers any other upgrade 403; with no upgrade in Connection it removes Upgrade and serves the request, its
-// HTTP2-Settings kept (measured on Envoy 1.40.2). The Connection and Upgrade keys are the file's only keys that ignore
-// case: RFC 9110 asks a recipient to compare a Connection token and an upgrade's protocol name so.
+// HTTP2-Settings kept (measured on Envoy 1.40.2). The Connection and Upgrade keys, and $pf_f_scheme's, are the file's
+// only keys that ignore case: RFC 9110 asks a recipient to compare a Connection token and an upgrade's protocol name so,
+// and RFC 3986 a scheme.
 func writeUpgradeMaps(w *writer) {
 	w.lines(
 		`  map $http_connection $pf_connection_upgrade { `+quoted(`~*(?:^|,)[ \t]*upgrade[ \t]*(?:,|\z)`)+` 1; default 0; }`,
@@ -1507,15 +1538,18 @@ func dollars(text string) string {
 	return strings.ReplaceAll(text, "$", "${pf_dollar}")
 }
 
-// hasDollar says whether a rewrite, a cors value, the auth check's path or an RPC method's question holds a $, which
-// needs $pf_dollar. A certificate's or a key's path holding $ is refused before the generator runs (format's
-// nginxDollarPath).
+// hasDollar says whether a rewrite, a cors value, the auth check's path, an RPC method's question or a tracing tag's
+// default holds a $, which needs $pf_dollar. A certificate's or a key's path holding $ is refused before the generator
+// runs (format's nginxDollarPath), and a header or variable name holds none.
 func hasDollar(in generator.Input) bool {
 	g, cors := in.Gateway, in.Origins.CORS
 	for _, r := range g.Routes {
 		if r.Rewrite != nil && strings.Contains(r.Rewrite.Value, "$") {
 			return true
 		}
+	}
+	if t := otelTracing(g); t != nil && slices.ContainsFunc(t.Tags, func(tag model.Tag) bool { return strings.Contains(tag.Default, "$") }) {
+		return true
 	}
 	if a := asked(g); a != nil && strings.Contains(a.Path, "$") {
 		return true
@@ -1563,8 +1597,9 @@ const groupSize = 64
 // empty query (mode rawk) is refused on it, because nginx would send the escape decoded and drop the ?.
 //
 // With the auth check asked, a dot segment with a ; parameter goes to dotparamLocation, which asks the check before it
-// refuses the path, as the Envoy output's refusing route is checked.
-func writeRouteChoice(w *writer, routes []route, checked bool) {
+// refuses the path, as the Envoy output's refusing route is checked. It returns the variable that holds the route
+// choice, which tracingRoutes reads.
+func writeRouteChoice(w *writer, routes []route, checked bool) string {
 	var level []string
 	for i, r := range routes {
 		n := i + 1
@@ -1620,6 +1655,7 @@ func writeRouteChoice(w *writer, routes []route, checked bool) {
 		"  }",
 		"",
 	)
+	return choice
 }
 
 // writeOriginCheck writes the origin check of the environment at place n, the Envoy output's RBAC rule for a file with
@@ -1953,21 +1989,26 @@ func routeLocations(routes []route, v *values, e edge, tm timers) string {
 // sends the target as written when path is "". It writes every header it sends, because a location that writes one
 // proxy_set_header inherits none from the levels above it (the proxy module page), and sets each header Envoy removes
 // empty, which nginx then does not send, and each name of the early header removal, but one the location sends
-// itself, whose value then reads no client copy (edge.read). A service that fails is answered 502 with no body, or a
-// gRPC call in gRPC's form (grpcUnavailable), through a named location: error_page to a URI would search the
-// locations again; a service that times out is answered by @pf_504 (timeoutAnswer) the same way. The route and
+// itself, whose value then reads no client copy (edge.read), and with tracing the trace after them (traceHeaders). A
+// service that fails is answered 502 with no body, or a gRPC call in gRPC's form (grpcUnavailable), through a named
+// location: error_page to a URI would search the locations again; a service that times out is answered by @pf_504
+// (timeoutAnswer) the same way. The route and
 // upstream the request log writes are set first: set runs before the rewrite's break, and the values stay through an
 // error_page to @pf_502 or @pf_504 (measured on nginx 1.30.6 and 1.31.8), and a request no route location takes logs
 // them empty, where the Envoy output logs them null. On a checked route the handler runs in the access phase, after
 // the rewrite and before the request is passed on, and the location sets each accepted name and the unchecked mark
-// from it; no line of the location answers before it. A limited route's location charges its bucket (limitLines),
+// from it; no line of the location answers before it but, with tracing, a gRPC location's refusal of a trace nginx
+// cannot pass on (grpcTraceRefusal), which comes first. A limited route's location charges its bucket (limitLines),
 // and a retried RPC route's tries a call on the next backend (retryLines). A retried plain route's location reads the
 // request's body whole and sends nginx's 502 and 504 to the target the retry maps pick (retryMaps); its copy, which
 // takes a request the location has charged and checked, charges and asks nothing again, and sets the accepted names
 // and the mark from what the handler set, which a jump keeps (measured on nginx 1.30.6 and 1.31.8).
 func writeLocation(w *writer, v *values, name, path string, r route, e edge) {
+	w.lines("    location " + name + " {")
+	if r.grpc && e.traced {
+		w.lines(grpcTraceRefusal...)
+	}
 	w.lines(
-		"    location "+name+" {",
 		"      set $pf_log_route "+r.name+";",
 		"      set $pf_log_upstream "+r.upstream+";",
 	)
@@ -1988,6 +2029,10 @@ func writeLocation(w *writer, v *values, name, path string, r route, e edge) {
 	if r.checked && r.retry == nil {
 		w.lines(handlerLines...)
 	}
+	if e.traced && r.host != "$pf_authority" {
+		// The Envoy output's span holds the host its router sends the service (urlLines).
+		w.lines("      set $pf_url_host " + r.host + ";")
+	}
 	h := locationHeaders{w: w, set: "proxy_set_header", sent: map[string]bool{}}
 	if r.grpc {
 		h.set = "grpc_set_header"
@@ -2007,6 +2052,7 @@ func writeLocation(w *writer, v *values, name, path string, r route, e edge) {
 		h.accepted(v, e)
 	}
 	h.fromClients(v, e)
+	h.traceHeaders(e, serviceTrace)
 	h.done(v)
 	switch {
 	case r.grpc:

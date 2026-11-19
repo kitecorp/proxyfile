@@ -527,6 +527,7 @@ func (d *decoder) tracing(n *tree.Node) *model.Tracing {
 				Env:     entry.Value.GetText("env"),
 				Header:  entry.Value.GetText("header"),
 				Default: entry.Value.GetText("default"),
+				Pos:     entry.KeyPos,
 			})
 		}
 	}

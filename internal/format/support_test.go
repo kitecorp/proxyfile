@@ -124,6 +124,21 @@ func TestTargetDeclarations(t *testing.T) {
 	}
 }
 
+// The words of nginx's refusals, which several rows of TestRefusals and TestNginxTracingRefusals repeat.
+const (
+	jwtWords      = "is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy"
+	healthWords   = "is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool"
+	xrayWords     = "is refused by --target nginx: nginx has no X-Ray tracer; write the otel provider and send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter, or render it for envoy"
+	inURLWords    = "without path_in_url: true is refused by --target nginx: nginx's tracer always puts the request's path and query in the span, which path_in_url: false keeps out; write path_in_url: true, or render it for envoy"
+	zoneWords     = "nginx reads no zone in a backend's address; give the service an address without one"
+	pathWords     = "holding %, a character Envoy escapes before it picks a route (\" < > ^ ` { | }) or one outside ASCII is refused by --target nginx: nginx matches a path holding a character Envoy escapes as it decodes it, where Envoy matches the escape, so a prefix or a path with % or such a character would take other requests on nginx than on Envoy; write it without them, as a pattern, or render it for envoy"
+	rewriteWords  = "holding a character nginx escapes again is refused by --target nginx: nginx escapes the new path before it sends it, so the service would receive that character escaped, where the Envoy output sends it as written; write the rewrite without it, or render it for envoy"
+	dollarWords   = "nginx reads a $ in a certificate's or a key's path as the start of a variable, and a path written to keep the $ is read at each handshake, which nginx -t does not check; put the file at a path without $, or render it for envoy"
+	hostDotWords  = "holding a host that starts or ends with . is refused by --target nginx: nginx reads a dot at a host's start as every name under it and drops one at its end; write the host without it, or render it for envoy"
+	onlyWithWords = "naming a header that remove_from_clients, auth.accept or the proxy itself removes from clients is refused by --target nginx: the Envoy output removes that header before it reads it and never asks the check, where nginx asks it; name a header the proxy passes on"
+	acceptWritten = "naming a header nginx frames or routes a request by is refused by --target nginx: nginx writes this header itself on the request it passes on, to frame or route it or to keep a client's copy from the service, x-forwarded-for, x-envoy-external-address and the five x-envoy- names Envoy removes from clients only with client_address: connection, and a check service must never change how nginx frames or routes that request; each is refused with either client_address, so a list stays valid when it changes; remove the name from auth.accept"
+)
+
 // A key the target refuses is named at its own position, also inside a Dict's value or a list item, and in the origins
 // file and the methods file by the path the proxyfile writes it at; a file that writes none of them has no problem. A
 // form refused for another key reads that key in the proxyfile, also for a key of a methods file. nginx's own
@@ -155,20 +170,6 @@ func TestRefusals(t *testing.T) {
 			Applies: func(value, root *tree.Node) bool {
 				return net.ParseIP(value.Text) == nil && root.Get("dns").Get("resolver") == nil
 			}}}}}}
-	// The words of nginx's refusals, which several of its rows repeat.
-	const (
-		notWrittenWords = "is refused by --target nginx: not written by this version's nginx generator; render it for envoy"
-		jwtWords        = "is refused by --target nginx: nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy"
-		healthWords     = "is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool"
-		xrayWords       = "is refused by --target nginx: nginx has no X-Ray tracer; render it for envoy, or, once a later version writes the otel provider, send its spans to an OpenTelemetry Collector with the AWS X-Ray exporter"
-		zoneWords       = "nginx reads no zone in a backend's address; give the service an address without one"
-		pathWords       = "holding %, a character Envoy escapes before it picks a route (\" < > ^ ` { | }) or one outside ASCII is refused by --target nginx: nginx matches a path holding a character Envoy escapes as it decodes it, where Envoy matches the escape, so a prefix or a path with % or such a character would take other requests on nginx than on Envoy; write it without them, as a pattern, or render it for envoy"
-		rewriteWords    = "holding a character nginx escapes again is refused by --target nginx: nginx escapes the new path before it sends it, so the service would receive that character escaped, where the Envoy output sends it as written; write the rewrite without it, or render it for envoy"
-		dollarWords     = "nginx reads a $ in a certificate's or a key's path as the start of a variable, and a path written to keep the $ is read at each handshake, which nginx -t does not check; put the file at a path without $, or render it for envoy"
-		hostDotWords    = "holding a host that starts or ends with . is refused by --target nginx: nginx reads a dot at a host's start as every name under it and drops one at its end; write the host without it, or render it for envoy"
-		onlyWithWords   = "naming a header that remove_from_clients, auth.accept or the proxy itself removes from clients is refused by --target nginx: the Envoy output removes that header before it reads it and never asks the check, where nginx asks it; name a header the proxy passes on"
-		acceptWritten   = "naming a header nginx frames or routes a request by is refused by --target nginx: nginx writes this header itself on the request it passes on, to frame or route it or to keep a client's copy from the service, x-forwarded-for, x-envoy-external-address and the five x-envoy- names Envoy removes from clients only with client_address: connection, and a check service must never change how nginx frames or routes that request; each is refused with either client_address, so a list stays valid when it changes; remove the name from auth.accept"
-	)
 	type refusalCase struct {
 		name   string
 		spec   Field
@@ -382,9 +383,9 @@ func TestRefusals(t *testing.T) {
 			document: m.Replaced(3, 6, "  app: {http: 3000}", "  accounts: {http: 7070, balance: least_requests}", "origins: origins.json",
 				"routes:", "  - {name: app, prefix: /, to: app}", "auth: {ask: accounts /check, timeout: 1s, enabled: true, when_unavailable: deny}"),
 			want: nil},
+		// nginx writes the provider key itself, and its tracer exports to an OpenTelemetry collector alone.
 		{name: "an X-Ray tracer", spec: Proxyfile, target: nginxTarget, document: m.Inserted(7, "tracing: {provider: {xray: {segment: s}}}"),
-			want: []string{`g.yaml:7:1: "tracing" ` + notWrittenWords, `g.yaml:7:11: "tracing.provider" ` + notWrittenWords,
-				`g.yaml:7:22: "tracing.provider.xray" ` + xrayWords, `g.yaml:7:29: "tracing.provider.xray.segment" ` + xrayWords}},
+			want: []string{`g.yaml:7:22: "tracing.provider.xray" ` + xrayWords, `g.yaml:7:29: "tracing.provider.xray.segment" ` + xrayWords}},
 		// HAProxy's refused forms, each beside the form of the same key it writes.
 		{name: "HAProxy: an address naming a host", spec: Proxyfile, target: haproxyTarget, document: m.Replaced(3, 3, "  app: {http: 3000, address: app.internal}"),
 			want: []string{`g.yaml:3:21: "services.<service name>.address" a DNS name is refused by --target haproxy: this version's HAProxy generator writes no DNS name; give the service's IP address, or render it for envoy`}},
@@ -494,6 +495,87 @@ func TestRefusals(t *testing.T) {
 	}
 }
 
+// nginx writes tracing with the otel provider and refuses by name each form its tracer cannot write as the Envoy output
+// does, beside the form of the same key it writes: path_in_url other than true, as nginx's tracer puts the target with
+// its query in every span (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2); a collector's DNS name in a file
+// with no dns.resolver, which nginx looks up again only through the name server it is given, in the words of a
+// service's name, as the tracer's own lookup of the name, once in each worker at start, sent no span to the collector
+// the name moved to until a reload; a tag on a header nginx writes itself, whose value in a span was not compared with
+// the Envoy output's; and tracing beside a list that names or covers traceparent or tracestate, which nginx writes from
+// the trace for the service and the check. With the otel provider nginx removes three headers from every client under
+// either client_address, which the Envoy output removes before its check reads the request, so only_with_header may not
+// name them; without tracing they pass (TestRefusals).
+func TestNginxTracingRefusals(t *testing.T) {
+	const (
+		resolverWords = "a DNS name with no dns.resolver is refused by --target nginx: nginx looks a name up only through the name server it is given; write dns.resolver, or write the collector's IP address"
+		writtenWords  = "naming a header nginx writes itself is refused by --target nginx: nginx rewrites each of host, origin, te, connection, upgrade, http2-settings, content-length, transfer-encoding, keep-alive, x-envoy-auth-failure-mode-allowed, x-envoy-external-address, traceparent and tracestate for the service, and its value in a span was not compared with the Envoy output's; tag another header"
+		namedWords    = "beside a remove_from_clients, auth.accept or auth.send that names traceparent or tracestate is refused by --target nginx: nginx writes both headers from the trace for the service and the check; leave the name out, or render it for envoy"
+		refererWords  = "naming referer is refused by --target nginx: the Envoy output removes a Referer it does not accept before its tags read the request, where nginx's tag would read the client's line; tag another header"
+		expectWords   = "naming expect is refused by --target nginx: the Envoy output answers an Expect itself and removes it before its tags read the request, where nginx's tag would read the client's line; tag another header"
+	)
+	// traced is m with tracing from line 7, its endpoint key at 9:12 and its one tag's header key at 11:9, path_in_url
+	// on line 12 unless it is "", then the lines of rest.
+	traced := func(endpoint, header, pathInURL string, rest ...string) string {
+		block := []string{"tracing:", "  provider:", `    otel: {endpoint: "` + endpoint + `", service: gw}`, "  tags:", "    t: {header: " + header + "}"}
+		if pathInURL != "" {
+			block = append(block, "  path_in_url: "+pathInURL)
+		}
+		return testsupport.Document(slices.Concat([]string(m), block, rest)).String()
+	}
+	const resolver = `dns: {resolver: "10.0.0.2:53"}`
+	type tracingCase struct {
+		name, document string
+		want           []string
+	}
+	cases := []tracingCase{
+		{"tracing without path_in_url", traced("10.0.3.40:4317", "x-tenant", ""), []string{`g.yaml:7:1: "tracing" ` + inURLWords}},
+		{"path_in_url: false", traced("10.0.3.40:4317", "x-tenant", "false"), []string{`g.yaml:7:1: "tracing" ` + inURLWords}},
+		{"path_in_url: true", traced("10.0.3.40:4317", "x-tenant", "true"), nil},
+		{"a collector's name in a file that writes dns.resolver", traced("otel-collector:4317", "x-tenant", "true", resolver), nil},
+		{"a collector's name in a file that writes no dns.resolver", traced("otel-collector:4317", "x-tenant", "true"),
+			[]string{`g.yaml:9:12: "tracing.provider.otel.endpoint" ` + resolverWords}},
+		{"an IP address in a file that writes dns.resolver", traced("10.0.3.40:4317", "x-tenant", "true", resolver), nil},
+		{"an IPv6 address in brackets in a file that writes dns.resolver", traced("[fd00::1]:4317", "x-tenant", "true", resolver), nil},
+		{"tracing beside remove_from_clients naming tracestate", traced("10.0.3.40:4317", "x-tenant", "true", "remove_from_clients: [tracestate]"),
+			[]string{`g.yaml:7:1: "tracing" ` + namedWords}},
+		{"tracing beside auth.accept naming tracestate",
+			traced("10.0.3.40:4317", "x-tenant", "true", "auth: {ask: app /check, enabled: true, accept: [tracestate]}"),
+			[]string{`g.yaml:7:1: "tracing" ` + namedWords}},
+		{"tracing beside auth.send naming tracestate", traced("10.0.3.40:4317", "x-tenant", "true", "auth: {ask: app /check, enabled: true, send: [tracestate]}"),
+			[]string{`g.yaml:7:1: "tracing" ` + namedWords}},
+		{"tracing beside auth.send with a prefix that covers traceparent",
+			traced("10.0.3.40:4317", "x-tenant", "true", "auth: {ask: app /check, enabled: true, send: [trace*]}"),
+			[]string{`g.yaml:7:1: "tracing" ` + namedWords}},
+		{"tracing beside the three lists naming x-tenant", traced("10.0.3.40:4317", "x-tenant", "true", "remove_from_clients: [x-tenant]",
+			"auth: {ask: app /check, enabled: true, accept: [x-tenant], send: [x-tenant]}"), nil},
+	}
+	// A tag on a header nginx writes itself on the request it passes on, one row each, and one nginx passes on.
+	for _, header := range []string{"host", "origin", "te", "connection", "upgrade", "http2-settings", "content-length",
+		"transfer-encoding", "keep-alive", "x-envoy-auth-failure-mode-allowed", "x-envoy-external-address", "traceparent", "tracestate"} {
+		cases = append(cases, tracingCase{"a tag on a header nginx writes itself: " + header, traced("10.0.3.40:4317", header, "true"),
+			[]string{`g.yaml:11:9: "tracing.tags.<tag name>.header" ` + writtenWords}})
+	}
+	cases = append(cases, tracingCase{"a tag on a header nginx passes on", traced("10.0.3.40:4317", "x-tenant", "true"), nil},
+		tracingCase{"a tag on referer", traced("10.0.3.40:4317", "referer", "true"), []string{`g.yaml:11:9: "tracing.tags.<tag name>.header" ` + refererWords}},
+		tracingCase{"a tag on expect", traced("10.0.3.40:4317", "expect", "true"), []string{`g.yaml:11:9: "tracing.tags.<tag name>.header" ` + expectWords}})
+	for _, name := range []string{"x-envoy-decorator-operation", "x-envoy-downstream-service-cluster", "x-envoy-downstream-service-node"} {
+		cases = append(cases, tracingCase{"an only_with_header name tracing removes, with forwarded: " + name,
+			traced("10.0.3.40:4317", "x-tenant", "true", "client_address: forwarded", "auth: {ask: app /check, enabled: true, only_with_header: "+name+"}"),
+			[]string{`g.yaml:14:40: "auth.only_with_header" ` + onlyWithWords}})
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root, problems := tree.FromYAML("g.yaml", []byte(c.document))
+			if problems != nil {
+				t.Fatalf("FromYAML problems = %q, want none", testsupport.ProblemStrings(problems))
+			}
+			if got := testsupport.ProblemStrings(Refusals(Proxyfile, root, root, nginxTarget)); !slices.Equal(got, c.want) {
+				t.Errorf("Refusals = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 // The nginx generator writes the header names of auth.send, auth.accept and auth.only_with_header into nginx.conf as
 // they are, bare or inside a quoted value, and escapes none of them: nginx would read a $ in a name as the start of a
 // variable, and a " or a \ would end or escape the quoted text around it. Both patterns a header name is read by
@@ -521,7 +603,7 @@ func TestHeaderNamesNeedNoEscaping(t *testing.T) {
 func TestLessStrictWarning(t *testing.T) {
 	for _, c := range []struct{ target, want string }{
 		{"envoy", ""},
-		{"nginx", `this nginx configuration is less strict than the Envoy output in 14 ways; docs/nginx.md lists them under "Where nginx is less strict than the Envoy output"`},
+		{"nginx", `this nginx configuration is less strict than the Envoy output in 15 ways; docs/nginx.md lists them under "Where nginx is less strict than the Envoy output"`},
 		{"haproxy", `this HAProxy configuration is less strict than the Envoy output in 10 ways; docs/haproxy.md lists them under "Where HAProxy is less strict than the Envoy output"`},
 	} {
 		target, _ := TargetNamed(c.target)
@@ -566,6 +648,7 @@ func TestLessStrictWays(t *testing.T) {
 			{"limits.request_headers.size", "a request trailer larger than the header limit is served over HTTP/1.1"},
 			{line, "a header line with no colon reaches the service as a header with an empty value"},
 			{line, "a request with no body reaches the service without content-length: 0"},
+			{line, "a Referer the Envoy output removes reaches the service"},
 			{line, "a WebSocket upgrade a service answers without switching passes the service's body"},
 			{line, "a service's answer with a malformed header line or a malformed status line reaches the client"},
 			{line, "over HTTP/2, empty frames in a row are served"},

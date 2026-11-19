@@ -1,14 +1,2 @@
-examples/otel/hocon/Proxyfile: tracing: "tracing" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/otel/hocon/Proxyfile: tracing.path_in_url: "tracing.path_in_url" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/otel/hocon/Proxyfile: tracing.provider: "tracing.provider" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/otel/hocon/Proxyfile: tracing.provider.otel: "tracing.provider.otel" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/otel/hocon/Proxyfile: tracing.provider.otel.endpoint: "tracing.provider.otel.endpoint" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/otel/hocon/Proxyfile: tracing.provider.otel.sample: "tracing.provider.otel.sample" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/otel/hocon/Proxyfile: tracing.provider.otel.sample.rate: "tracing.provider.otel.sample.rate" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/otel/hocon/Proxyfile: tracing.provider.otel.service: "tracing.provider.otel.service" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/otel/hocon/Proxyfile: tracing.tags: "tracing.tags" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/otel/hocon/Proxyfile: tracing.tags.environment: "tracing.tags.<tag name>" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/otel/hocon/Proxyfile: tracing.tags.environment.default: "tracing.tags.<tag name>.default" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/otel/hocon/Proxyfile: tracing.tags.environment.env: "tracing.tags.<tag name>.env" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/otel/hocon/Proxyfile: tracing.tags.request_id: "tracing.tags.<tag name>" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/otel/hocon/Proxyfile: tracing.tags.request_id.header: "tracing.tags.<tag name>.header" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
+examples/otel/hocon/Proxyfile: tracing: "tracing" without path_in_url: true is refused by --target nginx: nginx's tracer always puts the request's path and query in the span, which path_in_url: false keeps out; write path_in_url: true, or render it for envoy
+examples/otel/hocon/Proxyfile: tracing.provider.otel.endpoint: "tracing.provider.otel.endpoint" a DNS name with no dns.resolver is refused by --target nginx: nginx looks a name up only through the name server it is given; write dns.resolver, or write the collector's IP address

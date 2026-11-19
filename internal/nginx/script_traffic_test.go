@@ -71,7 +71,7 @@ func TestScriptTraffic(t *testing.T) {
 				},
 			}},
 		{name: "clientKey, hashKey, limitedKind and retrySpent are exported",
-			blocks: [][]string{{"export default {headerNames, forwardedProto, origin, relay, check, clientKey, hashKey, limitedKind, retrySpent};"}}},
+			blocks: [][]string{{scriptExport}}},
 		// What each of clientKey, hashKey and limitedKind answers is held by the battery's rows (client keys, hash, rate
 		// limit); what each answers when it throws is here. nginx counts no request whose zone key is empty, so
 		// clientKey's catch answers the peer's key.

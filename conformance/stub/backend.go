@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // backend is one service instance of the full example. Its controls are request headers, so a scenario steers the
@@ -176,6 +177,9 @@ type echo struct {
 	// holds, so a row tells one line holding a comma from two lines: Envoy joins the lines of some headers into one,
 	// and a service that reads only the first line of a header reads another value when a proxy passes both.
 	Headers map[string]string `json:"headers"`
+	// HeaderBytes holds the same text in hexadecimal for each header of Headers that holds a byte outside well-formed
+	// UTF-8, which JSON writes as U+FFFD, so the battery reads the bytes the service received.
+	HeaderBytes map[string]string `json:"headerbytes,omitempty"`
 	// Body is the request body as read, on a plain HTTP request; Trailers holds the request's trailers as Headers holds
 	// its headers, read once the body has ended, including those no Trailer header declared.
 	Body     string            `json:"body,omitempty"`
@@ -191,8 +195,16 @@ func (b *backend) describe(r *http.Request, attempt int) echo {
 		_, port, _ = net.SplitHostPort(addr.String())
 	}
 	headers := map[string]string{}
+	var headerBytes map[string]string
 	for name, values := range r.Header {
-		headers[strings.ToLower(name)] = strings.Join(values, "\n")
+		value := strings.Join(values, "\n")
+		headers[strings.ToLower(name)] = value
+		if !utf8.ValidString(value) {
+			if headerBytes == nil {
+				headerBytes = map[string]string{}
+			}
+			headerBytes[strings.ToLower(name)] = hex.EncodeToString([]byte(value))
+		}
 	}
 	var trailers map[string]string
 	for name, values := range r.Trailer {
@@ -202,5 +214,5 @@ func (b *backend) describe(r *http.Request, attempt int) echo {
 		trailers[strings.ToLower(name)] = strings.Join(values, "\n")
 	}
 	return echo{Service: b.service, Instance: b.instance, Port: port, Proto: r.Proto, Method: r.Method,
-		Path: r.RequestURI, Host: r.Host, Attempt: attempt, Headers: headers, Trailers: trailers}
+		Path: r.RequestURI, Host: r.Host, Attempt: attempt, Headers: headers, HeaderBytes: headerBytes, Trailers: trailers}
 }

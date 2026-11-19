@@ -27,11 +27,31 @@ type target struct {
 	// through, so the service can tell it went unchecked. The battery forges the entry's own mark and reads it, so a
 	// proxy that writes another name is held to removing its own.
 	mark string
+	// version is the proxy's major.minor, such as 1.40. One version can have entries on more than one image, such as
+	// nginx's plain images and those tagged -otel, each running the files its image loads, so the coverage checks judge
+	// the entries of one name and version together (versions).
+	version string
 }
 
 // file is one proxyfile an entry runs: label names it in the subtests and in an exchange's on, and proxyfile is its
-// path from this package's folder.
-type file struct{ label, proxyfile string }
+// path from this package's folder. collector starts the stub's collector at the address the file sends its spans to,
+// so the rows read them (startWorld); every other file's collector is left unreachable. scenarios, when set, names
+// the only scenarios whose rows run on the file, for a file that is there for those rows alone.
+type file struct {
+	label, proxyfile string
+	collector        bool
+	scenarios        []string
+}
+
+// tracingFile is the battery's file with tracing, which Envoy's entry and each nginx entry on an image tagged -otel
+// run, and tracingByNameFile the same tracing with the collector found by name: nginx writes a relay for a name, and
+// asks an IP address directly, so each form runs on every entry that traces. The second runs the tracing rows alone, as
+// the first runs every other row on the same proxy.
+var (
+	tracingFile       = file{label: "nginx-tracing", proxyfile: "testdata/nginx-tracing.yaml", collector: true}
+	tracingByNameFile = file{label: "nginx-tracing-by-name", proxyfile: "testdata/nginx-tracing-by-name.yaml", collector: true,
+		scenarios: []string{tracing.name}}
+)
 
 // targets returns every proxy the battery runs. Envoy's image is read from the file scripts/validate-envoy.sh reads,
 // so an Envoy upgrade changes one line for both. Its admin listener answers /ready on 127.0.0.1 only, which is why
@@ -52,8 +72,9 @@ func targets(t testing.TB) []target {
 	}
 	envoy, _ := render.TargetNamed("envoy")
 	envoyEntry := target{
-		name:  "envoy",
-		label: "envoy-1.40",
+		name:    "envoy",
+		label:   "envoy-1.40",
+		version: "1.40",
 		files: []file{
 			{label: "full", proxyfile: "../examples/full/hocon/Proxyfile"},
 			{label: "portable", proxyfile: "../examples/portable/hocon/Proxyfile"},
@@ -63,6 +84,8 @@ func targets(t testing.TB) []target {
 			{label: "two-checks", proxyfile: "testdata/two-checks.yaml"},
 			{label: "nginx-checks", proxyfile: "testdata/nginx-checks.yaml"},
 			{label: "nginx-auth", proxyfile: "testdata/nginx-auth.yaml"},
+			tracingFile,
+			tracingByNameFile,
 		},
 		image: image,
 		// Envoy writes its log lines to stdout every 10 s by default; every 100 ms, a row that reads them (answer.logged)
@@ -75,17 +98,21 @@ func targets(t testing.TB) []target {
 	return slices.Concat([]target{envoyEntry}, nginxEntries(t), haproxyEntries(t))
 }
 
-// pinnedImage is a line of scripts/<proxy>-images: an image tagged with its version and pinned by digest. The
-// validators read the same files with the same rule, in scripts/pinned-images.sh.
-var pinnedImage = regexp.MustCompile(`^[^\s@]+:([0-9]+)\.([0-9]+)\.[0-9]+@sha256:[0-9a-f]{64}$`)
+// pinnedImage is a line of scripts/<proxy>-images: an image tagged with its version, with -otel after it in a file
+// named <proxy>-otel-images, which pins nginx's images that carry the tracing module, and in no other file, and pinned
+// by digest. The validators read the same files with the same rule, in scripts/pinned-images.sh.
+var pinnedImage = regexp.MustCompile(`^[^\s@]+:([0-9]+)\.([0-9]+)\.[0-9]+(-otel)?@sha256:[0-9a-f]{64}$`)
 
-// pin is one line of scripts/<proxy>-images: the image, and the label of the entry that runs it.
-type pin struct{ image, label string }
+// pin is one line of scripts/<proxy>-images: the image, the label of the entry that runs it and the image's
+// major.minor.
+type pin struct{ image, label, version string }
 
 // pinnedImages returns the images scripts/<proxy>-images pins, one a line, in the file's order, each labelled
 // <proxy>-<major>.<minor>, so a row one version answers differently fails in that entry alone. A missing or empty file,
-// or a line that is not an image tagged with its version and pinned by digest, fails the run with the file's name: a
-// name with no digest would run whatever its tag pointed to that day.
+// or a line that is not an image tagged with its version and pinned by digest, or tagged -otel in a file other than
+// <proxy>-otel-images or without it in that file, fails the run with the file's name: a name with no digest would run
+// whatever its tag pointed to that day, and an image in the other file would run one entry's rows on the other's
+// image. The message names the image form as scripts/pinned-images.sh does.
 func pinnedImages(t testing.TB, proxy string) []pin {
 	path := "../scripts/" + proxy + "-images"
 	lines, err := os.ReadFile(path)
@@ -95,12 +122,17 @@ func pinnedImages(t testing.TB, proxy string) []pin {
 	var pins []pin
 	for _, image := range strings.Split(strings.TrimSuffix(string(lines), "\n"), "\n") {
 		version := pinnedImage.FindStringSubmatch(image)
-		if version == nil {
-			t.Fatalf("%s holds %q, not one %s image a line, tagged with its version and pinned by digest "+
-				"(%s:<major>.<minor>.<patch>@sha256:<digest>)",
-				path, image, proxy, proxy)
+		repository, otel := strings.CutSuffix(proxy, "-otel")
+		if version == nil || (version[3] == "-otel") != otel {
+			form := repository + ":<major>.<minor>.<patch>@sha256:<digest>"
+			if otel {
+				form = repository + ":<major>.<minor>.<patch>-otel@sha256:<digest>"
+			}
+			t.Fatalf("%s holds %q, not one %s image a line, tagged with its version and pinned by digest (%s)",
+				path, image, repository, form)
 		}
-		pins = append(pins, pin{image: image, label: proxy + "-" + version[1] + "." + version[2]})
+		majorMinor := version[1] + "." + version[2]
+		pins = append(pins, pin{image: image, label: proxy + "-" + majorMinor, version: majorMinor})
 	}
 	return pins
 }

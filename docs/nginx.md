@@ -758,8 +758,10 @@ With `admin`, nginx listens on `127.0.0.1` at that port and answers three paths 
 
 - `/ready` is answered `200` with `LIVE`, as the Envoy output answers it.
 - `/stats` is answered `200` with nginx's `stub_status` page, seven counters in all: the line `Active connections`, the
-  line `server accepts handled requests` with a line of three numbers under it, and the line with `Reading`,
-  `Writing` and `Waiting`. The Envoy output answers with its own statistics, one `name: value` line each.
+  line `server accepts handled requests` with a line of three numbers under it, and the line with `Reading`, `Writing`
+  and `Waiting`. The Envoy output answers with its own statistics, one `name: value` line each. With `tracing` and a
+  collector found by name, its count of requests holds each call of the tracer through the relay
+  ([Tracing](#what-the-file-writes)).
 - `/server_info` is answered `200` as `application/json` with the nginx version, `{"version":"1.30.6"}` or
   `{"version":"1.31.8"}`. The Envoy output answers with its own version, its state and more.
 - Any other path, and any request with a query, `/stats?format=json` or `/ready?x=1`, is answered `404` with no body,
@@ -773,9 +775,9 @@ With `admin`, nginx listens on `127.0.0.1` at that port and answers three paths 
   `text/plain`, a `QUERY` sent with no `Content-Type` or with an empty one, which over HTTP/1.1 is also one of spaces
   and tabs alone, and a `#` in the target, `400` with no body and no `content-type`, and HTTP/1.0 `426` with `Upgrade
   Required` as `text/plain`, the connection closed after each.
-- An absolute target is answered as the path it names, or `400` when nginx or the public listener's checks refuse it,
-  as one with an empty port, user information or a query right after its host, where the Envoy output answers every
-  absolute target `404`.
+- An absolute target is answered as the path it names, or `400` when nginx or the public listener's checks refuse it, as
+  one with an empty port, user information, a query right after its host or a scheme other than `http` and `https`,
+  where the Envoy output answers every absolute target `404`.
 - The admin port writes no log line for a request, as the Envoy output writes none.
 
 None of the three paths is answered on the public listener: a route takes them as it takes any other path, on both
@@ -971,6 +973,7 @@ nginx versions sent the check `GET /auth/é/ü?x=ß`. The request holds:
 - `x-envoy-internal: true` and `x-envoy-expected-rq-timeout-ms`, which holds `auth.timeout` in milliseconds too: the two
   headers Envoy's own client for the check adds, so a check service reads the same names behind either proxy. A
   client's own copies of both are removed before the check is asked, and never reach the service;
+- with `tracing`, `traceparent` and `tracestate`, as [Tracing](#tracing) says;
 - with `send_request: true`, `x-forwarded-uri`, the path the route matched, normalised, with each byte of 0x80 or more
   escaped as the service receives it, and the query as the client wrote it, before a rewrite; `x-forwarded-method`;
   `x-forwarded-proto`, the scheme of an absolute target in the letter case it was written in, and otherwise the
@@ -1516,6 +1519,429 @@ below](#where-nginx-is-less-strict-than-the-envoy-output): a chunked answer its 
 Envoy logs with `UPE` and a failure line, is recorded by nginx as complete, and nginx writes neither; and an answer with
 a header line nginx passes on where Envoy answers `502`, which Envoy logs with `UPE`.
 
+## Tracing
+
+With `tracing` and its `otel` provider, nginx sends a span of each sampled request to an OpenTelemetry collector through
+its OpenTelemetry module, `ngx_otel_module`, which the official images tagged `-otel` carry, such as
+`nginx:1.31.8-otel`, and the plain images do not. Line 2 of `nginx.conf` then names the module beside njs, and the file
+loads it with `load_module modules/ngx_otel_module.so;`. On a plain image `nginx -t` stops at that line, with `dlopen()
+"/etc/nginx/modules/ngx_otel_module.so" failed (... No such file or directory)`, and the same file loads on the image
+tagged `-otel` of the same version. A file without `tracing` loads no module and writes none of the tracing lines, so it
+loads on either image. Each behaviour this section names was measured on nginx 1.30.6 and 1.31.8, each on its image
+tagged `-otel`, beside the Envoy output on Envoy 1.40.2, and the battery's tracing rows run on both
+([Conformance](conformance.md)). The `xray` provider is refused ([What nginx refuses of
+tracing](#what-nginx-refuses-of-tracing)).
+
+### What the file writes
+
+The spans go as OTLP over gRPC, with no TLS and no credentials, to the endpoint (`otel_exporter`), with `service` as
+their `service.name` (`otel_service_name`), as the Envoy output sends them.
+
+- **The collector.** An IP address is asked directly, as in `otel_exporter { endpoint 10.0.3.40:4317; }`. A DNS name,
+  which needs `dns.resolver` ([What nginx refuses of tracing](#what-nginx-refuses-of-tracing)), is reached through a
+  relay that the file writes in the `http` block, because the module looks a name up only once in each worker, as the
+  worker starts. For `listen: 8000`, `dns: {resolver: "10.0.0.2:53"}` and the endpoint `otel-collector:4317`:
+
+  ```
+  otel_exporter { endpoint unix:/run/proxyfile-8000/collector.sock; }
+  resolver 10.0.0.2:53 valid=5s;
+  scgi_temp_path /run/proxyfile-8000;
+  upstream proxyfile_8000_collector {
+    zone proxyfile_8000_collector 1m;
+    server otel-collector:4317 resolve max_fails=0;
+  }
+  server {
+    listen unix:/run/proxyfile-8000/collector.sock;
+    http2 on;
+    otel_trace off;
+    access_log off;
+    client_max_body_size 0;
+    max_headers 100;
+    client_header_buffer_size 64;
+    large_client_header_buffers 1 61376;
+    client_body_timeout 10s;
+    send_timeout 10s;
+    location / {
+      grpc_pass grpc://proxyfile_8000_collector;
+      grpc_connect_timeout 5s;
+      grpc_read_timeout 10s;
+      grpc_send_timeout 10s;
+    }
+  }
+  ```
+
+  The upstream looks the name up through `dns.resolver` and keeps the answer 5 s, as a service's upstream does, and
+  takes each address of it into a zone of 1 MiB, as a service's upstream does: a name giving 1,000 addresses fitted on
+  both versions, and for one giving 2,000 nginx wrote `ngx_slab_alloc() failed: no memory in upstream zone` and `cannot
+  add new server to upstream ..., memory exhausted`, its requests still answered `200`. It keeps no idle connection, so
+  each call of the tracer opens its own, and a call after the name moved goes to the new address. The relay's server
+  takes nothing from what the file says of its clients' requests: it writes no span and no request log line, no rate
+  limit and no check reach it, and it keeps the header limits of a file with no `limits` key, which hold the tracer's
+  few headers whatever `limits` says. With `limits.request_headers` at a count of 3 and those limits taken from the
+  file, nginx refused every call of the tracer and no span of 61 arrived; with the relay's own, all 61 did (nginx
+  1.31.8). Its calls count in the admin port's `/stats` all the same, as `stub_status` counts every request nginx serves
+  and has one directive, `stub_status`, which takes no argument and leaves no server out: after 5 traced requests and a
+  read of `/stats`, its count of requests had grown by 11, the tracer's 5 calls among them, on both versions. Its times
+  are its own too: 5 s to connect, as the Envoy output's collector cluster, which writes no connect time and so takes
+  Envoy's 5 s, and 10 s for each read and write, twice the 5 s the slowest collector measured took to answer, so that a
+  call to a collector that never answers ends, and the module's batch comes back. The module gives its calls no deadline
+  and keeps four batches of spans in each worker, each back only when its call ends. A batch's body has no size limit,
+  as the tracer is the relay's only client, on a socket only nginx's users can reach: the largest file render accepts,
+  453 tags each on a header, went through the relay at 100 requests a second for 30 s, with a collector that answers at
+  once and with one that answers after 5 s, and at 2,000 a second for 10 s, in batches of up to 512 spans, and every
+  span arrived, no call was answered `413`, and nginx wrote no request body to a file.
+  The socket file is in the folder of the check's socket, which the file names once with `scgi_temp_path` for one
+  relay or both ([The relay's socket](#the-relays-socket)), with the same modes, and both relays work side by side in
+  it: with the check asked and the collector by name, 61 checked requests and 61 others were answered `200` and 122
+  spans arrived. nginx removes the file when it stops, and a stop and a start, and a reload 10 s into 1,000 requests a
+  second for 30 s, answered every request `200`; of three reloads through the relay and two asking the collector's
+  address on each version, one lost spans, 394 of 30,001 through the relay on 1.30.6, and the others none. A kill
+  leaves the file, as it leaves the check's, and nginx then does not start in the same container, writing `[emerg]
+  bind() to unix:/run/proxyfile-10000/collector.sock failed (98: Address already in use)` for `listen: 10000`, until
+  the file is removed or `/run` is a `tmpfs`: with either, a kill and a start in the same container started and sent
+  every span. The row of `tracing.provider.otel.endpoint` declares it.
+
+- **The draw.** `otel_trace` reads a variable `proxyfile.js` sets to `on` for a request the Envoy output would trace:
+  the first eight characters of its `x-request-id`, after an optional `0x`, read as hexadecimal, modulo 10,000, below
+  100 times `sample.rate`. An id shorter than eight characters, or with another character among them, is never traced,
+  and an id that is not a UUID is drawn by those characters: at `rate: 5%`, `000001f3x` and `00000000z` are traced, and
+  `0001f3`, `1234567`, `abc`, `+00001f3...` and `-00004b0...` never, through both proxies. The id is the one the service
+  receives: the proxy's own under `client_address: connection`, and under `forwarded` the client's own when it sent one,
+  so a client that chooses its id chooses the draw ([Tracing](tracing.md#opentelemetry)). The draw and the span's
+  `guid:x-request-id` read the id as the Envoy output reads it, without a space or a tab at either end, and the service
+  receives the client's id as sent, as through a file with no `tracing`. The admin listener writes no span (`otel_trace
+  off`), as the Envoy output's writes none.
+- **Which requests get a span.** nginx's module adds the target as the client wrote it, as `http.target`, and the
+  User-Agent as nginx keeps it, as `http.user_agent`, to every span, and no line removes either, so the draw picks only
+  among requests whose span holds nothing of either that the Envoy output's does not. A span is written only for a
+  request whose target nginx sends the service as the client wrote it, of at most 256 bytes, on a route with no rewrite
+  and, under `client_address: forwarded`, with no `x-envoy-original-path` from the client: a target that holds a dot
+  segment, `//`, an escaped unreserved character or `%2F`, or a character Envoy escapes, such as `^` in the path, gets
+  no span, and neither does one of 257 bytes, where the Envoy output writes a span holding the path it normalised,
+  escaped or rewrote, cut to 256 characters, or the client's `x-envoy-original-path`. Over 47 targets and 4 routes with
+  a rewrite, each `http.url` and `http.target` nginx wrote held bytes of the Envoy output's `http.url`. A request whose
+  User-Agent has a tab at either end over HTTP/1.1, which nginx keeps and the Envoy output's `user_agent` removes, gets
+  no span either. Such a request reaches the service and the check with the trace marked not sampled.
+- **The client's trace.** `otel_trace_context extract` lets the module continue a client's `traceparent` of version
+  `00`, and `proxyfile.js` writes the `traceparent` and `tracestate` each route's location sends the service, in place
+  of the client's. A sampled parent whose request the draw picks continues the client's trace: the service receives the
+  client's trace id with the span's own id as its parent, and the span is the client's span's child. A sampled parent
+  the draw does not pick, and a parent marked not sampled, give no span, and the service receives the client's trace id
+  marked not sampled. A `traceparent` that says sampled does not force a trace, and neither do `x-client-trace-id` and
+  `x-envoy-force-trace`. A malformed `traceparent`, such as one of version `01` with a fifth part, an all-zero trace or
+  parent id, `00-abc-def-01` or the flags `0g`, reaches the service as the client sent it, each line and each byte, 0xFF
+  among them, with its `tracestate` lines as sent, and no span, as through the Envoy output. Of two `traceparent` lines
+  whose first is well formed the first is read and one line is sent, and flags such as `03`, or hexadecimal written in
+  capitals, read as sampled.
+- **A `traceparent` the module does not continue.** The module does not continue a `traceparent` of another version than
+  `00`, such as `01` or `ff`, nor, over HTTP/1.1, one whose line or whose first `tracestate` line has a tab at either
+  end, which it reads with the tab, where the Envoy output continues the client's trace with version `00`, a parent id
+  of its own and a span. Such a request gets no span, and the service and the check receive the client's version, trace
+  id and parent id with the sampled flag the Envoy output sends: sampled only when the client marked it so and the draw
+  picks the request. The forms tried for a version other than `00`: `otel_trace_context propagate`, with which the
+  module reads and writes the header itself, started a trace of its own for a parent of version `01` and for one of
+  `ff`, with a new trace id, where the Envoy output kept the client's (nginx 1.31.8); `extract`, with the client's
+  header passed on as sent, kept the client's flag whatever the draw said, and wrote no span; and a new trace the draw
+  decides lost the client's trace id (both versions). The form written keeps the client's trace id and sends the Envoy
+  output's flag.
+- **A gRPC call with a malformed `traceparent` on more than one line**, or beside more than one `tracestate` line, is
+  answered `400` by a traced gRPC location and reaches no service, where the Envoy output passes each line on as a field
+  of its own. The form tried: one `grpc_set_header` whose value holds a line break between the lines, the form the
+  HTTP/1.1 locations use, made nginx send one field holding the line break, which an HTTP/2 field may not hold; the
+  service's HTTP/2 server closed the connection with `PROTOCOL_ERROR`, and the call reached no service while the client
+  got `200` with no message (both versions). A `grpc_set_header` for each line a file admits would add two lines to
+  every gRPC location for each header line `limits.request_headers` allows, and was not written.
+- **`tracestate`.** A client's lines are joined with commas, `a=1` and `b=2` as `a=1,b=2`, each line without a space or
+  a tab at either end and its bytes as sent, 0xFF among them, and sent only beside a `traceparent`; a client's
+  `tracestate` without one is dropped, as by the Envoy output. The span carries the client's first `tracestate` line,
+  which the module reads, where the Envoy output's carries the lines joined, so the two are equal for one line. When no
+  `tracestate` goes on, the Envoy output adds an empty `tracestate:` line beside its own `traceparent`, and nginx sends
+  none; and of a `traceparent` or a `tracestate` the client sent as one empty line beside a malformed `traceparent`,
+  which the Envoy output passes on, nginx sends none. Over 300 random forms of the two headers, half over HTTP/2, the
+  service received from nginx what it received from the Envoy output in each but those empty lines.
+- **The check.** The check's location sends the check the `traceparent` and `tracestate` the service receives, so the
+  check's own spans join the request's trace with the request's span as their parent, and neither beside a malformed
+  `traceparent`, as the Envoy output's check request then carries none. Over 32 forms of a client's trace (none, version
+  `00` sampled and not, malformed, version `01` and `ff` sampled and not, each without and with a `tracestate`, for a
+  request the draw picks and one it does not), whether the check and the service each received each header, the trace
+  id, the flag and the `tracestate` equalled the Envoy output's in each of 256 comparisons, an empty `tracestate` line
+  read as none. Two differences stay: the Envoy output writes a span for its request to the check, `async <service>
+  egress`, which is the parent that request names, and nginx writes no span for the check; and the Envoy output's empty
+  `tracestate:` line.
+- **The span's name and fields.** A span is named after the route (`otel_span_name`), as the Envoy output names it, and
+  `ingress` when no route takes the request or its path is one both proxies refuse. It carries the Envoy output's
+  fields, each written with `otel_span_attr`: `node_id`, `zone`, `guid:x-request-id`, `http.url`, `downstream_cluster`,
+  `user_agent`, `http.protocol`, `peer.address`, `request_size`, `response_size`, `component`, `upstream_cluster` and
+  `upstream_cluster.name`, whose values equalled the Envoy output's over HTTP/1.1 and HTTP/2, with a body, for a `503`
+  and for a gRPC call. The scheme of `http.url` is `http` or `https` alone, as in the Envoy output's: an absolute
+  target's own, otherwise, under `client_address: forwarded` over HTTP/1.1, a client's `X-Forwarded-Proto` that is one
+  of the two words in any letter case, with spaces or tabs around it, and otherwise the connection's; over HTTP/2 nginx
+  writes the connection's, where the Envoy output writes the client's `:scheme` when it is `http` or `https`. Its host
+  is the one the Envoy output's holds: the route's service's `host_header` when it writes one, and otherwise the host
+  the request names. Beside them the module sets fields of its own, which no line removes: `http.method`, `http.target`,
+  `http.route`, `http.scheme`, `http.flavor`, `http.user_agent`, `http.status_code`, `http.request_content_length`,
+  `http.response_content_length`, `net.host.name`, `net.host.port`, `net.sock.peer.addr` and `net.sock.peer.port`.
+  `http.route` holds the name of the location nginx generated for the route, such as `@pf_r_1`, not the route's name,
+  which the span's name holds, and `net.host.name` the server's name, or, on the server that answers a host no
+  environment names, the `Host` the client sent, which that span's `http.url` holds too. None of them carries a header
+  or a token that the Envoy output's fields do not: `http.target` holds bytes of the Envoy output's `http.url`, and
+  `http.user_agent` the Envoy output's `user_agent`, as only such requests get a span (above). `http.status_code` is
+  nginx's own, a number, `200`, where the Envoy output writes the text `"200"`: an `otel_span_attr` of a name the module
+  sets is added beside the module's attribute, not over it, as `http.target` shows ([What nginx refuses of
+  tracing](#what-nginx-refuses-of-tracing)). `response_flags`, `error` and the gRPC attributes are not set, and a span's
+  status is an error from `500` on.
+- **Tags.** One function of `proxyfile.js` reads the sources of a request's tags in one pass over its lines, each header
+  and each variable once however many tags read it, and writes each source's value into a variable of its own, which
+  each tag's `map` reads. A header tag reads the first line of the client's header as the Envoy output reads it, without
+  a space or a tab at either end, and, for a header whose lines the Envoy output joins, such as `accept`,
+  `authorization` or `cache-control`, every line, joined with commas as it joins them, `a` and `b` as `a,b`; its value
+  keeps a quote, a backslash, a tab inside it and bytes above 0x7F as sent. A tag on a header the proxy writes for the
+  service reads what the service receives: on `x-request-id` the id the proxy sends, on an `auth.accept` name the value
+  the check accepted, or the tag's default on a route the check is off for, and on `x-forwarded-proto`, and on
+  `x-forwarded-for` under `client_address: connection`, the proxy's own values; a tag on a header the proxy removes from
+  clients is never set. An `env` tag reads the variable from nginx's environment, which the file keeps for it with `env
+  <NAME>;`, each byte as set, 0x01 and 0x08 among them; a variable named like a property every object has, such as
+  `constructor` or `toString`, is read as unset, as njs leaves such names out of `process.env`, where the Envoy output
+  reads it. A tag named like a field of the span takes the field's place, and keeps the field's value when its source
+  gives none or an empty one, as through the Envoy output: `component` stays `proxy`.
+- **Requests answered before a route.** Over 50 kinds of request the file answers without passing them on, listed from
+  where it answers (each `return` and answer location, the server that answers a host no environment names, the admin
+  listener and nginx's own parser) and each sent with an id the draw picks, nginx wrote a span where the Envoy output
+  wrote one, or none, and never one where the Envoy output wrote none. Both write a span for a host no environment names
+  and a request no route takes (`404`), an origin the origin check refuses (`403`), a preflight, the check's `401` and
+  `403`, a check that does not answer in time, the rate limit's `429`, a service that refuses the connection (`502`),
+  and an escaped control byte, which the Envoy output serves and nginx answers `400`, each with the same `http.url`.
+  Neither writes one for a refused upgrade (`403`), on its own or to a path a route refuses, a fragment in the target,
+  `HTTP/1.0`, a method such as `FOO`, a `QUERY` with no `Content-Type`, a header name outside the token characters,
+  `HTTP/1.10`, `HTTP/2.0` on an HTTP/1 connection, the byte 0x80 or 0x7F in the target, an escaped NUL, no `Host`,
+  `OPTIONS *`, an absolute target of another scheme than `http` and `https`, and over HTTP/2 `te: gzip` and a header
+  value holding 0x01. nginx writes none where the Envoy output writes one for the requests it answers `400` or `405`
+  before a route, each declared on its row ([What nginx writes with no key](#what-nginx-writes-with-no-key)):
+  `Connection: foo`, a dot segment with a `;` parameter, `%5C`, a path to normalise beside an escape Envoy keeps and
+  such an escape on a route with a rewrite, an invalid escape such as `%zz`, `TRACE`, `CONNECT` and a tab between the
+  method and the target. A path both proxies refuse, `/open/..%3B/`, is answered `400` with a span named `ingress` by
+  both.
+- **A client's copies of three headers.** With tracing, every location that passes a request on, and the check's, also
+  writes `x-envoy-decorator-operation`, `x-envoy-downstream-service-cluster` and `x-envoy-downstream-service-node`
+  empty, under either `client_address`, so a client's copies reach neither the service nor the check, as the Envoy
+  output removes them with the `otel` provider; `auth.only_with_header` may not name them then ([The auth
+  check](#the-auth-check)).
+- **A retried route.** Each try of a request sends the service the same `traceparent` and `tracestate`, so the request
+  has one span, whose ids are those the service read on the try that served it, with the last try's `upstream_cluster`
+  and status, as through the Envoy output: measured with the first connection refused, with every connection refused,
+  which gave one span with the status `502`, and with a body over 1 MiB, which is sent once.
+
+### Where nginx traces otherwise than the Envoy output
+
+The differences, which nginx's rows in [the support table](portability.md#support-by-proxy-from-the-generators) declare
+in these words:
+
+- **`tracing`**: needs ngx_otel_module, in the nginx images tagged -otel, where the plain images stop at load_module.
+- **`tracing.provider.otel`**: spans carry the Envoy output's attribute names with nginx's own beside them, http.route
+  holding the name of the location nginx generated; http.status_code is a number, response_flags, error and the gRPC
+  attributes are not set, and an attribute with no value, such as upstream_cluster on a request no route takes, is sent
+  empty, where Envoy sets none; over HTTP/2 http.url holds the connection's scheme, where Envoy writes the client's
+  :scheme when it is http or https; a span's tracestate holds the client's first tracestate line, where Envoy's holds
+  the lines joined; a traceparent of another version than 00, or one whose line or first tracestate line has a tab at
+  either end over HTTP/1.1, reaches the service and the check with the client's version, trace id and parent id and the
+  sampled flag the Envoy output sends, and no span is written, where Envoy continues the trace with version 00, a parent
+  id and a span of its own; a request whose User-Agent has a tab at either end over HTTP/1.1, which nginx's own
+  http.user_agent would hold, gets no span and is sent on not sampled, where Envoy traces it; a gRPC call whose
+  malformed traceparent comes with a second traceparent or tracestate line is answered 400 and reaches no service, where
+  Envoy passes each line on as a field of its own; the auth check gets the trace, with the request's span as its parent,
+  but no span of its own, where Envoy writes a span for the check; a preflight and a request refused for its origin get
+  a span named ingress with upstream_cluster empty, where the Envoy output names the span after the route and sets its
+  service; and no empty tracestate line is sent to the service or the check, where Envoy adds one beside each
+  traceparent of its own when no tracestate goes on, nor a traceparent or tracestate sent as one empty line, which Envoy
+  passes on beside a malformed traceparent.
+- **`tracing.provider.otel.endpoint`**: an IP address, or a DNS name with dns.resolver, which nginx follows through a
+  relay of its own, a name giving at most about 1,000 addresses, as a service's does; the admin port's /stats counts
+  each call of the tracer through the relay as a request; the relay listens on a socket file,
+  /run/proxyfile-<listen>/collector.sock, which nginx removes when it stops and a kill leaves, and nginx then does not
+  start, its bind() to the file failing (98: Address already in use), until the file is removed or /run is a tmpfs.
+- **`tracing.tags.<tag name>.env`**: a variable set to an empty value, or unset with no default, gives the span an empty
+  tag, where Envoy sets none, except a tag named like a field of the Envoy output's span, such as component, which keeps
+  the field's value, as through Envoy; a variable named like a property every object has, such as constructor or
+  toString, is read as unset, where Envoy reads it.
+- **`tracing.tags.<tag name>.header`**: a header absent with no default, or sent empty, gives the span an empty tag,
+  where Envoy sets none, except a tag named like a field of the Envoy output's span, such as component, which keeps the
+  field's value, as through Envoy.
+- **`tracing.path_in_url`**: true only; a span is written only for a request whose target nginx sends on as the client
+  wrote it, at most 256 bytes, on a route with no rewrite and, under client_address forwarded, with no
+  x-envoy-original-path, and any other is sent on not sampled with no span, where Envoy writes the path it normalised,
+  escaped or rewrote, cut to 256 characters, or a client's x-envoy-original-path.
+
+Tracing adds no entry to [the list of ways nginx is less strict than the Envoy
+output](#where-nginx-is-less-strict-than-the-envoy-output), which has 15 entries: each difference above was measured and
+is declared on its key's row, none sends the collector, the service or the check a header or a token the Envoy output
+does not send, and no request waits for the collector ([What tracing costs](#what-tracing-costs)).
+
+### What nginx refuses of tracing
+
+Each is refused at render by the key where the file writes it, in these words:
+
+- **The `xray` provider**, and each key under it: "nginx has no X-Ray tracer; write the otel provider and send its spans
+  to an OpenTelemetry Collector with the AWS X-Ray exporter, or render it for envoy". The official images carry one
+  tracer, `ngx_otel_module`, in the images tagged `-otel`, and it sends OTLP alone: the modules folder of
+  `nginx:1.31.8-otel` holds `acme`, `geoip`, `image_filter`, `js`, `xslt_filter` and `otel`, with the stream modules of
+  `geoip` and `js`, and those of the plain images the same without `otel`.
+- **`tracing` without `path_in_url: true`**: "nginx's tracer always puts the request's path and query in the span, which
+  path_in_url: false keeps out; write path_in_url: true, or render it for envoy". The forms tried to keep the path and
+  the query out of a span, each with `GET` and a query holding a token: the module's lines with `http.url` holding the
+  scheme and the host alone, as the Envoy output writes it with `path_in_url: false`, gave a span whose `http.target`,
+  the module's own, held the path and the query (on nginx 1.31.8, `GET /open/path-u131?token=secret` gave `http.target`
+  `/open/path-u131?token=secret` beside `http.url` `http://localhost`, and 1.30.6 the same); and the same with
+  `otel_span_attr http.target "";` gave a span with two attributes named `http.target`, the path and the query first,
+  then the empty one (on both versions). A file with the `xray` provider is refused for its provider alone.
+- **`tracing` beside a `remove_from_clients`, `auth.accept` or `auth.send` that names `traceparent` or `tracestate`**,
+  in full or by a `*` prefix: "nginx writes both headers from the trace for the service and the check; leave the name
+  out, or render it for envoy". What such a list asks for, a client's copy removed, the check's value set or the
+  client's own copy sent to the check, is not what nginx sends, and it was not compared with the Envoy output.
+- **A DNS name in `tracing.provider.otel.endpoint` in a file with no `dns.resolver`**: "nginx looks a name up only
+  through the name server it is given; write dns.resolver, or write the collector's IP address", the words a service's
+  name is refused in. The relay that follows the name looks it up through `dns.resolver`, and without the relay the
+  tracer's own lookup follows no move of the name. The forms tried, each on nginx 1.30.6 and 1.31.8 with 50 requests a
+  second, three runs of each of two events: the first collector leaving the network 20 s in and, 30 s later, a second
+  starting at the name; and the name moving to a second collector with the first still up. The endpoint written as the
+  bare name, or as `dns:///<name>:4317`, is looked up by gRPC once in each worker as the worker starts, 12 queries for
+  12 workers and none after, and no span reached the second collector in the 300 s after either event. A relay in the
+  `stream` block, whose upstream looked the name up every 6 s, sent none to it either: the tracer keeps one connection,
+  and a stream relay picks its upstream once, when that connection opens. `dns://<name server>:53/<name>:4317` makes
+  gRPC ask a name server the file names, but it asked that server nothing after either event and followed neither. The
+  relay in the `http` block followed both ([What tracing costs](#what-tracing-costs)).
+- **A tag on a header nginx writes itself**: "nginx rewrites each of host, origin, te, connection, upgrade,
+  http2-settings, content-length, transfer-encoding, keep-alive, x-envoy-auth-failure-mode-allowed,
+  x-envoy-external-address, traceparent and tracestate for the service, and its value in a span was not compared with
+  the Envoy output's; tag another header". The row of `tracing.tags.<tag name>.header` in [the support
+  table](portability.md#support-by-proxy-from-the-generators) names the same headers.
+- **A tag on `referer` or on `expect`**, at `tracing.tags.<tag name>.header`: "the Envoy output removes a Referer it
+  does not accept before its tags read the request, where nginx's tag would read the client's line; tag another header",
+  and "the Envoy output answers an Expect itself and removes it before its tags read the request, where nginx's tag
+  would read the client's line; tag another header". No list of the Referer forms Envoy removes is kept for it: of 104
+  forms of one `Referer` line, Envoy removed 46 and nginx none ([Where nginx is less strict than the Envoy
+  output](#where-nginx-is-less-strict-than-the-envoy-output)).
+- **A tag longer than nginx reads**, at the tag's key, `tracing.tags.<tag name>`: one "whose default's nginx form is
+  longer than nginx reads", as nginx reads no value longer than 4094 bytes between its quotes and the file writes each
+  `$` of a default as `${pf_dollar}` and each `"` and `\` with a backslash before it; one "whose header or variable
+  name, with those of the tags before it, is longer than nginx reads", as nginx reads the names of all tags from one
+  value of at most 4094 bytes between its quotes; and a tag name "whose nginx form is longer than nginx reads", as every
+  such value is refused ([the opening](#nginx)). Each says to write a shorter value, or fewer tags, or to render the
+  file for Envoy. The longest of each that render, 453 tags on the headers `x-h001` to `x-h453`, a default of 4,094
+  letters or of 341 `$`, a header name of `x-` and 4,077 letters, an environment variable's name of 4,079 letters and a
+  tag name of 4,094, load on both images tagged `-otel` with no warning from `nginx -t`, and one letter, `$` or tag more
+  is refused.
+
+### What tracing costs
+
+The figures below were measured on one Mac running Docker with 12 CPUs, so nginx ran 12 workers, on mains power, with no
+other container above 3% of one CPU. Each is the median of five runs with their range in brackets, unless it names
+another number of runs, for nginx 1.30.6 and
+1.31.8 on their images tagged `-otel` beside the Envoy output on Envoy 1.40.2, all rendered from one file with
+`sample.rate` at 100%, so each request makes a span, with two tags, and a route with the auth check beside one without;
+the proxies started afresh for each run, and a client on the same Docker network sent the requests. One proxy is said to
+answer sooner, hold less or lose fewer spans than another only where their ranges do not overlap.
+
+With a collector that answers each call at once, every request was answered `200` and every span reached the collector
+in each run: 201 requests one at a time, 201 one at a time through the check, then 1,000 a second for 30 s, of which
+nginx sent a span for each of the 30,402 or 30,403 requests and the Envoy output for each of its 30,403 and for each
+check. The same file without `tracing` ran beside it.
+
+| | Envoy output | nginx 1.30.6 | nginx 1.31.8 |
+|---|---|---|---|
+| Median answer, one request at a time, with tracing | 1.43 ms (1.31 to 1.51) | 1.02 ms (0.70 to 1.29) | 1.00 ms (0.66 to 1.17) |
+| The same without `tracing` | 1.41 ms (1.14 to 1.47) | 0.78 ms (0.67 to 1.15) | 0.87 ms (0.67 to 1.15) |
+| Median answer through the check, one at a time, with tracing | 2.03 ms (1.58 to 2.12) | 2.48 ms (1.62 to 2.66) | 2.27 ms (1.69 to 2.62) |
+| The same without `tracing` | 1.80 ms (1.08 to 1.96) | 2.27 ms (1.56 to 2.55) | 2.47 ms (1.55 to 2.54) |
+| Median answer at 1,000 a second, with tracing | 0.21 ms (0.19 to 0.28) | 0.19 ms (0.19 to 0.21) | 0.18 ms (0.16 to 0.20) |
+| The same without `tracing` | 0.23 ms (0.19 to 0.25) | 0.18 ms (0.17 to 0.29) | 0.18 ms (0.17 to 0.27) |
+| Memory at rest, with tracing | 21.0 MiB (20.7 to 22.2) | 57.3 MiB (57.3 to 57.4) | 57.4 MiB (57.3 to 58.0) |
+| The same without `tracing` | 20.7 MiB (20.1 to 21.5) | 50.1 MiB (50.0 to 50.2) | 50.2 MiB (50.1 to 50.2) |
+
+On each proxy the answer times with and without tracing overlap, so these runs show no time that tracing adds to a
+request. One request at a time, on a route with no check, nginx answered sooner than the Envoy output with tracing;
+without it the ranges just overlap, and they overlap through the check and at 1,000 a second.
+
+Tracing costs nginx memory under load, which it keeps. Over 300 s of 1,000 requests a second to the route with no check,
+each proxy started afresh with nothing sent to it before, the memory Docker counted, in MiB, was as follows, one run of
+each: nginx 1.31.8 with the collector asked by its address, nginx 1.30.6 through the relay with the collector found by
+name, a run of 900 s, and the file without `tracing` and the Envoy output, taken before with the same file and client.
+nginx 1.31.8 through the relay and 1.30.6 asking the address were not run for 300 s.
+
+| | At rest | 15 s | 60 s | 120 s | 180 s | 240 s | 300 s | 120 s after the load |
+|---|---|---|---|---|---|---|---|---|
+| nginx 1.31.8, by address | 58.2 | 486.6 | 510.7 | 518.5 | 525.2 | 525.6 | 525.1 | 524.2 |
+| nginx 1.30.6, through the relay, 900 s | 58.3 | 301.9 | 308.4 | 311.7 | 325.6 | 326.3 | 324.0 | 325.4 |
+| nginx 1.31.8 without `tracing` | 51.3 | 55.3 | 55.1 | 56.6 | 56.7 | 57.9 | 57.6 | 55.8 |
+| nginx 1.30.6 without `tracing` | 51.8 | 56.0 | 56.4 | 56.9 | 57.6 | 57.9 | 58.3 | 57.2 |
+| Envoy output, by address | 22.9 | 25.3 | 25.0 | 25.1 | 24.9 | 24.6 | 25.3 | 25.3 |
+
+nginx 1.31.8 came within 1 MiB of its highest at 180 s, and 1.30.6 at 165 s, where it stayed between 323.9 and 329.0 MiB
+to the end of its 900 s; neither gave more than 1 MiB of it back in the 120 s after the load. The module keeps at most
+four batches of 512 spans in each worker, its defaults, which the file keeps, and keeps each span's strings when a batch
+is sent, to fill them again: memory rises until each worker's 2,048 spans have held their longest values, 24,576 spans
+for the 12 workers here, and stays there. So the cost grows with the number of workers, one a CPU (`worker_processes
+auto`): at the end of the load each worker held 40.0 to 49.7 MiB of its own on 1.31.8 and 25.1 to 33.6 MiB on 1.30.6,
+against 8.4 MiB at rest. More than half of it comes with the work `proxyfile.js` does for the tags of each request, as
+the spans fill: through the relay, 30 s into the load, the file held 305.7 and 365.1 MiB on 1.30.6 and 333.2 and 334.8
+MiB on 1.31.8, where a copy of its script whose tag function returns before it reads anything held 154.6 and 170.2 MiB
+on 1.30.6, two runs each. A file with the module and one proxied location alone levelled at 57.2 MiB on 1.30.6 and 57.1
+MiB on 1.31.8 (one run each).
+
+With the collector in each of five states, 201 requests one at a time and then 5,001 at 500 a second over 16 connections
+were sent to each proxy, each proxy started with the collector already in that state: up; an address nothing answers on;
+a collector that answers each call after 5 s; one that answers each call `UNAVAILABLE`; and one that takes each call and
+never answers. Every request of every run was answered `200`, and no state's median is above the range with the
+collector up, on any proxy, so no request waited for the collector:
+
+| Collector | Envoy output, one at a time / at 500 a second | nginx 1.30.6 | nginx 1.31.8 |
+|---|---|---|---|
+| up | 1.09 ms (0.87 to 1.54) / 0.39 ms (0.38 to 0.40) | 0.98 ms (0.79 to 1.21) / 0.33 ms (0.33 to 0.45) | 0.83 ms (0.74 to 1.25) / 0.34 ms (0.33 to 0.39) |
+| nothing answers its address | 1.01 ms (0.91 to 1.37) / 0.38 ms (0.36 to 0.54) | 0.83 ms (0.74 to 1.10) / 0.33 ms (0.32 to 0.34) | 0.75 ms (0.71 to 1.19) / 0.34 ms (0.33 to 0.39) |
+| answers after 5 s | 1.06 ms (0.90 to 1.37) / 0.39 ms (0.32 to 0.46) | 0.82 ms (0.70 to 1.01) / 0.34 ms (0.32 to 0.36) | 0.97 ms (0.69 to 1.06) / 0.34 ms (0.33 to 0.36) |
+| answers `UNAVAILABLE` | 1.05 ms (0.79 to 1.12) / 0.39 ms (0.36 to 0.40) | 0.73 ms (0.62 to 1.08) / 0.33 ms (0.32 to 0.34) | 0.70 ms (0.63 to 0.99) / 0.34 ms (0.33 to 0.40) |
+| never answers | 0.90 ms (0.85 to 1.08) / 0.38 ms (0.37 to 0.41) | 0.80 ms (0.71 to 1.04) / 0.33 ms (0.33 to 0.36) | 0.73 ms (0.70 to 1.03) / 0.33 ms (0.32 to 0.34) |
+
+With the collector up it received 5,202 spans of 5,202 from each proxy in each run. The slow collector and the one that
+answers `UNAVAILABLE` each received all 15,606 spans of the three proxies in each run, and the one that never answers
+13,640 to 15,513 of them, so a proxy goes on sending to a collector that holds its calls. At 500 a second nginx answered
+sooner than the Envoy output, with the ranges apart, with the collector that never answers on both versions and, on
+1.30.6, with nothing at the address and with `UNAVAILABLE`; elsewhere the ranges overlap.
+
+Through the relay, with the collector found by name, nginx answered 1,000 requests a second for 30 s to the route with
+no check at a median of 0.23 ms (0.18 to 0.32) on 1.31.8 and 0.20 ms (0.18 to 0.23) on 1.30.6, and at the 99th
+percentile in 0.43 ms (0.34 to 0.65) and 0.38 ms (0.34 to 0.45); the same file asking the collector's address answered
+at 0.23 ms (0.21 to 0.23) and 0.24 ms (0.20 to 0.31), and in 0.42 ms (0.40 to 0.44) and 0.46 ms (0.37 to 0.61), three
+runs of each. The ranges overlap, so these runs show no time the relay adds to a request. Every request was answered
+`200` and every span reached the collector.
+
+Through the relay, with the collector found by name, the five states got 1,000 requests a second for 30 s, one run on
+each version: every request was answered `200`, at a median of 0.18 to 0.32 ms, and the collector up received every
+span. The relay ends a call after 10 s, so the module went on sending to the collector that never answers until the
+load ended, 17,586 of 30,001 spans in 43 calls on 1.31.8 and 17,350 on 1.30.6. Asked by its address, that collector got
+32 calls from each version, two to four on each of the 12 workers' connections, none of which came back, and no call
+after the first 15 s: 13,400 and 13,024 spans.
+
+With the collector answering each call after 5 s, 2,000 requests a second for 10 s were each answered `200`, at a median
+of 0.19 ms (0.18 to 0.23) through the Envoy output, 0.20 ms (0.19 to 0.24) through nginx 1.30.6 and 0.20 ms (0.19 to
+0.22) through 1.31.8, and each proxy dropped the spans it could not send in time. Of the 20,000 or 20,001 spans of a
+run, counted at the collector within 40 s of the last request, the Envoy output lost 9,770 (9,765 to 9,775), sending the
+rest in 2,052 calls of at most five spans, and nginx 1.30.6 lost 3,417 (2,301 to 5,232) and 1.31.8 4,494 (3,561 to
+5,048), sending the rest in 34 to 41 calls of at most 512: nginx lost fewer than the Envoy output in every run.
+
+A collector found by name, through the relay, with `dns.resolver` naming a name server that gives the name with a time
+to live of 5 s: each proxy got 50 requests a second over 4 connections, with a collector of its own name, three runs of
+each of two events. When the first collector left the network 20 s in and the name stopped resolving, and 30 s later a
+second collector started at the name, the spans reached the second 6.78 s (6.78 to 6.79) after it started through nginx
+1.31.8, 8.47 s (8.44 to 8.48) through 1.30.6 and 0.19 s (0.17 to 0.19) through the Envoy output; nginx lost 1,751 to
+1,753 of a run's 17,501 spans and the Envoy output 1,520, of which 1,500 are those of the 30 s with no collector. When
+the name moved to a second collector with the first still up and answering, the spans reached the second 7.02 s (7.00
+to 7.02) after the move through nginx 1.31.8, 8.69 s (8.68 to 8.71) through 1.30.6 and 0.43 s (0.43 to 0.44) through
+the Envoy output, and no proxy lost a span: the first collector received 250 or 251 more from each nginx and 20 from the
+Envoy output, and the second the rest of the 16,001. Every request of every run was answered `200`, at a median of 0.75
+to 0.93 ms through nginx and 0.92 to 1.13 ms through the Envoy output. The relay asked the name server every 6 s and the
+Envoy output every 5 s, and the module sends the spans it holds every 5 s, so nginx's spans reach a new address some
+seconds after the Envoy output's.
+
 ## What nginx writes with no key
 
 Each of these is in every file the nginx generator writes, so no row of that table holds it, and each differs from the
@@ -1593,11 +2019,12 @@ otherwise.
 - **`HTTP/0.0` to `HTTP/0.9` with headers are answered `400`, and `HTTP/2.0` to `HTTP/9.9` on an HTTP/1 connection
   `505`**, where Envoy answers `426` to each, as to every HTTP/1 version but 1.1.
 - **An absolute request line with user information, `GET http://user@localhost/z`, or with no `Host` header is answered
-  `400` and the connection closed**, where Envoy serves it with the host the line names. Any other absolute request line
-  routes by the host it names, as Envoy's does, however many spaces come before it; one whose host a query or a fragment
-  follows directly, `GET http://localhost?x=1`, is answered `400` and the connection closed, where Envoy answers `404`
-  and keeps it. A tab between the method and the target is answered `400` and the connection closed, where Envoy serves
-  the request.
+  `400` and the connection closed**, where Envoy serves it with the host the line names. One of another scheme than
+  `http` or `https`, in any letter case, such as `ftp://`, `ws://`, `h2c://`, `httpx://` or `x-y+z.1://`, is answered
+  `400`, as by Envoy, and reaches no service, over 33 forms measured. Any other absolute request line routes by the host
+  it names, as Envoy's does, however many spaces come before it; one whose host a query or a fragment follows directly,
+  `GET http://localhost?x=1`, is answered `400` and the connection closed, where Envoy answers `404` and keeps it. A tab
+  between the method and the target is answered `400` and the connection closed, where Envoy serves the request.
 - **A `Host` header sent twice is answered `400`**, where Envoy answers `404`; over HTTP/2, a `host` header that differs
   from `:authority` is answered `400` with nginx's own page, where Envoy routes by `:authority`: it serves one whose
   `:authority` is `localhost` and `host` `other.example`, and answers `404` to one whose `:authority` is `other.example`
@@ -1673,6 +2100,7 @@ ends, sends a service or a client what the Envoy output would not, or leaves out
 - **a request trailer larger than the header limit is served over HTTP/1.1**: A chunked request whose trailer is larger than the header limit, a trailer line of 4,093 bytes or 25 trailer lines of 200 bytes under `size: 4KiB`, or a trailer line of 61,437 bytes without `limits`, is served, and the service receives its body and no trailer, where Envoy answers `431`: nginx reads a trailer to its end with no limit on its size, and `proxyfile.js` runs before the body arrives and never reads a trailer.
 - **a header line with no colon reaches the service as a header with an empty value**: A request holding the line `nocolon`, with no colon, is served over HTTP/1.1, and the service receives `nocolon: `, where Envoy answers `400`. nginx stores such a line as a header with an empty value, as it stores `nocolon:`, which Envoy serves too, so neither `nginx.conf` nor `proxyfile.js` can tell the two apart.
 - **a request with no body reaches the service without content-length: 0**: A `POST` with no body reaches the service with no `Content-Length`, over HTTP/1.1 and HTTP/2, where Envoy adds `content-length: 0`.
+- **a Referer the Envoy output removes reaches the service**: Of 104 forms of one Referer line, Envoy removed 46 before the service, such as `a:b`, `/a#f`, `a b`, `/é`, `{`, `http://u@a/`, `http://a/#f`, `http://a:65536/`, `http://a_b/`, `http://[1:2:3]/` and `about:blank`, and nginx passed every one on. The Envoy output removes a Referer that its URL parser reads as a URL with a fragment or user information, or that the parser does not read and that holds a byte outside RFC 3986's query and fragment characters or a colon before its first slash. A rule written from the published grammar of that parser, nodejs's http_parser, answered forms of the 104 otherwise than Envoy: in its strict build it removed `h2://a/` and `x-y://a/`, whose scheme Envoy reads with a digit or a `-` in it, and in its lenient build it also kept `http://a_b/` and `http://a/é`. nginx answers two Referer lines `400`, as the request line's row says.
 - **a WebSocket upgrade a service answers without switching passes the service's body**: A WebSocket upgrade a service answers `200` without switching reaches the client with the service's body, where Envoy passes the status and headers with no body.
 - **a service's answer with a malformed header line or a malformed status line reaches the client**: A service's answer holding a header line with no colon reaches the client with it as a header with an empty value (`nocolon: `), and one whose header name holds `@` (`x@bad: 1`) or whose header value holds the byte 0x01 reaches the client with that header as the service wrote it, where Envoy answers `502` and writes an upstream-failure line with the flag `UPE`, which nginx does not write. A malformed status line reaches the client too. A status of three digits that starts with 0, `050`, `000` or `099`, reaches it as that status over HTTP/1.1 and HTTP/2, with the headers nginx writes. A status with spaces between its digits, `HTTP/1.1 2 0 0 X`, reaches an HTTP/2 client as `200` and an HTTP/1.1 client with the status line `HTTP/1.1 0 0 X`, and one with a fraction, `HTTP/1.1 403.1 X`, reaches an HTTP/2 client as `403` and an HTTP/1.1 client as the service wrote it: nginx reads three digits with spaces among them, and takes a `.` after them. A status of one or two digits, such as `5`, `20` or `99`, one of four digits, `HTTP/1.1 2000 OK`, and an answer with no status line at all, such as `hello` and a line end, reach an HTTP/1.1 client byte for byte as the service wrote them, with none of the headers nginx writes, such as `x-request-id` and `Vary`, and an HTTP/2 client as the body of an answer with the status `000`: nginx reads such an answer as one with no head and passes it whole. Envoy answers each of these `502` and writes an upstream-failure line with the flag `UPE`, but the status of four digits, which it passes as `2000` with its own headers; nginx writes no upstream-failure line for any of them, and has no setting that refuses them. nginx stores a line with no colon as it stores `nocolon:`, which Envoy passes too, so `proxyfile.js` cannot tell the two apart.
 - **over HTTP/2, empty frames in a row are served**: An HTTP/2 request whose HEADERS frame is followed by two empty CONTINUATION frames, or whose body comes after two empty DATA frames, is served, where Envoy takes one frame with no payload in a row and closes the connection at the second: nginx sets no such limit, and neither `nginx.conf` nor `proxyfile.js` sees a frame.

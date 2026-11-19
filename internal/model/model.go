@@ -316,6 +316,7 @@ type SampleRule struct {
 type Tag struct {
 	Name, Env, Header string
 	Default           string // "" when not written; the check refuses an empty one
+	Pos               Pos    // the tag's key, which a generator names a refusal of the tag by
 }
 
 // Service returns the service declared with name, or nil.

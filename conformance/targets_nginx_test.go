@@ -16,30 +16,42 @@ import (
 // one under allow beside the other keys the generator writes and a limited route; then examples/full, whose committed
 // nginx.refused is checked by its render alone, and examples/portable, the full example's world with only the keys
 // every generator is to render alike, which Envoy's entry runs too.
+// After them comes an entry for each image scripts/nginx-otel-images pins, the same versions tagged -otel, which carry
+// ngx_otel_module. Each runs the battery's two files with tracing alone, the collector by address and by name: nginx -t
+// on a plain image stops at the files' load_module line for that module, and the plain entries run every other file.
+// The coverage checks judge the two entries of one version together (versions), so neither is held to the rows the
+// other runs.
 // The admin listener answers /ready on 127.0.0.1 only, as Envoy's does.
 func nginxEntries(t testing.TB) []target {
 	nginx, _ := render.TargetNamed("nginx")
-	var entries []target
-	for _, p := range pinnedImages(t, "nginx") {
-		entries = append(entries, target{
-			name:  "nginx",
-			label: p.label,
-			files: []file{
-				{label: "nginx-file", proxyfile: "testdata/nginx.yaml"},
-				{label: "nginx-plain", proxyfile: "testdata/nginx-plain.yaml"},
-				{label: "nginx-checks", proxyfile: "testdata/nginx-checks.yaml"},
-				{label: "nginx-auth", proxyfile: "testdata/nginx-auth.yaml"},
-				{label: "full", proxyfile: "../examples/full/hocon/Proxyfile"},
-				{label: "portable", proxyfile: "../examples/portable/hocon/Proxyfile"},
-			},
-			image: p.image,
+	entry := func(p pin, files []file) target {
+		return target{
+			name:    "nginx",
+			label:   p.label,
+			version: p.version,
+			files:   files,
+			image:   p.image,
 			// The image's entrypoint runs its arguments as the command, so they start with the program; daemon off
 			// keeps nginx in the foreground, where Docker watches it.
 			args:  []string{"nginx", "-c", "/config/" + nginx.Config, "-g", "daemon off;"},
 			ready: "http://127.0.0.1:9901/ready",
 			// The header docs/auth.md names for when_unavailable: allow, whatever the proxy, so a service reads one name.
 			mark: "x-envoy-auth-failure-mode-allowed",
-		})
+		}
+	}
+	var entries []target
+	for _, p := range pinnedImages(t, "nginx") {
+		entries = append(entries, entry(p, []file{
+			{label: "nginx-file", proxyfile: "testdata/nginx.yaml"},
+			{label: "nginx-plain", proxyfile: "testdata/nginx-plain.yaml"},
+			{label: "nginx-checks", proxyfile: "testdata/nginx-checks.yaml"},
+			{label: "nginx-auth", proxyfile: "testdata/nginx-auth.yaml"},
+			{label: "full", proxyfile: "../examples/full/hocon/Proxyfile"},
+			{label: "portable", proxyfile: "../examples/portable/hocon/Proxyfile"},
+		}))
+	}
+	for _, p := range pinnedImages(t, "nginx-otel") {
+		entries = append(entries, entry(p, []file{tracingFile, tracingByNameFile}))
 	}
 	return entries
 }

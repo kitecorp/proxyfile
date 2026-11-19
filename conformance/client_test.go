@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,11 +20,12 @@ import (
 )
 
 // echo is the stub's echo, read from the body or from field 1 of a gRPC message. encoding/json matches the stub's
-// lower-case field names to these without tags.
+// lower-case field names to these without tags. readEcho writes the bytes of each header HeaderBytes holds into
+// Headers, so a row compares the bytes the service received.
 type echo struct {
 	Service, Instance, Port, Proto, Method, Path, Host string
 	Attempt                                            int
-	Headers                                            map[string]string
+	Headers, HeaderBytes                               map[string]string
 	Body                                               string
 	Trailers                                           map[string]string
 }
@@ -251,6 +253,11 @@ func readEcho(contentType string, body []byte) *echo {
 	var e echo
 	if json.Unmarshal(body, &e) != nil || e.Service == "" {
 		return nil
+	}
+	for name, text := range e.HeaderBytes {
+		if value, err := hex.DecodeString(text); err == nil {
+			e.Headers[name] = string(value)
+		}
 	}
 	return &e
 }

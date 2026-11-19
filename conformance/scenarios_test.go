@@ -16,7 +16,7 @@ import (
 // wait beside the rest of their own scenario alone: a later scenario's quiet and burst count on nothing else reaching
 // the proxy meanwhile. The rate limit runs last, so the requests the scenarios before it send to its route come first,
 // and its quiet lets that route's bucket fill again before its burst.
-var scenarios = []scenario{routing, mutualTLS, cors, auth, timeout, retry, gRPC, paths, asWritten, offRoute, clientKeys, hash, rateLimit, cost}
+var scenarios = []scenario{routing, mutualTLS, cors, auth, timeout, retry, gRPC, paths, asWritten, offRoute, clientKeys, hash, tracing, tracingRetried, rateLimit, cost}
 
 // get is a GET over HTTP/1.1 to localhost, a host of the example's local environment.
 func get(path string) request {
@@ -31,17 +31,21 @@ func rpc(path string) request {
 // The labels of the nginx entries' files a target's own literal holds on (own.files), a list for each reason the
 // files share, so a file added to the entries is added once for each reason it shares.
 var (
-	// nginxFiles are the battery's four files for nginx, beside the examples the nginx entries run too.
-	nginxFiles = []string{"nginx-file", "nginx-plain", "nginx-checks", "nginx-auth"}
-	// nginxYAMLFiles are nginx.yaml and nginx-auth.yaml, which writes nginx.yaml's keys beside the check: the route
-	// PCRE2 gives up on, the idle time of 2 s and the environment of 64 Origin patterns.
-	nginxYAMLFiles = []string{"nginx-file", "nginx-auth"}
+	// nginxFiles are the battery's five files for nginx, beside the examples the nginx entries run too.
+	nginxFiles = []string{"nginx-file", "nginx-plain", "nginx-checks", "nginx-auth", "nginx-tracing"}
+	// nginxYAMLFiles are nginx.yaml, nginx-auth.yaml, which writes nginx.yaml's keys beside the check, and
+	// nginx-tracing.yaml, nginx-auth.yaml's copy with tracing: the route PCRE2 gives up on, the idle time of 2 s and the
+	// environment of 64 Origin patterns.
+	nginxYAMLFiles = []string{"nginx-file", "nginx-auth", "nginx-tracing"}
 	// patternFiles are the files with a pattern route, where nginx refuses a path it would otherwise match decoded
 	// (routes[].pattern).
-	patternFiles = []string{"nginx-file", "nginx-auth", "portable"}
+	patternFiles = []string{"nginx-file", "nginx-auth", "nginx-tracing", "portable"}
 	// checkedPatternFiles are the files of patternFiles that ask a check, the only ones a row of the check's keys runs
 	// on.
-	checkedPatternFiles = []string{"nginx-auth", "portable"}
+	checkedPatternFiles = []string{"nginx-auth", "nginx-tracing", "portable"}
+	// allowFiles are the files nginx runs whose check is asked under when_unavailable: allow, where nginx answers 403
+	// to an answer its script cannot read (auth.when_unavailable).
+	allowFiles = []string{"nginx-auth", "nginx-tracing", "portable"}
 	// certificateFiles are the files that ask a client for its certificate (tls.clients.ca).
 	certificateFiles = []string{"nginx-file", "nginx-auth", "portable"}
 )
@@ -124,8 +128,9 @@ var routing = scenario{name: "routing",
 		{name: "a newline inside a path a pattern of any character takes", keys: []string{"routes[].pattern"}, send: get("/admin/a%0Ab"),
 			want: answer{status: 200, service: "shop", path: "/admin/a%0Ab"},
 			on: map[string]literal{"nginx-file": {want: answer{status: 200, service: "accounts", path: "/admin/a%0Ab"}},
-				"haproxy-file": {want: answer{status: 200, service: "accounts", path: "/admin/a%0Ab"}},
-				"nginx-auth":   {want: answer{status: 200, service: "accounts", path: "/admin/a%0Ab"}}},
+				"haproxy-file":  {want: answer{status: 200, service: "accounts", path: "/admin/a%0Ab"}},
+				"nginx-auth":    {want: answer{status: 200, service: "accounts", path: "/admin/a%0Ab"}},
+				"nginx-tracing": {want: answer{status: 200, service: "accounts", path: "/admin/a%0Ab"}}},
 			by: map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}}}},
 		{name: "an upgrade other than WebSocket is refused", send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1",
 			headers: map[string]string{"upgrade": "spdy/3.1", "connection": "upgrade"}}, want: answer{status: 403, headers: map[string]string{"content-type": ""}}},
@@ -272,7 +277,8 @@ var routing = scenario{name: "routing",
 		{name: "a path PCRE2 gives up on as the pattern is written is matched as Go's parse writes it", keys: []string{"routes[].pattern"},
 			send: get("/backtrack/" + strings.Repeat("a", 40) + "b"), want: answer{status: 200, service: "shop"},
 			on: map[string]literal{"nginx-file": {want: answer{status: 200, service: "accounts"}},
-				"haproxy-file": {want: answer{status: 200, service: "accounts"}}, "nginx-auth": {want: answer{status: 200, service: "accounts"}}}},
+				"haproxy-file": {want: answer{status: 200, service: "accounts"}}, "nginx-auth": {want: answer{status: 200, service: "accounts"}},
+				"nginx-tracing": {want: answer{status: 200, service: "accounts"}}}},
 		// nginx's answer comes within 50 ms, about ten times Envoy's slowest answer to a long path or a long Origin
 		// (5.8 ms): under the match limit the generator writes, 1.6 to 3.6 ms; under PCRE2's own, 112 to 227 ms (nginx
 		// 1.30.6 and 1.31.8 on an arm64 Mac), a worker serving no other request meanwhile.
@@ -319,6 +325,11 @@ var routing = scenario{name: "routing",
 			want: answer{status: 200, service: "shop", absent: []string{"te"}}},
 		{name: "an empty element in Connection", send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1",
 			headers: map[string]string{"connection": "close,"}}, want: answer{status: 200, service: "shop"}},
+		// Envoy answers an absolute target of any scheme but http and https, in any letter case, 400 with the body Bad
+		// Request, as it answers what its parser refuses; the tracing rows hold the same line with HTTP/1.0.
+		{name: "an absolute target of another scheme than http and https", send: rawLine("GET ftp://localhost/products/1 HTTP/1.1", "localhost"),
+			want: answer{status: 400, headers: map[string]string{"x-request-id": "", "content-type": "text/plain"}},
+			by:   map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 400, headers: map[string]string{"x-request-id": ""}}}}}},
 		{name: "an absolute target with an empty port", send: rawLine("GET http://localhost:/products/1 HTTP/1.1", "localhost"),
 			want: answer{status: 400}},
 		// nginx serves a request Envoy refuses here, and the service receives the body and no trailer either way: nginx
@@ -341,8 +352,7 @@ var routing = scenario{name: "routing",
 			by: map[string]own{"nginx": {difference: lineRow, literal: literal{want: answer{refused: true}}}}},
 		// A header value holding a control byte other than a tab is answered 400 over HTTP/1.1 and refused over HTTP/2,
 		// where Envoy closes the connection, HAProxy resets the stream and nginx answers 400. A tab and UTF-8 reach the
-		// service through every proxy; the passing rows hold no byte 0x80 to 0xFF outside UTF-8, which the stub reads back
-		// as U+FFFD.
+		// service through every proxy.
 		{name: "a header value holding a control character is answered 400", send: rawHeaders(map[string]string{"x-a": "b\x01c"}),
 			want: answer{status: 400}},
 		{name: "a header value holding a control character is refused over HTTP/2", overlap: true, send: request{proto: "h2", method: "GET",
@@ -1087,9 +1097,13 @@ var auth = scenario{name: "auth",
 					received: map[string]string{"x-keep": "yes", "x-client-id": "forged\nagain"}}},
 				"nginx-checks": {want: answer{status: 200, service: "shop",
 					received: map[string]string{"x-keep": "yes", "x-client-id": "forged\nagain"}}}}},
-		{name: "a client's own x-request-id that remove_from_clients names is replaced", keys: []string{"remove_from_clients"},
+		// nginx-tracing's remove_from_clients names x-client-id alone and it writes no client_address, so under forwarded
+		// the client's own x-request-id reaches the service (measured on Envoy 1.40.2), the id tracing's draw reads.
+		{name: "a client's own x-request-id is replaced where remove_from_clients names it or client_address is connection, and kept otherwise", keys: []string{"remove_from_clients"},
 			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", headers: map[string]string{"x-request-id": "client-id-1"}},
-			want: answer{status: 200, service: "shop", replaced: map[string]string{"x-request-id": "client-id-1"}}},
+			want: answer{status: 200, service: "shop", replaced: map[string]string{"x-request-id": "client-id-1"}},
+			on: map[string]literal{"nginx-tracing": {want: answer{status: 200, service: "shop",
+				received: map[string]string{"x-request-id": "client-id-1"}}}}},
 		// two-checks names the prefix ho*, which covers Host: the client's header under it is removed and its Host kept,
 		// where HAProxy's removal by the prefix took Host too and answered every request 404.
 		{name: "a header under a remove_from_clients prefix is removed, and the Host the prefix covers is kept", keys: []string{"remove_from_clients"},
@@ -1134,10 +1148,8 @@ var auth = scenario{name: "auth",
 		{name: "the check receives the client's Host whatever the check service's host_header",
 			keys: []string{"auth.ask", "auth.accept", "services.<service name>.host_header"}, send: token("report-forwarded"),
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "proto=https host=localhost"}},
-			on: map[string]literal{"two-checks": {want: answer{status: 200, service: "shop",
-				received: map[string]string{"x-user-check": "proto=http host=localhost"}}},
-				"nginx-checks": {want: answer{status: 200, service: "shop",
-					received: map[string]string{"x-user-check": "proto=http host=localhost"}}}}},
+			on: onEach([]string{"two-checks", "nginx-checks", "nginx-tracing"}, literal{want: answer{status: 200, service: "shop",
+				received: map[string]string{"x-user-check": "proto=http host=localhost"}}})},
 		{name: "the only_with_header header sent twice, an empty line then a token, asks the check",
 			keys: []string{"auth.ask", "auth.only_with_header", "auth.accept", "auth.send_request"},
 			send: rawHeaders(map[string]string{"authorization": "\r\nauthorization: Bearer allow", "x-api-key": "key"}),
@@ -1258,7 +1270,9 @@ var auth = scenario{name: "auth",
 		// client_address connection the x-forwarded-for and x-envoy-external-address it sets, so 91 lines from the
 		// client, Host among them as :authority, and one accepted header reach 100 on two-checks and nginx-checks, and 87
 		// lines and three accepted headers reach 100 on haproxy-file and nginx-auth. It counts no Transfer-Encoding or
-		// Connection line, and over HTTP/2 no host field beside :authority (measured with 87 lines beside each).
+		// Connection line, and over HTTP/2 no host field beside :authority (measured with 87 lines beside each). On
+		// nginx-tracing, which accepts three headers under forwarded, it answers 500 to 91 lines, chunked too, and
+		// grpc-status 2 to a gRPC call of 86 (measured).
 		{name: "a 200 whose accepted header takes the request past the header size is answered 500", keys: []string{"auth.accept"},
 			send: rawToken("accept-past-size", map[string]string{"x-pad": strings.Repeat("p", 30000)}), want: answer{status: 500},
 			by: map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 431}}}}},
@@ -1271,14 +1285,16 @@ var auth = scenario{name: "auth",
 			send: rawToken("allow-empty", numbered(96)), want: answer{status: 200, service: "shop"}},
 		{name: "a 200 whose accepted headers take the request to the header count is served", keys: []string{"auth.accept"},
 			send: rawToken("allow", numbered(91)), want: answer{status: 200, service: "shop"},
-			on: map[string]literal{"haproxy-file": {want: answer{status: 500}}, "nginx-auth": {want: answer{status: 500}}}},
+			on: map[string]literal{"haproxy-file": {want: answer{status: 500}}, "nginx-auth": {want: answer{status: 500}},
+				"nginx-tracing": {want: answer{status: 500}}}},
 		// The same request with a body: chunked, its Transfer-Encoding line is not counted and the request is served where
 		// the count would reach 101 with it, and framed by its length, its Content-Length line is counted and the request
 		// answered 500 (measured on Envoy 1.40.2: two-checks and nginx-checks serve 91 numbered lines chunked and 90 by
 		// length, haproxy-file and nginx-auth 87 chunked and 86 by length).
 		{name: "a chunked request's Transfer-Encoding is not counted with the accepted headers", keys: []string{"auth.accept"},
 			send: withBody(rawToken("allow", numbered(91))), want: answer{status: 200, service: "shop", body: "abc"},
-			on: map[string]literal{"haproxy-file": {want: answer{status: 500}}, "nginx-auth": {want: answer{status: 500}}}},
+			on: map[string]literal{"haproxy-file": {want: answer{status: 500}}, "nginx-auth": {want: answer{status: 500}},
+				"nginx-tracing": {want: answer{status: 500}}}},
 		{name: "a request framed by its length is counted with its Content-Length and the accepted headers", keys: []string{"auth.accept"},
 			send: withLength(rawToken("allow", numbered(91))), want: answer{status: 500},
 			on: map[string]literal{"full": {want: answer{status: 200, service: "shop", body: "abc"}},
@@ -1294,7 +1310,7 @@ var auth = scenario{name: "auth",
 		{name: "a gRPC call whose accepted headers take it to the header count is served", keys: []string{"auth.accept"},
 			send: rpcToken("allow", numbered(86)), want: answer{status: 200, grpcStatus: "0", service: "shop"},
 			on: map[string]literal{"haproxy-file": {want: answer{status: 200, grpcStatus: "2"}},
-				"nginx-auth": {want: answer{status: 200, grpcStatus: "2"}}}},
+				"nginx-auth": {want: answer{status: 200, grpcStatus: "2"}}, "nginx-tracing": {want: answer{status: 200, grpcStatus: "2"}}}},
 		{name: "with client_address connection, a 200 whose accepted headers take the request to the header count is served",
 			keys: []string{"auth.accept", "client_address"}, send: rawToken("allow", numbered(87)), want: answer{status: 200, service: "shop"}},
 		{name: "with client_address connection, a 200 whose accepted headers take the request past the header count is answered 500",
@@ -1307,13 +1323,15 @@ var auth = scenario{name: "auth",
 		// Envoy counts an absolute target's host and port as :authority, whatever Host says, and nginx routes by the same.
 		// With a Host of one byte beside this target, the smallest pad Envoy answered 500 was 1,170 bytes, and a count of
 		// the Host line alone answered 500 from 1,193 (measured on Envoy 1.40.2 and nginx 1.30.6), so 1,181 tells them
-		// apart. examples/full and examples/portable write 96 KiB, so they serve it.
+		// apart. examples/full and examples/portable write 96 KiB, so they serve it, and Envoy 1.40.2 serves it on
+		// nginx-tracing, which writes no tls and leaves client_address at forwarded (measured), so the row tells the two
+		// counts apart on the files that write client_address connection.
 		{name: "an absolute target with a port beside a short Host is counted by its host and port", keys: []string{"auth.accept", "limits.request_headers.size"},
 			send: request{proto: "http/1.1", method: "GET", host: "x", path: "http://api.test.example.com:10000/products/1", raw: true,
 				serverName: "api.test.example.com", headers: map[string]string{"authorization": "Bearer accept-60000", "x-api-key": "key",
 					"x-pad": strings.Repeat("p", 1181)}},
 			want: answer{status: 500},
-			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}, "portable": {want: answer{status: 200, service: "shop"}}}},
+			on:   onEach([]string{"full", "portable", "nginx-tracing"}, literal{want: answer{status: 200, service: "shop"}})},
 		{name: "a 200 whose accepted header is empty reaches the service empty", keys: []string{"auth.accept"}, send: token("accept-empty"),
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": ""}, oneLine: []string{"x-user-check"}}},
 		// HAProxy's script joins a folded line by one space (auth.accept).
@@ -1419,10 +1437,9 @@ var auth = scenario{name: "auth",
 		{name: "a sent header holding the byte 0xE9 reaches the check with a ! for it", keys: []string{"auth.ask", "auth.send", "auth.accept", "auth.send_request"},
 			send: rawToken("allow", map[string]string{"x-country": "caf\xe9"}),
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=caf!"}},
-			// HAProxy's check receives the byte itself and answers it in x-user-check; the service's JSON echo writes
-			// U+FFFD for that byte (auth.send).
+			// HAProxy's check receives the byte itself and answers it in x-user-check, which the service receives (auth.send).
 			by: map[string]own{"haproxy": {difference: "auth.send",
-				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=caf\uFFFD"}}}}}},
+				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=caf\xe9"}}}}}},
 		{name: "a sent header holding well-formed UTF-8 reaches the check as sent", keys: []string{"auth.ask", "auth.send", "auth.accept", "auth.send_request"},
 			send: rawToken("allow", map[string]string{"x-country": "caf\xc3\xa9"}),
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=caf\u00e9"}}},
@@ -1431,35 +1448,34 @@ var auth = scenario{name: "auth",
 			send: rawToken("allow", map[string]string{"x-country": "\xc3\xa9\xe9z"}),
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=\u00e9!z"}},
 			by: map[string]own{"haproxy": {difference: "auth.send",
-				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=\u00e9\uFFFDz"}}}}}},
+				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=\u00e9\xe9z"}}}}}},
 		// Four forms RFC 3629 does not admit, one row each: an overlong form, a surrogate, a code point past U+10FFFF and a
 		// sequence cut at the value's end, each told as a ! for each of its bytes (measured on Envoy 1.40.2). HAProxy's
-		// check receives the bytes themselves and answers them in x-user-check; the service's JSON echo writes U+FFFD for
-		// each of them (auth.send).
+		// check receives the bytes themselves and answers them in x-user-check, which the service receives (auth.send).
 		{name: "a sent header holding an overlong form reaches the check with a ! for each of its bytes",
 			keys: []string{"auth.ask", "auth.send", "auth.accept", "auth.send_request"},
 			send: rawToken("allow", map[string]string{"x-country": "a\xc0\xafb"}),
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=a!!b"}},
 			by: map[string]own{"haproxy": {difference: "auth.send",
-				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=a\uFFFD\uFFFDb"}}}}}},
+				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=a\xc0\xafb"}}}}}},
 		{name: "a sent header holding a surrogate reaches the check with a ! for each of its bytes",
 			keys: []string{"auth.ask", "auth.send", "auth.accept", "auth.send_request"},
 			send: rawToken("allow", map[string]string{"x-country": "a\xed\xa0\x80b"}),
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=a!!!b"}},
 			by: map[string]own{"haproxy": {difference: "auth.send",
-				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=a\uFFFD\uFFFD\uFFFDb"}}}}}},
+				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=a\xed\xa0\x80b"}}}}}},
 		{name: "a sent header holding a code point past U+10FFFF reaches the check with a ! for each of its bytes",
 			keys: []string{"auth.ask", "auth.send", "auth.accept", "auth.send_request"},
 			send: rawToken("allow", map[string]string{"x-country": "a\xf4\x90\x80\x80b"}),
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=a!!!!b"}},
 			by: map[string]own{"haproxy": {difference: "auth.send",
-				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=a\uFFFD\uFFFD\uFFFD\uFFFDb"}}}}}},
+				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=a\xf4\x90\x80\x80b"}}}}}},
 		{name: "a sent header holding a sequence cut at the value's end reaches the check with a ! for each of its bytes",
 			keys: []string{"auth.ask", "auth.send", "auth.accept", "auth.send_request"},
 			send: rawToken("allow", map[string]string{"x-country": "ab\xe2\x82"}),
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=ab!!"}},
 			by: map[string]own{"haproxy": {difference: "auth.send",
-				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=ab\uFFFD\uFFFD"}}}}}},
+				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1 action= reports= country=ab\xe2\x82"}}}}}},
 		{name: "a sent header on two lines of two characters outside ASCII reaches the check as sent, joined by a comma",
 			keys: []string{"auth.ask", "auth.send", "auth.accept", "auth.send_request"},
 			send: rawToken("allow", map[string]string{"x-country": "\xe8\xaf\xbb\r\nx-country: \xe5\x86\x99"}),
@@ -1612,7 +1628,7 @@ var auth = scenario{name: "auth",
 			send: request{proto: "h2", method: "GET", host: "localhost", path: "/products/1", raw: true, scheme: "https",
 				headers: map[string]string{"authorization": "Bearer report-forwarded", "x-api-key": "key"}},
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "proto=https host=localhost"}},
-			by: map[string]own{"nginx": {difference: "auth.send_request", files: []string{"nginx-checks"},
+			by: map[string]own{"nginx": {difference: "auth.send_request", files: []string{"nginx-checks", "nginx-tracing"},
 				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "proto=http host=localhost"}}}},
 				"haproxy": {difference: "auth.send_request", files: []string{"two-checks"},
 					literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "proto=http host=localhost"}}}}}},
@@ -1626,8 +1642,8 @@ var auth = scenario{name: "auth",
 			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1",
 				headers: map[string]string{"http2-settings": "AAMAAABkAAQAAP__", "authorization": "Bearer report-settings", "x-api-key": "key"}},
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "http2-settings="}},
-			on: map[string]literal{"nginx-auth": {want: answer{status: 200, service: "shop",
-				received: map[string]string{"x-user-check": "http2-settings=AAMAAABkAAQAAP__"}}}}},
+			on: onEach([]string{"nginx-auth", "nginx-tracing"}, literal{want: answer{status: 200, service: "shop",
+				received: map[string]string{"x-user-check": "http2-settings=AAMAAABkAAQAAP__"}}})},
 		// The request log: authz_us, how long the check took, is a string of digits when a check ran and null when none
 		// ran; nginx's counts whole milliseconds (log), so the rows compare what both hold. A request the check could not
 		// answer that goes on with the mark writes a gateway_auth_unavailable line, and no other request does. The files
@@ -1774,7 +1790,7 @@ var deniedLateUnderDeny = map[string]literal{
 // mark under allow (auth.when_unavailable); on two-checks and nginx-checks, under deny, each answers 403.
 var refusedUnderAllow = map[string]own{
 	"haproxy": {difference: "auth.when_unavailable", files: []string{"haproxy-file"}, literal: literal{want: answer{status: 403}}},
-	"nginx":   {difference: "auth.when_unavailable", files: []string{"nginx-auth", "portable"}, literal: literal{want: answer{status: 403}}},
+	"nginx":   {difference: "auth.when_unavailable", files: allowFiles, literal: literal{want: answer{status: 403}}},
 }
 
 // timeout: measured on Envoy 1.40.2. The check holds the request for 3 s, past auth.timeout's 1500 ms, and
@@ -1844,8 +1860,8 @@ var timeout = scenario{name: "timeout",
 // retries: 0 on the shop route, so there each request shop-2 draws is answered 502 by the proxy, with no service, and
 // tried on no other backend: 12 to 22 of the 40 in each of ten runs with the file's least_requests, and 20 in each of
 // ten with round robin (measured on Envoy 1.40.2), so there the row wants each answer to be that 502 or shop-1's, and
-// at least one of each, which a proxy that answered every request 502 would fail; nginx-auth and nginx-checks write no
-// retries on their shop routes either, so the row wants the same there.
+// at least one of each, which a proxy that answered every request 502 would fail; nginx-plain, nginx-auth, its copy
+// nginx-tracing and nginx-checks write no retries on their shop routes either, so the row wants the same there.
 //
 // The rows that send to /retried/products/1 send to the route the nginx battery files retry once, retried, which the
 // Envoy entry's own files serve by their shop route, which retries. nginx reads the body of a request to a retried
@@ -1887,8 +1903,7 @@ var retry = scenario{name: "retry",
 			want: answer{status: 200, grpcStatus: "14"}},
 		{name: "a retry after a connection failure reaches the other backend", keys: []string{"routes[].retries"}, send: get("/products/1"), repeat: 40, every: true,
 			refusing: "shop-2", want: answer{status: 200, service: "shop", instance: "shop-1"},
-			on: onEach([]string{"nginx-file", "nginx-plain", "nginx-auth", "nginx-checks"},
-				literal{want: answer{status: 502}, also: &answer{status: 200, service: "shop", instance: "shop-1"}})},
+			on: onEach(nginxFiles, literal{want: answer{status: 502}, also: &answer{status: 200, service: "shop", instance: "shop-1"}})},
 		{name: "a gRPC call retried after a connection failure reaches the other backend", keys: []string{"routes[].rpc.retries"},
 			send: rpc("/example.shop.v1.CartService/GetCart"), repeat: 40, every: true, refusing: "shop-2",
 			want: answer{status: 200, grpcStatus: "0", service: "shop", instance: "shop-1"}},
@@ -2091,7 +2106,7 @@ var gRPC = scenario{name: "gRPC",
 				headers: map[string]string{"authorization": "Bearer length-not-a-number", "x-api-key": "key"}},
 			want: answer{status: 200, grpcStatus: "0", service: "shop", marked: "true"},
 			on:   map[string]literal{"two-checks": {want: answer{status: 200, grpcStatus: "7"}}, "nginx-checks": {want: answer{status: 200, grpcStatus: "7"}}},
-			by: map[string]own{"nginx": {difference: "auth.when_unavailable", files: []string{"nginx-auth", "portable"}, literal: literal{want: answer{status: 200, grpcStatus: "7"}}},
+			by: map[string]own{"nginx": {difference: "auth.when_unavailable", files: allowFiles, literal: literal{want: answer{status: 200, grpcStatus: "7"}}},
 				"haproxy": {difference: "auth.when_unavailable", files: []string{"haproxy-file"}, literal: literal{want: answer{status: 200, grpcStatus: "7"}}}}},
 		{name: "a gRPC call the check cannot answer logs an unanswered check with the method's action", keys: []string{"log", "auth.ask", "auth.when_unavailable", "rpc.methods[].action"},
 			send: request{proto: "grpc", method: "POST", host: "localhost", path: "/example.shop.v1.CartService/GetCart",
@@ -2226,12 +2241,14 @@ var asWritten = scenario{name: "the path as the client wrote it",
 	exchanges: []exchange{
 		{name: "a path with nothing to normalise", send: get("/xab"), want: answer{status: 200, service: "shop", path: "/xab"},
 			on: map[string]literal{"nginx-file": {want: answer{status: 200, service: "accounts", path: "/xab"}},
-				"haproxy-file": {want: answer{status: 200, service: "accounts", path: "/xab"}},
-				"nginx-auth":   {want: answer{status: 200, service: "accounts", path: "/xab"}}}},
+				"haproxy-file":  {want: answer{status: 200, service: "accounts", path: "/xab"}},
+				"nginx-auth":    {want: answer{status: 200, service: "accounts", path: "/xab"}},
+				"nginx-tracing": {want: answer{status: 200, service: "accounts", path: "/xab"}}}},
 		{name: "an escaped space is matched as written", send: get("/api/a%20b/admin"), want: answer{status: 200, service: "shop", path: "/api/a%20b/admin"},
 			on: map[string]literal{"nginx-file": {want: answer{status: 200, service: "accounts", path: "/api/a%20b/admin"}},
-				"haproxy-file": {want: answer{status: 200, service: "accounts", path: "/api/a%20b/admin"}},
-				"nginx-auth":   {want: answer{status: 200, service: "accounts", path: "/api/a%20b/admin"}}}},
+				"haproxy-file":  {want: answer{status: 200, service: "accounts", path: "/api/a%20b/admin"}},
+				"nginx-auth":    {want: answer{status: 200, service: "accounts", path: "/api/a%20b/admin"}},
+				"nginx-tracing": {want: answer{status: 200, service: "accounts", path: "/api/a%20b/admin"}}}},
 		{name: "an escaped ; reaches the service as written", send: get("/api/x%3Bv=1/admin"),
 			want: answer{status: 200, service: "shop", path: "/api/x%3Bv=1/admin"}},
 		{name: "an escaped @ is not the character", send: get("/u/%40bob"), want: answer{status: 200, service: "shop", path: "/u/%40bob"}},
@@ -2242,8 +2259,9 @@ var asWritten = scenario{name: "the path as the client wrote it",
 		{name: "a path that needs normalising and keeps no escape", send: get("/api/b/../a%41b/admin"),
 			want: answer{status: 200, service: "shop", path: "/api/aAb/admin"},
 			on: map[string]literal{"nginx-file": {want: answer{status: 200, service: "accounts", path: "/api/aAb/admin"}},
-				"haproxy-file": {want: answer{status: 200, service: "accounts", path: "/api/aAb/admin"}},
-				"nginx-auth":   {want: answer{status: 200, service: "accounts", path: "/api/aAb/admin"}}}},
+				"haproxy-file":  {want: answer{status: 200, service: "accounts", path: "/api/aAb/admin"}},
+				"nginx-auth":    {want: answer{status: 200, service: "accounts", path: "/api/aAb/admin"}},
+				"nginx-tracing": {want: answer{status: 200, service: "accounts", path: "/api/aAb/admin"}}}},
 		{name: "a path that needs normalising and keeps an escape", send: get("/api/a%2fb%3bc"),
 			want: answer{status: 200, service: "shop", path: "/api/a/b%3bc"},
 			by:   map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}}}},
@@ -2254,35 +2272,39 @@ var asWritten = scenario{name: "the path as the client wrote it",
 			by: map[string]own{"nginx": {difference: "routes[].pattern", files: patternFiles, literal: literal{want: answer{status: 400}}}}},
 		{name: "an escape on a route with a rewrite", send: get("/hooks/a%3Bb"), want: answer{status: 200, service: "shop", path: "/hooks/a%3Bb"},
 			on: map[string]literal{"nginx-file": {want: answer{status: 200, service: "accounts", path: "/in/a%3Bb"}},
-				"haproxy-file": {want: answer{status: 200, service: "accounts", path: "/in/a%3Bb"}},
-				"nginx-plain":  {want: answer{status: 200, service: "accounts", path: "/in/a%3Bb"}},
-				"two-checks":   {want: answer{status: 200, service: "accounts", path: "/in/a%3Bb"}},
-				"nginx-checks": {want: answer{status: 200, service: "accounts", path: "/in/a%3Bb"}},
-				"nginx-auth":   {want: answer{status: 200, service: "accounts", path: "/in/a%3Bb"}}},
+				"haproxy-file":  {want: answer{status: 200, service: "accounts", path: "/in/a%3Bb"}},
+				"nginx-plain":   {want: answer{status: 200, service: "accounts", path: "/in/a%3Bb"}},
+				"two-checks":    {want: answer{status: 200, service: "accounts", path: "/in/a%3Bb"}},
+				"nginx-checks":  {want: answer{status: 200, service: "accounts", path: "/in/a%3Bb"}},
+				"nginx-auth":    {want: answer{status: 200, service: "accounts", path: "/in/a%3Bb"}},
+				"nginx-tracing": {want: answer{status: 200, service: "accounts", path: "/in/a%3Bb"}}},
 			by: map[string]own{"nginx": {difference: "routes[].rewrite", files: nginxFiles,
 				literal: literal{want: answer{status: 400}}}}},
 		{name: "a route with a rewrite and a path with nothing to normalise", send: get("/hooks/ab"), want: answer{status: 200, service: "shop", path: "/hooks/ab"},
 			on: map[string]literal{"nginx-file": {want: answer{status: 200, service: "accounts", path: "/in/ab"}},
-				"haproxy-file": {want: answer{status: 200, service: "accounts", path: "/in/ab"}},
-				"nginx-plain":  {want: answer{status: 200, service: "accounts", path: "/in/ab"}},
-				"two-checks":   {want: answer{status: 200, service: "accounts", path: "/in/ab"}},
-				"nginx-checks": {want: answer{status: 200, service: "accounts", path: "/in/ab"}},
-				"nginx-auth":   {want: answer{status: 200, service: "accounts", path: "/in/ab"}}}},
+				"haproxy-file":  {want: answer{status: 200, service: "accounts", path: "/in/ab"}},
+				"nginx-plain":   {want: answer{status: 200, service: "accounts", path: "/in/ab"}},
+				"two-checks":    {want: answer{status: 200, service: "accounts", path: "/in/ab"}},
+				"nginx-checks":  {want: answer{status: 200, service: "accounts", path: "/in/ab"}},
+				"nginx-auth":    {want: answer{status: 200, service: "accounts", path: "/in/ab"}},
+				"nginx-tracing": {want: answer{status: 200, service: "accounts", path: "/in/ab"}}}},
 		{name: "an empty query on a route with a rewrite", send: get("/hooks/ab?"), want: answer{status: 200, service: "shop", path: "/hooks/ab?"},
 			on: map[string]literal{"nginx-file": {want: answer{status: 200, service: "accounts", path: "/in/ab?"}},
-				"haproxy-file": {want: answer{status: 200, service: "accounts", path: "/in/ab?"}},
-				"nginx-plain":  {want: answer{status: 200, service: "accounts", path: "/in/ab?"}},
-				"two-checks":   {want: answer{status: 200, service: "accounts", path: "/in/ab?"}},
-				"nginx-checks": {want: answer{status: 200, service: "accounts", path: "/in/ab?"}},
-				"nginx-auth":   {want: answer{status: 200, service: "accounts", path: "/in/ab?"}}},
+				"haproxy-file":  {want: answer{status: 200, service: "accounts", path: "/in/ab?"}},
+				"nginx-plain":   {want: answer{status: 200, service: "accounts", path: "/in/ab?"}},
+				"two-checks":    {want: answer{status: 200, service: "accounts", path: "/in/ab?"}},
+				"nginx-checks":  {want: answer{status: 200, service: "accounts", path: "/in/ab?"}},
+				"nginx-auth":    {want: answer{status: 200, service: "accounts", path: "/in/ab?"}},
+				"nginx-tracing": {want: answer{status: 200, service: "accounts", path: "/in/ab?"}}},
 			by: map[string]own{"nginx": {difference: "routes[].rewrite", files: nginxFiles,
 				literal: literal{want: answer{status: 400}}}}},
 		{name: "an empty query after a byte Envoy escapes", send: get("/products/a|b?"), want: answer{status: 200, service: "shop", path: "/products/a%7Cb?"},
 			by: map[string]own{"nginx": {difference: pathRow, literal: literal{want: answer{status: 400}}}}},
 		{name: "an empty query after a path with nothing to normalise", send: get("/xab?"), want: answer{status: 200, service: "shop", path: "/xab?"},
 			on: map[string]literal{"nginx-file": {want: answer{status: 200, service: "accounts", path: "/xab?"}},
-				"haproxy-file": {want: answer{status: 200, service: "accounts", path: "/xab?"}},
-				"nginx-auth":   {want: answer{status: 200, service: "accounts", path: "/xab?"}}}},
+				"haproxy-file":  {want: answer{status: 200, service: "accounts", path: "/xab?"}},
+				"nginx-auth":    {want: answer{status: 200, service: "accounts", path: "/xab?"}},
+				"nginx-tracing": {want: answer{status: 200, service: "accounts", path: "/xab?"}}}},
 		// Envoy 1.40.2 answers a # with no body and no Content-Type, whatever the host, on every file (measured); the
 		// files nginx runs hold it to that, and HAProxy's 400 for it, text/html from its own parser, is left to HAProxy's
 		// next pull request.
@@ -2461,7 +2483,7 @@ var rateLimit = scenario{name: "rate limit",
 			refill: 2 * time.Second, repeat: 40, want: answer{status: 429}},
 		{name: "a limited route whose first connections were refused charges each request once", keys: []string{"routes[].rate_limit", "routes[].retries"},
 			send: get("/retried-limited/products/1"), repeat: 40, admitted: 10, refusing: "shop-2", want: answer{status: 429},
-			on: onEach([]string{"full", "nginx-auth", "nginx-plain"}, literal{want: answer{status: 200, service: "shop", instance: "shop-1"}})},
+			on: onEach([]string{"full", "nginx-auth", "nginx-tracing", "nginx-plain"}, literal{want: answer{status: 200, service: "shop", instance: "shop-1"}})},
 	}}
 
 // burstKeys are what the rows that find the catalog route's bucket spent depend on: the limit with its burst, which the
@@ -2717,4 +2739,458 @@ var cost = scenario{name: "cost",
 			send: request{proto: "http/1.1", host: "localhost", raw: true},
 			holds: &holds{connections: 2000, head: "GET /products/1 HTTP/1.1\r\nHost: localhost\r\nx-pad: " + strings.Repeat("a", 15),
 				settle: 3 * time.Second, perConnection: 64 << 10}},
+	}}
+
+// drawnID and undrawnID are the x-request-id of a tracing row's request, the row's own number at its end, so each
+// span is told from every other: the Envoy output's draw reads the first eight characters of the id as a hex number,
+// modulo 10,000, and traces the request when it is below the rate's 500 of 10,000, so 000001f3 (499) is drawn and
+// 000001f4 (500) is not. nginx-tracing.yaml keeps client_address at forwarded, so the client's id reaches the draw.
+func drawnID(row string) string   { return "000001f3-0000-4000-8000-" + row }
+func undrawnID(row string) string { return "000001f4-0000-4000-8000-" + row }
+
+// tracedTo is a GET over HTTP/1.1 of path on localhost carrying id and headers, which the shop route serves.
+func tracedTo(path, id string, headers map[string]string) request {
+	all := map[string]string{"x-request-id": id}
+	maps.Copy(all, headers)
+	return request{proto: "http/1.1", method: "GET", host: "localhost", path: path, headers: all}
+}
+
+// The traceparent a client sends in the tracing rows, and the forms of the one a proxy sends on.
+const (
+	clientTrace  = "4bf92f3577b34da6a3ce929d0e0e4736"
+	clientParent = "00f067aa0ba902b7"
+	sampled      = "00-" + clientTrace + "-" + clientParent + "-01"
+)
+
+var (
+	sampledTrace   = regexp.MustCompile(`^00-[0-9a-f]{32}-[0-9a-f]{16}-01$`)
+	unsampledTrace = regexp.MustCompile(`^00-[0-9a-f]{32}-[0-9a-f]{16}-00$`)
+	// drawnTrace is either flag: on examples/full, whose client_address = connection replaces the client's id with the
+	// proxy's own, the draw decides it.
+	drawnTrace = regexp.MustCompile(`^00-[0-9a-f]{32}-[0-9a-f]{16}-0[01]$`)
+	// clientSampled and clientUnsampled continue the client's trace with a parent id of the proxy's own.
+	clientSampled   = regexp.MustCompile(`^00-` + clientTrace + `-[0-9a-f]{16}-01$`)
+	clientUnsampled = regexp.MustCompile(`^00-` + clientTrace + `-[0-9a-f]{16}-00$`)
+	clientDrawn     = regexp.MustCompile(`^00-` + clientTrace + `-[0-9a-f]{16}-0[01]$`)
+	shopSpan        = regexp.MustCompile(`^shop$`)
+	clientParentID  = regexp.MustCompile(`^` + clientParent + `$`)
+)
+
+// servedOnFull is a tracing row's literal on examples/full: the shop service's answer with what the service received
+// of the trace, which no draw decides there.
+func servedOnFull(forms map[string]*regexp.Regexp, received map[string]string) map[string]literal {
+	return map[string]literal{"full": {want: answer{status: 200, service: "shop", receivedForms: forms, received: received}}}
+}
+
+// otelRow is the row of nginx's support table that declares how its spans differ from the Envoy output's.
+const otelRow = "tracing.provider.otel"
+
+// tracing: every want measured on Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8 on their images tagged -otel, and each of
+// nginx's own literals (by) is a difference its support table declares. nginx-tracing.yaml traces 5% of the requests,
+// drawn by the id, and sends its spans to the battery's collector (file.collector), so each row sends an id whose draw
+// is known (drawnID, undrawnID) and reads the span that carries it, or wants none; examples/full traces 10% to a
+// collector the world leaves unreachable, with client_address = connection, so on it a row reads what the service
+// received, and nothing the draw decides. No row sends to the catalog route, whose bucket the rate limit rows count on.
+var tracing = scenario{name: "tracing",
+	exchanges: []exchange{
+		{name: "a request whose id the draw picks is traced", keys: []string{"tracing", "tracing.provider.otel.sample.rate"}, overlap: true,
+			send: tracedTo("/products/t1", drawnID("000000000001"), nil),
+			want: answer{status: 200, service: "shop", receivedForms: map[string]*regexp.Regexp{"traceparent": sampledTrace},
+				spanned: map[string]*regexp.Regexp{"name": shopSpan, "guid:x-request-id": regexp.MustCompile(`^` + drawnID("000000000001") + `$`)}},
+			on: servedOnFull(map[string]*regexp.Regexp{"traceparent": drawnTrace}, nil)},
+		{name: "a request whose id the draw does not pick is not traced", keys: []string{"tracing", "tracing.provider.otel.sample.rate"}, overlap: true,
+			send: tracedTo("/products/t2", undrawnID("000000000002"), nil),
+			want: answer{status: 200, service: "shop", receivedForms: map[string]*regexp.Regexp{"traceparent": unsampledTrace}, noSpan: true},
+			on:   servedOnFull(map[string]*regexp.Regexp{"traceparent": drawnTrace}, nil)},
+		{name: "an id that is not a UUID is drawn by its first eight characters", keys: []string{"tracing", "tracing.provider.otel.sample.rate"}, overlap: true,
+			send: tracedTo("/products/t3", "000001f3x", nil),
+			want: answer{status: 200, service: "shop", receivedForms: map[string]*regexp.Regexp{"traceparent": sampledTrace},
+				spanned: map[string]*regexp.Regexp{"name": shopSpan}},
+			on: servedOnFull(map[string]*regexp.Regexp{"traceparent": drawnTrace}, nil)},
+		{name: "an id shorter than eight characters is never traced", keys: []string{"tracing", "tracing.provider.otel.sample.rate"}, overlap: true,
+			send: tracedTo("/products/t4", "0001f3", nil),
+			want: answer{status: 200, service: "shop", receivedForms: map[string]*regexp.Regexp{"traceparent": unsampledTrace}, noSpan: true},
+			on:   servedOnFull(map[string]*regexp.Regexp{"traceparent": drawnTrace}, nil)},
+		{name: "a sampled parent the draw does not pick is not traced", keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: tracedTo("/products/t5", undrawnID("000000000005"), map[string]string{"traceparent": sampled}),
+			want: answer{status: 200, service: "shop", receivedForms: map[string]*regexp.Regexp{"traceparent": clientUnsampled}, noSpan: true},
+			on:   servedOnFull(map[string]*regexp.Regexp{"traceparent": clientDrawn}, nil)},
+		{name: "a parent the draw picks continues its trace", keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: tracedTo("/products/t6", drawnID("000000000006"), map[string]string{"traceparent": sampled}),
+			want: answer{status: 200, service: "shop", receivedForms: map[string]*regexp.Regexp{"traceparent": clientSampled},
+				spanned: map[string]*regexp.Regexp{"name": shopSpan, "parent": clientParentID}},
+			on: servedOnFull(map[string]*regexp.Regexp{"traceparent": clientDrawn}, nil)},
+		{name: "a parent the draw picks continues its trace over HTTP/2", keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: request{proto: "h2", method: "GET", host: "localhost", path: "/products/t28",
+				headers: map[string]string{"x-request-id": drawnID("000000000028"), "traceparent": sampled}},
+			want: answer{status: 200, service: "shop", receivedForms: map[string]*regexp.Regexp{"traceparent": clientSampled},
+				spanned: map[string]*regexp.Regexp{"name": shopSpan, "parent": clientParentID}},
+			on: servedOnFull(map[string]*regexp.Regexp{"traceparent": clientDrawn}, nil)},
+		{name: "a parent marked not sampled is never traced", keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: tracedTo("/products/t7", drawnID("000000000007"), map[string]string{"traceparent": "00-" + clientTrace + "-" + clientParent + "-00"}),
+			want: answer{status: 200, service: "shop", receivedForms: map[string]*regexp.Regexp{"traceparent": clientUnsampled}, noSpan: true},
+			on:   servedOnFull(map[string]*regexp.Regexp{"traceparent": clientUnsampled}, nil)},
+		{name: "a malformed traceparent reaches the service as sent", keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: tracedTo("/products/t8", drawnID("000000000008"), map[string]string{"traceparent": "00-abc-def-01"}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"traceparent": "00-abc-def-01"}, noSpan: true},
+			on:   servedOnFull(nil, map[string]string{"traceparent": "00-abc-def-01"})},
+		{name: "a traceparent of another version than 00 continues its trace", keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: tracedTo("/products/t9", drawnID("000000000009"), map[string]string{"traceparent": "01-" + clientTrace + "-" + clientParent + "-01"}),
+			want: answer{status: 200, service: "shop", receivedForms: map[string]*regexp.Regexp{"traceparent": clientSampled},
+				spanned: map[string]*regexp.Regexp{"name": shopSpan, "parent": clientParentID}},
+			on: servedOnFull(map[string]*regexp.Regexp{"traceparent": clientDrawn}, nil),
+			by: map[string]own{"nginx": {difference: otelRow, literal: literal{want: answer{status: 200, service: "shop",
+				received: map[string]string{"traceparent": "01-" + clientTrace + "-" + clientParent + "-01"}, noSpan: true}}}}},
+		{name: "a traceparent of another version than 00 keeps the client's tracestate", keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: tracedTo("/products/t9b", drawnID("00000000009b"), map[string]string{"traceparent": "01-" + clientTrace + "-" + clientParent + "-01",
+				"tracestate": "a=1"}),
+			want: answer{status: 200, service: "shop", receivedForms: map[string]*regexp.Regexp{"traceparent": clientSampled},
+				received: map[string]string{"tracestate": "a=1"}, spanned: map[string]*regexp.Regexp{"name": shopSpan, "parent": clientParentID}},
+			on: servedOnFull(map[string]*regexp.Regexp{"traceparent": clientDrawn}, map[string]string{"tracestate": "a=1"}),
+			by: map[string]own{"nginx": {difference: otelRow, literal: literal{want: answer{status: 200, service: "shop",
+				received: map[string]string{"traceparent": "01-" + clientTrace + "-" + clientParent + "-01", "tracestate": "a=1"}, noSpan: true}}}}},
+		// The Envoy output writes the draw's flag on such a parent, and nginx keeps the client's version, trace id and
+		// parent id beside the same flag.
+		{name: "a traceparent of another version than 00 whose id the draw does not pick is sent on not sampled", keys: []string{"tracing", "tracing.provider.otel"},
+			overlap: true, send: tracedTo("/products/t9c", undrawnID("00000000009c"), map[string]string{"traceparent": "01-" + clientTrace + "-" + clientParent + "-01"}),
+			want: answer{status: 200, service: "shop", receivedForms: map[string]*regexp.Regexp{"traceparent": clientUnsampled}, noSpan: true},
+			on:   servedOnFull(map[string]*regexp.Regexp{"traceparent": clientDrawn}, nil),
+			by: map[string]own{"nginx": {difference: otelRow, literal: literal{want: answer{status: 200, service: "shop",
+				received: map[string]string{"traceparent": "01-" + clientTrace + "-" + clientParent + "-00"}, noSpan: true}}}}},
+		{name: "two tracestate lines reach the service as one", keys: []string{"tracing", "tracing.provider.otel"},
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/t10", raw: true,
+				headers: map[string]string{"x-request-id": drawnID("000000000010"), "traceparent": sampled, "tracestate": "a=1\r\ntracestate: b=2"}},
+			want: answer{status: 200, service: "shop", received: map[string]string{"tracestate": "a=1,b=2"}},
+			on:   servedOnFull(nil, map[string]string{"tracestate": "a=1,b=2"})},
+		// Over HTTP/1.1 the Envoy output reads a traceparent and a tracestate without the tabs beside them. nginx keeps
+		// the tab, and its tracer then does not continue the parent, or puts the first tracestate line into the span
+		// with its tab, so the request goes on as one of another version than 00: no span, the client's ids and the
+		// draw's flag.
+		{name: "a traceparent after a tab whose id the draw does not pick is sent on not sampled", keys: []string{"tracing", "tracing.provider.otel"},
+			overlap: true, send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/c1", raw: true,
+				headers: map[string]string{"x-request-id": undrawnID("0000000000c1"), "traceparent": "\t" + sampled}},
+			want: answer{status: 200, service: "shop", receivedForms: map[string]*regexp.Regexp{"traceparent": clientUnsampled}, noSpan: true},
+			on:   servedOnFull(map[string]*regexp.Regexp{"traceparent": clientDrawn}, nil),
+			by: map[string]own{"nginx": {difference: otelRow, literal: literal{want: answer{status: 200, service: "shop",
+				received: map[string]string{"traceparent": "00-" + clientTrace + "-" + clientParent + "-00"}, noSpan: true}}}}},
+		{name: "a tracestate after a tab beside a parent the draw picks is joined without it", keys: []string{"tracing", "tracing.provider.otel"},
+			overlap: true, send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/c7", raw: true,
+				headers: map[string]string{"x-request-id": drawnID("0000000000c7"), "traceparent": sampled, "tracestate": "\ta=1"}},
+			want: answer{status: 200, service: "shop", receivedForms: map[string]*regexp.Regexp{"traceparent": clientSampled},
+				received: map[string]string{"tracestate": "a=1"}, spanned: map[string]*regexp.Regexp{"name": shopSpan, "state": regexp.MustCompile(`^a=1$`)}},
+			on: servedOnFull(map[string]*regexp.Regexp{"traceparent": clientDrawn}, map[string]string{"tracestate": "a=1"}),
+			by: map[string]own{"nginx": {difference: otelRow, literal: literal{want: answer{status: 200, service: "shop",
+				received: map[string]string{"traceparent": "00-" + clientTrace + "-" + clientParent + "-01", "tracestate": "a=1"}, noSpan: true}}}}},
+		// The client's bytes of its trace reach the service as it sent them, a byte outside UTF-8 and each line of a
+		// malformed traceparent and of the tracestate beside it included.
+		{name: "a tracestate holding the byte 0xFF reaches the service as sent", keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/c2", raw: true,
+				headers: map[string]string{"x-request-id": drawnID("0000000000c2"), "traceparent": sampled, "tracestate": "k=\xffz"}},
+			want: answer{status: 200, service: "shop", receivedForms: map[string]*regexp.Regexp{"traceparent": clientSampled},
+				received: map[string]string{"tracestate": "k=\xffz"}, spanned: map[string]*regexp.Regexp{"name": shopSpan}},
+			on: servedOnFull(map[string]*regexp.Regexp{"traceparent": clientDrawn}, map[string]string{"tracestate": "k=\xffz"})},
+		{name: "a malformed traceparent holding the byte 0xFF reaches the service as sent", keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/c3", raw: true,
+				headers: map[string]string{"x-request-id": drawnID("0000000000c3"), "traceparent": "00-abc-\xff-01"}},
+			want: answer{status: 200, service: "shop", received: map[string]string{"traceparent": "00-abc-\xff-01"}, noSpan: true},
+			on:   servedOnFull(nil, map[string]string{"traceparent": "00-abc-\xff-01"})},
+		{name: "a malformed traceparent on two lines reaches the service as two lines, and so does its tracestate",
+			keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/c4", raw: true,
+				headers: map[string]string{"x-request-id": drawnID("0000000000c4"), "traceparent": "00-abc-def-01\r\ntraceparent: " + sampled,
+					"tracestate": "x=\xff\r\ntracestate: y=2"}},
+			want: answer{status: 200, service: "shop", received: map[string]string{"traceparent": "00-abc-def-01\n" + sampled,
+				"tracestate": "x=\xff\ny=2"}, noSpan: true},
+			on: servedOnFull(nil, map[string]string{"traceparent": "00-abc-def-01\n" + sampled, "tracestate": "x=\xff\ny=2"})},
+		{name: "with no traceparent Envoy adds an empty tracestate", keys: []string{"tracing", "tracing.provider.otel"},
+			send: tracedTo("/products/t11", drawnID("000000000011"), nil),
+			want: answer{status: 200, service: "shop", received: map[string]string{"tracestate": ""}, oneLine: []string{"tracestate"}},
+			on: map[string]literal{"full": {want: answer{status: 200, service: "shop", received: map[string]string{"tracestate": ""},
+				oneLine: []string{"tracestate"}}}},
+			by: map[string]own{"nginx": {difference: otelRow, literal: literal{want: answer{status: 200, service: "shop", absent: []string{"tracestate"}}}}}},
+		{name: "a client's tracestate reaches the span as Envoy's does", keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: tracedTo("/products/t29", drawnID("000000000029"), map[string]string{"traceparent": sampled, "tracestate": "a=1"}),
+			want: answer{status: 200, service: "shop", receivedForms: map[string]*regexp.Regexp{"traceparent": clientSampled},
+				received: map[string]string{"tracestate": "a=1"}, spanned: map[string]*regexp.Regexp{"name": shopSpan, "state": regexp.MustCompile(`^a=1$`)}},
+			on: servedOnFull(map[string]*regexp.Regexp{"traceparent": clientDrawn}, map[string]string{"tracestate": "a=1"})},
+		// The check reports the traceparent and tracestate it received (report-trace) in x-user-check, which the file
+		// accepts. The Envoy output's check span, async accounts egress, carries no x-request-id, so no row reads it: its
+		// difference is declared on the provider's row.
+		{name: "the check receives the trace", keys: []string{"tracing", "tracing.provider.otel", "auth.ask"},
+			send: tracedTo("/products/t12", drawnID("000000000012"), map[string]string{"authorization": "Bearer report-trace"}),
+			want: answer{status: 200, service: "shop", receivedForms: map[string]*regexp.Regexp{
+				"x-user-check": regexp.MustCompile(`^traceparent=00-[0-9a-f]{32}-[0-9a-f]{16}-01 tracestate=$`)}},
+			on: servedOnFull(map[string]*regexp.Regexp{
+				"x-user-check": regexp.MustCompile(`^traceparent=00-[0-9a-f]{32}-[0-9a-f]{16}-0[01] tracestate=$`)}, nil)},
+		{name: "the check receives no trace beside a malformed traceparent", keys: []string{"tracing", "tracing.provider.otel", "auth.ask"},
+			send: tracedTo("/products/t12b", drawnID("00000000012b"), map[string]string{"authorization": "Bearer report-trace", "traceparent": "00-abc-def-01"}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "traceparent= tracestate="}}},
+		{name: "the check receives a traceparent of another version than 00 continued", keys: []string{"tracing", "tracing.provider.otel", "auth.ask"},
+			send: tracedTo("/products/t12c", drawnID("00000000012c"), map[string]string{"authorization": "Bearer report-trace",
+				"traceparent": "01-" + clientTrace + "-" + clientParent + "-01"}),
+			want: answer{status: 200, service: "shop", receivedForms: map[string]*regexp.Regexp{
+				"x-user-check": regexp.MustCompile(`^traceparent=00-` + clientTrace + `-[0-9a-f]{16}-01 tracestate=$`)}},
+			on: servedOnFull(map[string]*regexp.Regexp{
+				"x-user-check": regexp.MustCompile(`^traceparent=00-` + clientTrace + `-[0-9a-f]{16}-0[01] tracestate=$`)}, nil),
+			by: map[string]own{"nginx": {difference: otelRow, literal: literal{want: answer{status: 200, service: "shop",
+				received: map[string]string{"x-user-check": "traceparent=01-" + clientTrace + "-" + clientParent + "-01 tracestate="}}}}}},
+		{name: "the check receives a parent marked not sampled continued", keys: []string{"tracing", "tracing.provider.otel", "auth.ask"},
+			send: tracedTo("/products/t12d", drawnID("00000000012d"), map[string]string{"authorization": "Bearer report-trace",
+				"traceparent": "00-" + clientTrace + "-" + clientParent + "-00"}),
+			want: answer{status: 200, service: "shop", receivedForms: map[string]*regexp.Regexp{
+				"x-user-check": regexp.MustCompile(`^traceparent=00-` + clientTrace + `-[0-9a-f]{16}-00 tracestate=$`)}}},
+		{name: "a tracestate holding the byte 0xFF reaches the check as sent", keys: []string{"tracing", "tracing.provider.otel", "auth.ask"},
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/c5", raw: true,
+				headers: map[string]string{"x-request-id": drawnID("0000000000c5"), "authorization": "Bearer report-tracestate",
+					"traceparent": sampled, "tracestate": "k=\xffz"}},
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "tracestate=k=\xffz"}},
+			on:   servedOnFull(nil, map[string]string{"x-user-check": "tracestate=k=\xffz"})},
+		{name: "a span carries the Envoy output's fields", keys: []string{"tracing", "tracing.provider.otel", "tracing.path_in_url"}, overlap: true,
+			send: tracedTo("/products/t13?q=1", drawnID("000000000013"), nil),
+			want: answer{status: 200, service: "shop", spanned: spanFields(`^http://localhost/products/t13\?q=1$`, `^HTTP/1\.1$`, `^Go-http-client/1\.1$`, "string")},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}},
+			by: map[string]own{"nginx": {difference: otelRow, literal: literal{want: answer{status: 200, service: "shop",
+				spanned: spanFields(`^http://localhost/products/t13\?q=1$`, `^HTTP/1\.1$`, `^Go-http-client/1\.1$`, "int")}}}}},
+		{name: "a span's peer.address is the connection's whatever X-Forwarded-For says", keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: tracedTo("/products/t13b", drawnID("00000000013b"), map[string]string{"x-forwarded-for": "203.0.113.9"}),
+			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"name": shopSpan, "peer.address": worldClient}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}}},
+		// The URL's scheme is what the Envoy output's :scheme holds: under forwarded a client's X-Forwarded-Proto that
+		// is http or https in any letter case, and the connection's for any other value, which the service receives
+		// all the same; and its host the host_header a route's service is sent.
+		{name: "a span's URL holds the connection's scheme beside any other X-Forwarded-Proto", keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: tracedTo("/products/b2", drawnID("0000000000b2"), map[string]string{"x-forwarded-proto": "b2-x"}),
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-forwarded-proto": "b2-x"},
+				spanned: map[string]*regexp.Regexp{"http.url": regexp.MustCompile(`^http://localhost/products/b2$`)}},
+			on: map[string]literal{"full": {want: answer{status: 200, service: "shop"}}}},
+		{name: "a span's URL holds https from an X-Forwarded-Proto in capitals", keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: tracedTo("/products/b3", drawnID("0000000000b3"), map[string]string{"x-forwarded-proto": "HTTPS"}),
+			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"http.url": regexp.MustCompile(`^https://localhost/products/b3$`)}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}}},
+		{name: "a span's URL holds the host_header of the route's service", keys: []string{"tracing", "tracing.provider.otel",
+			"services.<service name>.host_header"}, overlap: true,
+			send: tracedTo("/events/b1", drawnID("0000000000b1"), nil),
+			want: answer{status: 200, service: "accounts", spanned: map[string]*regexp.Regexp{"http.url": regexp.MustCompile(`^http://127\.0\.0\.1:7070/events/b1$`)}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "accounts"}}}},
+		{name: "over HTTP/2 the span says HTTP/2", keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: request{proto: "h2", method: "GET", host: "localhost", path: "/products/t14", headers: map[string]string{"x-request-id": drawnID("000000000014")}},
+			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"name": shopSpan, "http.protocol": regexp.MustCompile(`^HTTP/2$`)}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}}},
+		{name: "a request no route takes is named ingress", keys: []string{"tracing", "tracing.provider.otel", "origins.<environment name>.hosts"}, overlap: true,
+			send: request{proto: "http/1.1", method: "GET", host: "other.example.net", path: "/products/t15", headers: map[string]string{"x-request-id": drawnID("000000000015")}},
+			want: answer{status: 404, spanned: map[string]*regexp.Regexp{"name": regexp.MustCompile(`^ingress$`), "upstream_cluster": nil}},
+			on:   map[string]literal{"full": {want: answer{status: 404}}},
+			by: map[string]own{"nginx": {difference: otelRow, literal: literal{want: answer{status: 404,
+				spanned: map[string]*regexp.Regexp{"name": regexp.MustCompile(`^ingress$`), "upstream_cluster": regexp.MustCompile(`^$`)}}}}}},
+		// A target of 257 bytes, whose URL the Envoy output cuts to 256 characters after the host.
+		{name: "a target over 256 bytes", keys: []string{"tracing", "tracing.path_in_url"}, overlap: true,
+			send: tracedTo("/products/"+strings.Repeat("a", 247), drawnID("000000000016"), nil),
+			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"http.url": regexp.MustCompile(`^http://localhost.{256}$`)}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}},
+			by:   map[string]own{"nginx": {difference: "tracing.path_in_url", literal: literal{want: answer{status: 200, service: "shop", noSpan: true}}}}},
+		{name: "a target of 256 bytes is whole in the span", keys: []string{"tracing", "tracing.path_in_url"}, overlap: true,
+			send: tracedTo("/products/"+strings.Repeat("b", 246), drawnID("00000000016b"), nil),
+			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"http.url": regexp.MustCompile(`^http://localhost/products/b{246}$`)}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}}},
+		// nginx's tracer adds the target as the client wrote it, as http.target, so nginx writes no span for a target the
+		// Envoy output's URL holds otherwise: one it escapes, one it normalises, one it rewrites, and the path a client's
+		// x-envoy-original-path names in its place. Such a request is sent on not sampled, as one whose target is over
+		// 256 bytes is.
+		{name: "a query after characters Envoy escapes", keys: []string{"tracing", "tracing.path_in_url"}, overlap: true,
+			send: tracedTo("/products/a2-"+strings.Repeat("^", 84)+"?token=a2", drawnID("0000000000a2"), nil),
+			want: answer{status: 200, service: "shop", receivedForms: map[string]*regexp.Regexp{"traceparent": sampledTrace},
+				spanned: map[string]*regexp.Regexp{"http.url": regexp.MustCompile(`^http://localhost/products/a2-(?:%5E){81}$`)}},
+			on: map[string]literal{"full": {want: answer{status: 200, service: "shop"}}},
+			// nginx refuses the path on nginx-tracing.yaml, whose pattern routes could take the byte where Envoy's never does.
+			by: map[string]own{"nginx": {difference: "tracing.path_in_url", files: []string{"nginx-tracing-by-name"}, literal: literal{want: answer{status: 200,
+				service: "shop", receivedForms: map[string]*regexp.Regexp{"traceparent": unsampledTrace}, noSpan: true}},
+				other: &own{difference: pathRow, files: []string{"nginx-tracing"}, literal: literal{want: answer{status: 400, noSpan: true}}}}}},
+		{name: "a dot-dot segment", keys: []string{"tracing", "tracing.path_in_url"}, overlap: true,
+			send: tracedTo("/products/a3x/../a3?x=1", drawnID("0000000000a3"), nil),
+			want: answer{status: 200, service: "shop", path: "/products/a3?x=1",
+				spanned: map[string]*regexp.Regexp{"http.url": regexp.MustCompile(`^http://localhost/products/a3\?x=1$`)}},
+			on: map[string]literal{"full": {want: answer{status: 200, service: "shop", path: "/products/a3?x=1"}}},
+			by: map[string]own{"nginx": {difference: "tracing.path_in_url", literal: literal{want: answer{status: 200, service: "shop",
+				path: "/products/a3?x=1", noSpan: true}}}}},
+		{name: "a client's x-envoy-original-path", keys: []string{"tracing", "tracing.path_in_url"}, overlap: true,
+			send: tracedTo("/products/a4?real=1", drawnID("0000000000a4"), map[string]string{"x-envoy-original-path": "/fake/a4?fake=1"}),
+			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"http.url": regexp.MustCompile(`^http://localhost/fake/a4\?fake=1$`)}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}},
+			by:   map[string]own{"nginx": {difference: "tracing.path_in_url", literal: literal{want: answer{status: 200, service: "shop", noSpan: true}}}}},
+		{name: "a route with a rewrite", keys: []string{"tracing", "tracing.path_in_url", "routes[].rewrite"}, overlap: true,
+			send: request{proto: "http/1.1", method: "POST", host: "localhost", path: "/api/webhooks", headers: map[string]string{"x-request-id": drawnID("0000000000a5")}},
+			want: answer{status: 200, service: "accounts", path: "/hooks/payments",
+				spanned: map[string]*regexp.Regexp{"http.url": regexp.MustCompile(`^http://127\.0\.0\.1:7070/hooks/payments$`)}},
+			on: map[string]literal{"full": {want: answer{status: 200, service: "accounts", path: "/hooks/payments"}}},
+			by: map[string]own{"nginx": {difference: "tracing.path_in_url", literal: literal{want: answer{status: 200, service: "accounts",
+				path: "/hooks/payments", noSpan: true}}}}},
+		{name: "a header tag reads the first of two lines", keys: []string{"tracing", "tracing.tags.<tag name>.header"}, overlap: true,
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/t17", raw: true,
+				headers: map[string]string{"x-request-id": drawnID("000000000017"), "x-tenant": "a\r\nx-tenant: b"}},
+			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"tenant": regexp.MustCompile(`^a$`)}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}}},
+		{name: "a header tag on a header Envoy joins reads its lines joined", keys: []string{"tracing", "tracing.tags.<tag name>.header"}, overlap: true,
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/b4", raw: true,
+				headers: map[string]string{"x-request-id": drawnID("0000000000b4"), "accept": "a\r\naccept: b"}},
+			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"accepts": regexp.MustCompile(`^a,b$`)}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}}},
+		{name: "a header tag sent empty is not set and its default not used", keys: []string{"tracing", "tracing.tags.<tag name>.header"}, overlap: true,
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/t18", raw: true,
+				headers: map[string]string{"x-request-id": drawnID("000000000018"), "x-tenant": ""}},
+			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"tenant": nil}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}},
+			by: map[string]own{"nginx": {difference: "tracing.tags.<tag name>.header", literal: literal{want: answer{status: 200, service: "shop",
+				spanned: map[string]*regexp.Regexp{"tenant": regexp.MustCompile(`^$`)}}}}}},
+		{name: "a header tag absent takes its default, one without a default is not set", keys: []string{"tracing", "tracing.tags.<tag name>.header", "tracing.tags.<tag name>.default"},
+			overlap: true, send: tracedTo("/products/t19", drawnID("000000000019"), nil),
+			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"tenant": regexp.MustCompile(`^anon$`), "plain": nil}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}},
+			by: map[string]own{"nginx": {difference: "tracing.tags.<tag name>.header", literal: literal{want: answer{status: 200, service: "shop",
+				spanned: map[string]*regexp.Regexp{"tenant": regexp.MustCompile(`^anon$`), "plain": regexp.MustCompile(`^$`)}}}}}},
+		{name: "a tag on an accepted header reads the value the check accepted", keys: []string{"tracing", "tracing.tags.<tag name>.header", "auth.ask", "auth.accept"},
+			overlap: true, send: tracedTo("/products/t20", drawnID("000000000020"), map[string]string{"authorization": "Bearer allow", "x-user-id": "forged"}),
+			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"user": regexp.MustCompile(`^u-1$`)}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}}},
+		{name: "a tag on an accepted header takes its default on a route the check is off for", keys: []string{"tracing", "tracing.tags.<tag name>.header",
+			"tracing.tags.<tag name>.default", "auth.accept", "routes[].auth"}, overlap: true,
+			send: tracedTo("/public/t20b", drawnID("00000000020b"), map[string]string{"x-user-id": "forged"}),
+			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"name": regexp.MustCompile(`^public$`), "user": regexp.MustCompile(`^nouser$`)}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}}},
+		{name: "an env tag whose variable is unset takes its default", keys: []string{"tracing", "tracing.tags.<tag name>.env", "tracing.tags.<tag name>.default"},
+			overlap: true, send: tracedTo("/products/t21", drawnID("000000000021"), nil),
+			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"environment": regexp.MustCompile(`^local$`)}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}}},
+		// constructor is a property every object has, not a variable of the environment.
+		{name: "an env tag on a variable named like a property every object has takes its default", keys: []string{"tracing",
+			"tracing.tags.<tag name>.env", "tracing.tags.<tag name>.default"}, overlap: true,
+			send: tracedTo("/products/b5", drawnID("0000000000b5"), map[string]string{"x-tenant": "acme"}),
+			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"inherited": regexp.MustCompile(`^own$`),
+				"tenant": regexp.MustCompile(`^acme$`)}},
+			on: map[string]literal{"full": {want: answer{status: 200, service: "shop"}}}},
+		{name: "a tag value keeps a quote, a backslash and bytes above 0x7F as sent", keys: []string{"tracing", "tracing.tags.<tag name>.header"}, overlap: true,
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/t22", raw: true,
+				headers: map[string]string{"x-request-id": drawnID("000000000022"), "x-tenant": `a"b\cé`}},
+			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"tenant": regexp.MustCompile(`^a"b\\cé$`)}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}}},
+		{name: "a tag's default keeps a dollar, a quote and a backslash", keys: []string{"tracing", "tracing.tags.<tag name>.default"}, overlap: true,
+			send: tracedTo("/products/t24", drawnID("000000000024"), nil),
+			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"quoted": regexp.MustCompile(`^a\$b"c\\d$`)}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}}},
+		// nginx's tracer adds the client's User-Agent as nginx keeps it, a tab at either end included, as http.user_agent,
+		// where the Envoy output's user_agent holds it without the tab; nginx sends such a request on not sampled.
+		{name: "a User-Agent after a tab is held by a span as Envoy reads it", keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/b6", raw: true,
+				headers: map[string]string{"x-request-id": drawnID("0000000000b6"), "user-agent": "\tprobe/1"}},
+			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"user_agent": regexp.MustCompile(`^probe/1$`)}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}},
+			by: map[string]own{"nginx": {difference: "tracing.provider.otel", literal: literal{want: answer{status: 200, service: "shop",
+				receivedForms: map[string]*regexp.Regexp{"traceparent": unsampledTrace}, noSpan: true}}}}},
+		{name: "a tag named like a span field replaces it", keys: []string{"tracing", "tracing.tags.<tag name>.header"}, overlap: true,
+			send: tracedTo("/products/t25", drawnID("000000000025"), map[string]string{"x-component": "mine"}),
+			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"component": regexp.MustCompile(`^mine$`)}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}}},
+		{name: "a tag named like a span field keeps the field's value when its header is absent", keys: []string{"tracing", "tracing.tags.<tag name>.header"},
+			overlap: true, send: tracedTo("/products/t25b", drawnID("00000000025b"), nil),
+			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"component": regexp.MustCompile(`^proxy$`)}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}}},
+		{name: "the tracing headers a client sends do not reach the service", keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: tracedTo("/products/t26", drawnID("000000000026"), map[string]string{"x-envoy-downstream-service-cluster": "a",
+				"x-envoy-downstream-service-node": "b", "x-envoy-decorator-operation": "c"}),
+			want: answer{status: 200, service: "shop", absent: []string{"x-envoy-decorator-operation", "x-envoy-downstream-service-cluster",
+				"x-envoy-downstream-service-node"}, spanned: map[string]*regexp.Regexp{"name": shopSpan}},
+			on: map[string]literal{"full": {want: answer{status: 200, service: "shop", absent: []string{"x-envoy-decorator-operation",
+				"x-envoy-downstream-service-cluster", "x-envoy-downstream-service-node"}}}}},
+		{name: "a gRPC call's service receives the span's traceparent", keys: []string{"tracing", "tracing.provider.otel", "routes[].rpc"}, overlap: true,
+			send: request{proto: "grpc", method: "POST", host: "localhost", path: "/example.shop.v1.CartService/GetCart",
+				headers: map[string]string{"x-request-id": drawnID("000000000023")}},
+			want: answer{status: 200, grpcStatus: "0", service: "shop", receivedForms: map[string]*regexp.Regexp{"traceparent": sampledTrace},
+				spanned: map[string]*regexp.Regexp{"name": shopSpan}},
+			on: map[string]literal{"full": {want: answer{status: 200, grpcStatus: "0", service: "shop",
+				receivedForms: map[string]*regexp.Regexp{"traceparent": drawnTrace}}}}},
+		// nginx's gRPC module sends one field for each grpc_set_header line, so the file refuses a call whose
+		// traceparent is malformed and comes with a second line of it or of tracestate, which the Envoy output passes
+		// on as fields of their own.
+		{name: "a gRPC call's malformed traceparent on two lines reaches the service as two lines", keys: []string{"tracing", "tracing.provider.otel", "routes[].rpc"},
+			overlap: true, send: request{proto: "h2", method: "POST", host: "localhost", path: "/example.shop.v1.CartService/GetCart", raw: true,
+				body: "\x00\x00\x00\x00\x00", headers: map[string]string{"content-type": "application/grpc", "te": "trailers",
+					"x-request-id": drawnID("0000000000c6"), "traceparent": "00-abc-def-01\r\ntraceparent: " + sampled}},
+			want: answer{status: 200, service: "shop", received: map[string]string{"traceparent": "00-abc-def-01\n" + sampled}, noSpan: true},
+			on:   servedOnFull(nil, map[string]string{"traceparent": "00-abc-def-01\n" + sampled}),
+			by:   map[string]own{"nginx": {difference: otelRow, literal: literal{want: answer{status: 400, noSpan: true}}}}},
+		// The requests either proxy answers itself: a path both refuse, which the Envoy output traces as ingress; a %00
+		// and a fragment, which it does not trace, where nginx's own answer to the fragment passes through a location
+		// whose tracer reads $pf_refusal; and a refused origin, traced under the route.
+		{name: "a path both refuse is traced as ingress", keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: tracedTo("/products/..%3B/t27", drawnID("000000000027"), nil),
+			want: answer{status: 400, spanned: map[string]*regexp.Regexp{"name": regexp.MustCompile(`^ingress$`)}},
+			on:   map[string]literal{"full": {want: answer{status: 400}}}},
+		{name: "a %00 in the path is not traced", keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: tracedTo("/products/%00", drawnID("00000000027b"), nil),
+			want: answer{status: 400, noSpan: true},
+			on:   map[string]literal{"full": {want: answer{status: 400}}}},
+		{name: "a fragment in the target is not traced", keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: request{proto: "http/1.1", host: "localhost", line: "GET /products/t27c#x HTTP/1.1", raw: true,
+				headers: map[string]string{"x-request-id": drawnID("00000000027c")}},
+			want: answer{status: 400, noSpan: true},
+			on:   map[string]literal{"full": {want: answer{status: 400}}}},
+		{name: "a refused upgrade is not traced", keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: tracedTo("/products/a1?t=a1", drawnID("0000000000a1"), map[string]string{"connection": "upgrade", "upgrade": "foo",
+				"authorization": "Bearer allow"}),
+			want: answer{status: 403, noSpan: true},
+			on:   map[string]literal{"full": {want: answer{status: 403}}}},
+		{name: "a request line of another scheme than http and https is not traced", keys: []string{"tracing", "tracing.provider.otel"}, overlap: true,
+			send: request{proto: "http/1.1", host: "localhost", line: "GET ftp://localhost/products/a6 HTTP/1.1", raw: true,
+				headers: map[string]string{"x-request-id": drawnID("0000000000a6"), "authorization": "Bearer allow"}},
+			want: answer{status: 400, noSpan: true},
+			on:   map[string]literal{"full": {want: answer{status: 400}}}},
+		// Envoy answers it 400 before the 426 of HTTP/1.0, and HAProxy, which runs no tracing row, 426.
+		{name: "a request line of another scheme than http and https with HTTP/1.0 is answered 400 and not traced", keys: []string{"tracing",
+			"tracing.provider.otel"}, overlap: true,
+			send: request{proto: "http/1.1", host: "localhost", line: "GET ftp://localhost/products/a7 HTTP/1.0", raw: true,
+				headers: map[string]string{"x-request-id": drawnID("0000000000a7")}},
+			want: answer{status: 400, headers: map[string]string{"content-type": "text/plain"}, noSpan: true},
+			on:   map[string]literal{"full": {want: answer{status: 400, headers: map[string]string{"content-type": "text/plain"}}}}},
+		{name: "a request from a refused origin is traced under its route", keys: []string{"tracing", "tracing.provider.otel",
+			"origins.<environment name>.origins", "origins.<environment name>.patterns"}, overlap: true,
+			send: request{proto: "http/1.1", method: "GET", host: "api.example.com", path: "/products/t27d",
+				headers: map[string]string{"x-request-id": drawnID("00000000027d"), "origin": "https://evil.example.net"}},
+			want: answer{status: 403, spanned: map[string]*regexp.Regexp{"name": shopSpan}},
+			on:   map[string]literal{"full": {want: answer{status: 403}}},
+			by: map[string]own{"nginx": {difference: otelRow, literal: literal{want: answer{status: 403,
+				spanned: map[string]*regexp.Regexp{"name": regexp.MustCompile(`^ingress$`)}}}}}},
+	}}
+
+// worldClient is the address the proxy sees the battery's clients come from: the gateway of the battery's network,
+// through which Docker forwards the listener's published port.
+var worldClient = regexp.MustCompile(`^10\.0\.0\.1$`)
+
+// spanFields are the fields of the Envoy output's span of a GET that the shop route serves, with url, protocol and the
+// client's user agent, and statusType the type of http.status_code: the Envoy output writes it as text, nginx's tracer
+// as a number.
+func spanFields(url, protocol, userAgent, statusType string) map[string]*regexp.Regexp {
+	fields := map[string]*regexp.Regexp{"name": shopSpan, "node_id": regexp.MustCompile(`^$`), "zone": regexp.MustCompile(`^$`),
+		"downstream_cluster": regexp.MustCompile(`^-$`), "component": regexp.MustCompile(`^proxy$`), "http.method": regexp.MustCompile(`^GET$`),
+		"http.protocol": regexp.MustCompile(protocol), "http.url": regexp.MustCompile(url), "peer.address": worldClient,
+		"request_size": regexp.MustCompile(`^0$`), "response_size": regexp.MustCompile(`^[1-9][0-9]*$`),
+		"upstream_cluster": regexp.MustCompile(`^shop_http$`), "upstream_cluster.name": regexp.MustCompile(`^shop_http$`),
+		"user_agent": regexp.MustCompile(userAgent), "http.status_code": regexp.MustCompile(`^200$`),
+		"type:http.status_code": regexp.MustCompile(`^` + statusType + `$`)}
+	return fields
+}
+
+// tracingRetried: a traced request to the route retried to shop, each of 40 with an id of its own, while shop-2
+// refuses connections. The service read the ids of the span, one for each request, on the try that served it. Its own
+// scenario, because the rows of tracing that overlap send to shop too, and would meet shop-2 refusing. The row cannot
+// tell a request whose first try met shop-2 from one shop-1 served at once; measured once, 20 of the 40 spans on each
+// nginx version named the copy that tries again (http.route @pf_r_81-rt), and Envoy 1.40.2 retried 39 of the 40 after
+// a failed connect. Were each first try a fair coin instead of a round robin, all 40 would miss shop-2 with a chance of
+// 2^-40, under one in a trillion.
+var tracingRetried = scenario{name: "tracing a retried request",
+	exchanges: []exchange{
+		{name: "a traced request retried after a refused connection has one span, whose ids the service read", keys: []string{"tracing", "routes[].retries"},
+			send: tracedTo(retriedPath, drawnID("0000000031{i}"), nil), repeat: 40, every: true, refusing: "shop-2",
+			want: answer{status: 200, service: "shop", instance: "shop-1", receivedForms: map[string]*regexp.Regexp{"traceparent": sampledTrace},
+				spanned: map[string]*regexp.Regexp{"name": regexp.MustCompile(`^retried$`), "upstream_cluster": regexp.MustCompile(`^shop_http$`),
+					"http.status_code": regexp.MustCompile(`^200$`)}},
+			on: map[string]literal{"full": {want: answer{status: 200, service: "shop", instance: "shop-1"}}}},
 	}}

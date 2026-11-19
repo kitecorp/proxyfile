@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kitecorp/proxyfile/v2/internal/format"
 	"github.com/kitecorp/proxyfile/v2/internal/generator"
 	"github.com/kitecorp/proxyfile/v2/internal/model"
 )
@@ -59,6 +60,23 @@ func relayFolder(listen int64) string {
 	return "/run/proxyfile-" + strconv.FormatInt(listen, 10)
 }
 
+// folderLines name relayFolder as the temporary path of a module the file never uses, so that nginx makes it at start,
+// once in a file: with the check's lines when the check is asked, and otherwise with the collector relay's
+// (collectorLines). The comment names the sockets the folder holds.
+func folderLines(g *model.Gateway) []string {
+	sockets := "auth check's socket"
+	switch {
+	case asked(g) == nil:
+		sockets = "collector relay's socket"
+	case relayed(otelTracing(g)):
+		sockets = "auth check's and the collector relay's sockets"
+	}
+	return []string{
+		"  # The folder of the " + sockets + ": nginx makes a temporary path at start, before it binds, for its workers' user alone.",
+		"  scgi_temp_path " + relayFolder(g.Listen.Number) + ";",
+	}
+}
+
 // relaySocket is the socket file the check location proxies to and the relay listens on. nginx removes it when it
 // stops; a kill leaves it, and nginx then does not start again until it is removed (measured), which the auth.ask row
 // of the support table and docs/nginx.md state.
@@ -77,11 +95,7 @@ func checkLines(in generator.Input, v *values, e edge) (http, stream []string) {
 	// absolute one with the server's name and port; Envoy passes the check's Location on as the check sent it
 	// (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2 with Location: /login?next=%2Fx). The directive changes
 	// only the answers nginx makes itself, never a service's.
-	http = []string{
-		"  absolute_redirect off;",
-		"  # The folder of the auth check's socket: nginx makes a temporary path at start, before it binds, for its workers' user alone.",
-		"  scgi_temp_path " + relayFolder(in.Gateway.Listen.Number) + ";",
-	}
+	http = append([]string{"  absolute_redirect off;"}, folderLines(in.Gateway)...)
 	// The handler sets these, so each is declared with js_var, which reads empty where nothing set it.
 	for _, name := range []string{"checking", "check_failed", "unchecked", "authz_us", "then", "action", "reports"} {
 		http = append(http, "  js_var $pf_"+name+";")
@@ -145,8 +159,9 @@ func checkLines(in generator.Input, v *values, e edge) (http, stream []string) {
 		told = toldHeaders[0]
 	}
 	// The relay sends the check no header that $pf_check_send does not cover, so the list names every header the
-	// check receives besides Host: authorization, which the Envoy output always sends, the send entries, and the
-	// proxy's own. A check is tried once, as the Envoy output tries it; proxy_timeout ends one that sends nothing.
+	// check receives besides Host: authorization, which the Envoy output always sends, the send entries, the proxy's
+	// own and, with tracing, the trace, which the Envoy output's check request carries too. A check is tried once, as
+	// the Envoy output tries it; proxy_timeout ends one that sends nothing.
 	// Every check connects to the relay's socket, and one the socket's listen queue has no room for fails at once: with
 	// nginx's own backlog of 511 the kernel held 512 connections, and a burst of 600 clients filled it with a healthy
 	// check. The kernel holds the smaller of backlog and net.core.somaxconn, so the largest backlog listen takes leaves
@@ -156,9 +171,15 @@ func checkLines(in generator.Input, v *values, e edge) (http, stream []string) {
 		"  }",
 		"  server {",
 		"    listen unix:"+relaySocket(in.Gateway.Listen.Number)+" backlog=2147483647;",
-		"    set $pf_check_send "+v.token(sendKey(a), sendPos(a), quoted(strings.Join(checkSend(a), " ")))+";",
+		"    set $pf_check_send "+v.token(sendKey(a), sendPos(a), quoted(strings.Join(checkSend(a, e.traced), " ")))+";",
 		"    set $pf_check_ms "+ms+";",
 		"    set $pf_check_uri "+told+";",
+	)
+	if e.traced {
+		// The trace the script wrote reaches the check with the client's bytes, which asEnvoySends would change.
+		stream = append(stream, "    set $pf_check_as_sent "+quoted(strings.Join(traceNames, " "))+";")
+	}
+	stream = append(stream,
 		"    proxy_pass proxyfile_"+listen+"_check;",
 		"    proxy_next_upstream off;",
 		"    proxy_connect_timeout "+nginxTime(a.Timeout.Millis)+";",
@@ -170,8 +191,9 @@ func checkLines(in generator.Input, v *values, e edge) (http, stream []string) {
 	return http, stream
 }
 
-// checkSend is every entry the relay passes to the check, in lower case, a prefix written with its *.
-func checkSend(a *model.Auth) []string {
+// checkSend is every entry the relay passes to the check, in lower case, a prefix written with its *: with traced, the
+// trace's two names after the others, each unless send names it already.
+func checkSend(a *model.Auth, traced bool) []string {
 	send := []string{"authorization"}
 	for _, header := range a.Send {
 		name := strings.ToLower(header.Name)
@@ -186,6 +208,13 @@ func checkSend(a *model.Auth) []string {
 		generator.QuestionHeaders[0].Name, generator.QuestionHeaders[1].Name)
 	if a.SendRequest {
 		send = append(send, toldHeaders...)
+	}
+	if traced {
+		for _, name := range traceNames {
+			if !slices.Contains(send, name) {
+				send = append(send, name)
+			}
+		}
 	}
 	return send
 }
@@ -237,10 +266,16 @@ func writeCheck(w *writer, v *values, a *model.Auth, listen int64, e edge, targe
 		"        return 418;",
 		"      }",
 		"      error_page 418 = "+target+";",
+	)
+	h := locationHeaders{w: w, set: "proxy_set_header", sent: map[string]bool{}}
+	// With tracing the check's request carries the trace the route's request carries, the server span's, so the
+	// check's own spans join the request's trace (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2, whose check
+	// request carries its client span's), and beside a malformed traceparent neither header, as the Envoy output's.
+	h.traceHeaders(e, checkTrace)
+	w.lines(
 		"      proxy_pass http://unix:"+relaySocket(listen)+";",
 		"      proxy_pass_request_body off;",
 	)
-	h := locationHeaders{w: w, set: "proxy_set_header", sent: map[string]bool{}}
 	h.send("content-length", "Content-Length", `""`)
 	h.send("connection", "Connection", `""`)
 	// The HTTP2-Settings the route sends the service: the Envoy output's check never receives an h2c upgrade's, and
@@ -369,13 +404,19 @@ func (h *locationHeaders) forwarding(e edge) {
 	}
 }
 
-// removedByEnvoy empties each header the Envoy output removes, which nginx then does not send.
+// removedByEnvoy empties each header the Envoy output removes, which nginx then does not send: with tracing
+// format.NginxRemovedTraced under either client_address, which connection removes already.
 func (h *locationHeaders) removedByEnvoy(e edge) {
 	for _, header := range generator.RemovedByEnvoy {
 		h.send(header, header, `""`)
 	}
 	if e.connection {
 		for _, header := range generator.RemovedByEnvoyFacingClients {
+			h.send(header, header, `""`)
+		}
+	}
+	if e.traced {
+		for _, header := range format.NginxRemovedTraced {
 			h.send(header, header, `""`)
 		}
 	}

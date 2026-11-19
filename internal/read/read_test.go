@@ -776,8 +776,50 @@ func TestReadTracing(t *testing.T) {
 			if problems != nil {
 				t.Fatalf("problems = %q, want none", testsupport.ProblemStrings(problems))
 			}
-			if !reflect.DeepEqual(file.Gateway.Tracing, c.want) {
-				t.Errorf("Tracing = %#v, want %#v", file.Gateway.Tracing, c.want)
+			// TestReadTagPositions holds the tags' positions, which differ by file.
+			got := file.Gateway.Tracing
+			if got != nil {
+				unplaced := *got
+				unplaced.Tags = slices.Clone(got.Tags)
+				for i := range unplaced.Tags {
+					unplaced.Tags[i].Pos = model.Pos{}
+				}
+				got = &unplaced
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("Tracing = %#v, want %#v", got, c.want)
+			}
+		})
+	}
+}
+
+// Each tag holds the position of its key, in YAML its line and column and in HOCON its path, at the top and at
+// envoy.tracing, its old place, so a generator can refuse a tag it cannot write at the tag.
+func TestReadTagPositions(t *testing.T) {
+	cases := []struct {
+		file string
+		want []model.Pos
+	}{
+		{"../../examples/otel/yaml/proxyfile.yaml", []model.Pos{{File: "../../examples/otel/yaml/proxyfile.yaml", Line: 19, Column: 5},
+			{File: "../../examples/otel/yaml/proxyfile.yaml", Line: 20, Column: 5}}},
+		{"../../examples/otel/hocon/Proxyfile", []model.Pos{{File: "../../examples/otel/hocon/Proxyfile", Path: "tracing.tags.environment"},
+			{File: "../../examples/otel/hocon/Proxyfile", Path: "tracing.tags.request_id"}}},
+		{"../../examples/tracing/envoy-tracing/proxyfile.yaml", []model.Pos{
+			{File: "../../examples/tracing/envoy-tracing/proxyfile.yaml", Line: 33, Column: 7},
+			{File: "../../examples/tracing/envoy-tracing/proxyfile.yaml", Line: 34, Column: 7}}},
+	}
+	for _, c := range cases {
+		t.Run(c.file, func(t *testing.T) {
+			file, problems := Proxyfile(c.file)
+			if problems != nil {
+				t.Fatalf("problems = %q, want none", testsupport.ProblemStrings(problems))
+			}
+			var got []model.Pos
+			for _, tag := range file.Gateway.Tracing.Tags {
+				got = append(got, tag.Pos)
+			}
+			if !slices.Equal(got, c.want) {
+				t.Errorf("the tags' positions = %+v, want %+v", got, c.want)
 			}
 		})
 	}

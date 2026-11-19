@@ -121,31 +121,37 @@ function forwardedProto(r) {
     return "0";
 }
 
-// origin is the request's Origin as the Envoy output reads it, which nginx's $http_origin cannot give: "n" when the
-// request has no Origin line; "e" when every line is empty; otherwise "o" and the lines that are not empty, joined with
-// a comma in the order sent, each line read as Envoy reads it (asEnvoyReads). nginx.conf refuses "e", and the empty
-// value of a run that failed.
-function origin(r) {
-    var raw = r.rawHeadersIn;
-    var present = false;
+// joinedLines is name's lines as Envoy joins a header of generator.JoinedByEnvoy (joinedValues).
+function joinedLines(r, name) {
+    return joinedValues(r, allLines(r, name));
+}
+
+// joinedValues is lines, a header's in the order sent, as Envoy joins them: null for no line, and otherwise the lines
+// that are not empty, each read as Envoy reads it (asEnvoyReads), joined with a comma, which is empty when every line
+// is.
+function joinedValues(r, lines) {
+    if (lines.length == 0) {
+        return null;
+    }
     var values = [];
-    for (var i = 0; i < raw.length; i++) {
-        if (raw[i][0].toLowerCase() != "origin") {
-            continue;
-        }
-        present = true;
-        var value = asEnvoyReads(r, raw[i][1]);
+    for (var i = 0; i < lines.length; i++) {
+        var value = asEnvoyReads(r, lines[i]);
         if (value != "") {
             values.push(value);
         }
     }
-    if (!present) {
+    return values.join(",");
+}
+
+// origin is the request's Origin as the Envoy output reads it, which nginx's $http_origin cannot give: "n" when the
+// request has no Origin line; "e" when every line is empty; otherwise "o" and its lines joined (joinedLines). nginx.conf
+// refuses "e", and the empty value of a run that failed.
+function origin(r) {
+    var value = joinedLines(r, "origin");
+    if (value === null) {
         return "n";
     }
-    if (values.length == 0) {
-        return "e";
-    }
-    return "o" + values.join(",");
+    return value == "" ? "e" : "o" + value;
 }
 
 // The auth check (auth.ask). check, the access handler of every location a checked route writes, asks with a
@@ -296,9 +302,12 @@ function plain(b, high) {
     return true;
 }
 
-// utf8 is the length of the well-formed UTF-8 sequence of 2 to 4 bytes that starts at b[i], as RFC 3629 writes one (no
-// overlong form, no surrogate, nothing above U+10FFFF), or 0 when none starts there.
-function utf8(b, i) {
+// sequence is, for the bytes of b from i on, the length of the well-formed UTF-8 sequence of 2 to 4 bytes that starts
+// there, as RFC 3629 writes one (no overlong form, no surrogate, nothing above U+10FFFF), or, where none starts, minus
+// the number of bytes a decoder reads as one U+FFFD: the byte and each byte after it that such a sequence could still
+// hold, the maximal subpart of the Unicode Standard (section 3.9), which njs replaces with one U+FFFD (measured on
+// nginx 1.30.6 and 1.31.8).
+function sequence(b, i) {
     var c = b[i], n = 0, low = 0x80, high = 0xBF;
     if (c >= 0xC2 && c <= 0xDF) {
         n = 2;
@@ -311,15 +320,22 @@ function utf8(b, i) {
         low = c == 0xF0 ? 0x90 : 0x80;
         high = c == 0xF4 ? 0x8F : 0xBF;
     }
-    if (n == 0 || i + n > b.length || b[i + 1] < low || b[i + 1] > high) {
-        return 0;
+    if (n == 0 || i + 1 >= b.length || b[i + 1] < low || b[i + 1] > high) {
+        return -1;
     }
     for (var k = 2; k < n; k++) {
-        if (b[i + k] < 0x80 || b[i + k] > 0xBF) {
-            return 0;
+        if (i + k >= b.length || b[i + k] < 0x80 || b[i + k] > 0xBF) {
+            return -k;
         }
     }
     return n;
+}
+
+// utf8 is the length of the well-formed UTF-8 sequence of 2 to 4 bytes that starts at b[i], or 0 when none starts
+// there (sequence).
+function utf8(b, i) {
+    var n = sequence(b, i);
+    return n > 0 ? n : 0;
 }
 
 // asEnvoySends is a new Buffer of value as Envoy writes a header it sends its check: each well-formed UTF-8 sequence as
@@ -386,11 +402,14 @@ function millis(text) {
 // request line; host, the authority nginx routed the request by, which the check location sets; each header that
 // $pf_check_send covers and that is not a framing header, each name once in lower case with the values of its lines
 // joined by a comma; then content-length 0 and connection close. Each value is written as Envoy sends it
-// (asEnvoySends), and the path the check is told with send_request ($pf_check_uri names its header) as Envoy tells it
-// (asEnvoyTells). nginx ends each line with CR LF and sends one host and one of each of the two names; any other head
+// (asEnvoySends), the path the check is told with send_request ($pf_check_uri names its header) as Envoy tells it
+// (asEnvoyTells), and with tracing the trace the script wrote ($pf_check_as_sent names its headers) as the script wrote
+// it, every byte after the colon and its space, as the Envoy output's tracer writes the client's bytes on its request
+// to the check. nginx ends each line with CR LF and sends one host and one of each of the two names; any other head
 // throws. head is true for a HEAD, whose answer has no body.
 function question(s, head) {
     var send = words(s.variables.pf_check_send), told = s.variables.pf_check_uri || "";
+    var asSent = words(s.variables.pf_check_as_sent);
     var method = null, path = null, host = null, names = [], values = [];
     var p = head.indexOf(10) + 1;
     if (p <= 0) {
@@ -408,7 +427,8 @@ function question(s, head) {
         if (colon < 0 || colon > end - 1 || !isToken(head, p, colon)) {
             throw "unreadable";
         }
-        var v = trim(head, colon + 1, end - 1);
+        var v = listed(head, p, colon, asSent) && head[colon + 1] == 0x20 ? [colon + 2, end - 1] :
+            trim(head, colon + 1, end - 1);
         var value = head.subarray(v[0], v[1]);
         if (is(head, p, colon, methodHeader)) {
             if (method !== null) {
@@ -443,13 +463,14 @@ function question(s, head) {
     var parts = [method, Buffer.from(" "), path, Buffer.from(" HTTP/1.1\r\nhost: "), asEnvoySends(host),
         Buffer.from("\r\n")];
     for (var i = 0; i < names.length; i++) {
-        var write = told && is(names[i], 0, names[i].length, told) ? asEnvoyTells : asEnvoySends;
+        var write = told && is(names[i], 0, names[i].length, told) ? asEnvoyTells :
+            listed(names[i], 0, names[i].length, asSent) ? null : asEnvoySends;
         parts.push(names[i], Buffer.from(": "));
         for (var j = 0; j < values[i].length; j++) {
             if (j > 0) {
                 parts.push(Buffer.from(","));
             }
-            parts.push(write(values[i][j]));
+            parts.push(write === null ? values[i][j] : write(values[i][j]));
         }
         parts.push(Buffer.from("\r\n"));
     }
@@ -1382,4 +1403,303 @@ function retrySpent(r) {
     }
 }
 
-export default {headerNames, forwardedProto, origin, relay, check, clientKey, hashKey, limitedKind, retrySpent};
+// firstLine is the value of name's first line, or null: Envoy reads the first of two where $http_<name> joins them.
+function firstLine(r, name) {
+    var raw = r.rawHeadersIn;
+    for (var i = 0; i < raw.length; i++) {
+        if (raw[i][0].toLowerCase() == name) {
+            return raw[i][1];
+        }
+    }
+    return null;
+}
+
+// allLines is the value of each of name's lines in the order sent, each apart, where $http_<name> joins them.
+function allLines(r, name) {
+    var raw = r.rawHeadersIn, values = [];
+    for (var i = 0; i < raw.length; i++) {
+        if (raw[i][0].toLowerCase() == name) {
+            values.push(raw[i][1]);
+        }
+    }
+    return values;
+}
+
+// lineBytes is each of name's lines, which holds no -, as a Buffer of the bytes the client sent, read as Envoy reads a
+// value (asEnvoyReads), in the order sent. A string of r.rawHeadersIn holds one U+FFFD for each run of bytes outside
+// well-formed UTF-8 (sequence), and r.rawVariables holds the lines' bytes joined with ", " (measured on nginx 1.30.6
+// and 1.31.8), so each line's bytes are read from the second in step with its string from the first, a U+FFFD the
+// client did not send standing for the run the decoder read as one. A step the two do not agree on throws, and the
+// caller's catch sends nothing.
+function lineBytes(r, name) {
+    var lines = allLines(r, name), out = [];
+    if (lines.length == 0) {
+        return out;
+    }
+    var raw = r.rawVariables["http_" + name], p = 0;
+    for (var i = 0; i < lines.length; i++) {
+        if (i > 0) {
+            if (raw[p] != 0x2C || raw[p + 1] != 0x20) {
+                throw "unread";
+            }
+            p += 2;
+        }
+        var from = p, text = Buffer.from(lines[i]);
+        for (var q = 0; q < text.length;) {
+            if (text[q] == 0xEF && text[q + 1] == 0xBF && text[q + 2] == 0xBD &&
+                !(raw[p] == 0xEF && raw[p + 1] == 0xBF && raw[p + 2] == 0xBD)) {
+                var n = raw[p] >= 0x80 ? sequence(raw, p) : 0;
+                if (n >= 0) {
+                    throw "unread";
+                }
+                p -= n;
+                q += 3;
+            } else if (raw[p] === text[q]) {
+                p++;
+                q++;
+            } else {
+                throw "unread";
+            }
+        }
+        var v = r.httpVersion == "2.0" ? [from, p] : trim(raw, from, p);
+        out.push(raw.subarray(v[0], v[1]));
+    }
+    if (p != raw.length) {
+        throw "unread";
+    }
+    return out;
+}
+
+// joined is one Buffer of the Buffers of lines with the text between after each but the last. A line break and a
+// header's name between them make nginx write each line as a header line of its own, as a line break in a value nginx
+// sends ends the line it writes (measured on nginx 1.30.6 and 1.31.8).
+function joined(lines, between) {
+    var parts = [];
+    for (var i = 0; i < lines.length; i++) {
+        if (i > 0) {
+            parts.push(Buffer.from(between));
+        }
+        parts.push(lines[i]);
+    }
+    return Buffer.concat(parts);
+}
+
+// parentOf reads the client's traceparent as Envoy 1.40.2 reads it, its first line as asEnvoyReads gives it: null
+// when the client sent none, "bad" when that is not 55 characters of four hexadecimal parts of 2, 32, 16 and 2 digits,
+// or either id is all zeros, and otherwise its value, its version, whether its flags say sampled, and whether nginx's
+// tracer continues it as the Envoy output does. Envoy continues any version; nginx's tracer reads only 00, and reads
+// the traceparent and the first tracestate line as nginx keeps them, with a tab beside the value: it does not continue
+// such a traceparent, and it puts such a tracestate into the span with its tab. So a request of another version, or
+// with a tab beside either, gets no span and goes on with the client's version and ids (measured on nginx 1.30.6 and
+// 1.31.8 beside Envoy 1.40.2).
+function parentOf(r) {
+    var line = firstLine(r, "traceparent");
+    if (line === null) {
+        return null;
+    }
+    var value = asEnvoyReads(r, line);
+    if (value.length != 55 || !/^[0-9a-fA-F]{2}-[0-9a-fA-F]{32}-[0-9a-fA-F]{16}-[0-9a-fA-F]{2}$/.test(value) ||
+        /^..-0{32}-/.test(value) || /-0{16}-..$/.test(value)) {
+        return "bad";
+    }
+    var version = value.substring(0, 2), state = firstLine(r, "tracestate");
+    return {value: value, version: version, sampled: (parseInt(value.substring(53, 55), 16) & 1) === 1,
+        continued: version == "00" && value === line && (state === null || state === asEnvoyReads(r, state))};
+}
+
+// drawn is Envoy's draw: the first eight characters of the request id, after an optional 0x, read as hexadecimal,
+// modulo 10000, below share (sample.rate times 100). An id shorter than eight characters, or with another character
+// among them, is never drawn, so an id that is not a UUID is drawn by its first eight characters.
+function drawn(id, share) {
+    if (id.length < 8) {
+        return false;
+    }
+    var head = id.substring(0, 8);
+    if (head[0] == "0" && (head[1] == "x" || head[1] == "X")) {
+        head = head.substring(2);
+    }
+    if (!/^[0-9a-fA-F]+$/.test(head)) {
+        return false;
+    }
+    return parseInt(head, 16) % 10000 < share;
+}
+
+// requestId is the request id as Envoy reads it (asEnvoyReads), which the draw and the span read: nginx keeps a tab
+// beside a client's id.
+function requestId(r) {
+    try {
+        return asEnvoyReads(r, r.variables.pf_request_id);
+    } catch (e) {
+        return "";
+    }
+}
+
+// targetTraced says whether a span may hold the request's target. nginx's tracer adds the target as the client wrote
+// it, as http.target, which no line removes, where the Envoy output's URL holds the path it sends on, and in its
+// place a client's x-envoy-original-path under client_address forwarded. So only a target nginx sends on as written
+// and of at most 256 bytes ($pf_target_traced), on a route with no rewrite in a server of an environment
+// ($pf_rewritten), beside no line of the header $pf_original_path names, is held by a span.
+function targetTraced(r) {
+    var original = r.variables.pf_original_path;
+    return r.variables.pf_target_traced === "1" && (r.variables.server_name === "" || r.variables.pf_rewritten === "0") &&
+        (original === "" || firstLine(r, original) === null);
+}
+
+// userAgentTraced says whether a span may hold the request's User-Agent. nginx's tracer adds it as nginx keeps it, as
+// http.user_agent, which no line removes, where the Envoy output's user_agent holds it as Envoy reads it: over HTTP/1
+// nginx keeps a tab at either end, which Envoy removes (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2).
+function userAgentTraced(r) {
+    var agent = firstLine(r, "user-agent");
+    return agent === null || agent === asEnvoyReads(r, agent);
+}
+
+// sampledByDraw says whether the Envoy output marks the request sampled, whatever the traceparent's version: never
+// with a malformed traceparent, one that says not sampled, or a target or a User-Agent no span may hold
+// (targetTraced, userAgentTraced), which nginx sends on not sampled where the Envoy output samples it, and otherwise
+// by the draw on the request id (requestId). A traceparent that says sampled does not force a trace, as with Envoy.
+function sampledByDraw(r, parent) {
+    if (parent === "bad" || (parent !== null && !parent.sampled)) {
+        return false;
+    }
+    if (!targetTraced(r) || !userAgentTraced(r)) {
+        return false;
+    }
+    return drawn(requestId(r), Number(r.variables.pf_trace_share));
+}
+
+// traced says whether the request gets a span: when the Envoy output marks it sampled, but never for a traceparent
+// nginx's tracer does not continue (parentOf), for a request refused before any route ($pf_refusal: a method, version,
+// scheme, target or header Envoy refuses, a fragment, a QUERY with no Content-Type, HTTP/1.0), or for an upgrade the
+// route choice of a server of an environment refuses ($pf_route), for which the Envoy output writes no span either
+// (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2). The default server, which answers an upgrade 404 as it
+// answers any request, traces it, as the Envoy output does on a host no environment names.
+function traced(r) {
+    try {
+        var parent = parentOf(r);
+        if (r.variables.pf_refusal !== "0" || (parent !== null && parent !== "bad" && !parent.continued) ||
+            (r.variables.server_name !== "" && /^upgrade-refused-/.test(r.variables.pf_route))) {
+            return "off";
+        }
+        return sampledByDraw(r, parent) ? "on" : "off";
+    } catch (e) {
+        return "off";
+    }
+}
+
+// traceparent is what the service receives: a malformed traceparent as the client sent it, each line as a line of its
+// own, as Envoy passes them on (lineBytes); one nginx's tracer does not continue (parentOf) with the client's version
+// and ids and the flag the Envoy output writes for it; and otherwise the span's own, sampled when the request is
+// traced.
+function traceparent(r) {
+    try {
+        var parent = parentOf(r);
+        if (parent === "bad") {
+            return joined(lineBytes(r, "traceparent"), "\r\ntraceparent: ");
+        }
+        if (parent !== null && !parent.continued) {
+            return parent.value.substring(0, 53) + (sampledByDraw(r, parent) ? "01" : "00");
+        }
+        return "00-" + r.variables.otel_trace_id + "-" + r.variables.otel_span_id + "-0" +
+            (r.variables.pf_otel_trace === "on" ? "1" : "0");
+    } catch (e) {
+        return "";
+    }
+}
+
+// tracestate is the client's tracestate lines as it sent them (lineBytes), sent only beside a traceparent, as the
+// Envoy output drops a client's tracestate that comes without one: beside a malformed traceparent each line as a line
+// of its own, as Envoy passes them on, and otherwise joined by commas, an empty line too, as Envoy joins them.
+function tracestate(r) {
+    try {
+        var parent = parentOf(r);
+        if (parent === null) {
+            return "";
+        }
+        return joined(lineBytes(r, "tracestate"), parent === "bad" ? "\r\ntracestate: " : ",");
+    } catch (e) {
+        return "";
+    }
+}
+
+// checkTraceparent and checkTracestate are what the check receives: the service's, but neither beside a malformed
+// traceparent, as the Envoy output's check request carries no trace when its span cannot read the client's.
+function checkTraceparent(r) {
+    try {
+        return parentOf(r) === "bad" ? "" : traceparent(r);
+    } catch (e) {
+        return "";
+    }
+}
+
+function checkTracestate(r) {
+    try {
+        return parentOf(r) === "bad" ? "" : tracestate(r);
+    } catch (e) {
+        return "";
+    }
+}
+
+// traceLines is "1" when the client's traceparent is malformed and it, or the tracestate beside it, comes on more than
+// one line, and on a run that fails, and "0" otherwise. A gRPC location refuses such a call: the Envoy output passes
+// each line on as a field of its own, and nginx's gRPC module sends one field for each header line it writes.
+function traceLines(r) {
+    try {
+        return parentOf(r) === "bad" && (allLines(r, "traceparent").length > 1 || allLines(r, "tracestate").length > 1) ?
+            "1" : "0";
+    } catch (e) {
+        return "1";
+    }
+}
+
+// readTags reads, in one pass over the request's lines, each source $pf_tag_sources names, once however many tags read
+// it: h:<name> the first line of the client's header as Envoy reads it, j:<name> the lines of a header Envoy joins,
+// joined as it joins them (joinedValues), v:<variable> a header the proxy writes itself, read from the variable it
+// writes it with as Envoy reads it, none when empty and empty when it holds the one space the check's handler stores
+// for a value the check sent empty, a: a header the proxy removes, always none, e:<name> the environment's own variable
+// of that name, none when unset, which never reads one every object inherits, such as constructor. For the source at
+// position n from 1 it writes the value to $pf_tv_<n>, or n to $pf_ts_<n> for none and e for an empty value; each tag's
+// map reads its source's two variables, so no map reads another source's value. Nothing is written unless every source
+// was read, and it answers "", which each map's key starts with, so the pass runs before a map reads them.
+function readTags(r) {
+    try {
+        var sources = r.variables.pf_tag_sources.split(" "), raw = r.rawHeadersIn, lines = {}, values = [];
+        for (var i = 0; i < raw.length; i++) {
+            var key = " " + raw[i][0].toLowerCase();
+            if (lines[key] === undefined) {
+                lines[key] = [];
+            }
+            lines[key].push(raw[i][1]);
+        }
+        for (var i = 0; i < sources.length; i++) {
+            var kind = sources[i].substring(0, 2), name = sources[i].substring(2), value = null, sent = lines[" " + name];
+            if (kind == "h:") {
+                value = sent === undefined ? null : asEnvoyReads(r, sent[0]);
+            } else if (kind == "j:") {
+                value = sent === undefined ? null : joinedValues(r, sent);
+            } else if (kind == "v:") {
+                value = r.variables[name] || null;
+                if (value === " ") {
+                    value = "";
+                } else if (value !== null) {
+                    value = asEnvoyReads(r, value);
+                }
+            } else if (kind == "e:" && Object.prototype.hasOwnProperty.call(process.env, name)) {
+                value = process.env[name];
+            }
+            values.push(value);
+        }
+        for (var i = 0; i < values.length; i++) {
+            if (values[i] === null) {
+                r.variables["pf_ts_" + (i + 1)] = "n";
+            } else if (values[i] === "") {
+                r.variables["pf_ts_" + (i + 1)] = "e";
+            } else {
+                r.variables["pf_tv_" + (i + 1)] = values[i];
+            }
+        }
+    } catch (e) {
+    }
+    return "";
+}
+
+export default {headerNames, forwardedProto, origin, relay, check, clientKey, hashKey, limitedKind, retrySpent, traced, traceparent, tracestate, checkTraceparent, checkTracestate, traceLines, requestId, readTags};

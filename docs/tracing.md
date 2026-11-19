@@ -186,12 +186,13 @@ span, and neither does a malformed one, which reaches the service as the client 
 "sampled" does not force a trace, and neither does `x-client-trace-id`: the draw at `sample.rate` decides. Where
 X-Ray's `rate: 7%` traces 8% of the requests, this one traces 7%.
 
-Envoy takes the draw from the request's `x-request-id`, and a request whose id is not a UUID is never traced by the
-draw. With `client_address: connection` Envoy writes the id itself, so no client chooses the draw. With
-`client_address: forwarded`, the default without `tls`, the id is the client's own when it sent one, so a client that
-chooses its id chooses the draw: measured on Envoy 1.40.2 at `rate: 10%`, 40 of 40 requests with one chosen id were
-traced and 0 of 40 with another. A tracing backend bills for the spans it stores, so have the proxy in front replace a
-client's `x-request-id`.
+Envoy takes the draw from the first eight characters of the request's `x-request-id`, read as hexadecimal: an id
+shorter than eight characters, or with another character among them, is never traced by the draw, and an id that is not
+a UUID is drawn by those characters. With `client_address: connection` Envoy writes the id itself, so no client chooses
+the draw. With `client_address: forwarded`, the default without `tls`, the id is the client's own when it sent one, so
+a client that chooses its id chooses the draw: measured on Envoy 1.40.2 at `rate: 10%`, 40 of 40 requests with one
+chosen id were traced and 0 of 40 with another. A tracing backend bills for the spans it stores, so have the proxy in
+front replace a client's `x-request-id`.
 
 Tags are span attributes. A tag named like one of the attributes Envoy sets on every span replaces Envoy's value,
 where X-Ray keeps Envoy's. `path_in_url` works as with X-Ray: with `false`, the default, the `http.url` attribute holds
@@ -215,3 +216,6 @@ What the Envoy generator writes with the key:
 - `x-envoy-decorator-operation`, removed from clients after the two downstream headers, unless an entry before it
   covers it: with it a client could rename the span.
 - The request id extension with `pack_trace_reason: false`, as with X-Ray; the sampling above was measured with it.
+
+The nginx generator writes the `otel` provider too, for the nginx images tagged `-otel`, with the differences
+[nginx](nginx.md#tracing) names, and refuses the `xray` provider.

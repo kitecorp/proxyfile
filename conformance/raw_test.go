@@ -209,8 +209,11 @@ func (w *world) sendFrames(conn net.Conn, r request, names []string) result {
 	field(":scheme", scheme)
 	field(":authority", r.host)
 	field(":path", r.path)
+	// A value that holds a line break and its name again is two lines over HTTP/1.1, and two fields here.
 	for _, name := range names {
-		field(name, r.headers[name])
+		for _, value := range strings.Split(r.headers[name], "\r\n"+name+": ") {
+			field(name, value)
+		}
 	}
 	write := func(kind, flags byte, stream uint32, payload []byte) error {
 		head := make([]byte, 9, 9+len(payload))
@@ -291,7 +294,7 @@ func (w *world) sendFrames(conn net.Conn, r request, names []string) result {
 				}
 			}
 			if kind != frameContinuation && flags&flagEndStream != 0 {
-				got.echo = readEcho("", body)
+				got.echo = readEcho(r.headers["content-type"], body)
 				// The stub's own answer to a request its server could not read (result.stubError) is told by its body
 				// alone: this reader reads no content-type, which a proxy codes with Huffman, and neither proxy's own
 				// answer starts with the status code and its text.

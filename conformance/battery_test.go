@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -32,18 +33,18 @@ import (
 // alone (checkRefused), and starts no container. Any other file is rendered for the target through the program's own
 // command line under the target's configuration name, with this machine's conformance lock held (lockWorld), and the
 // proxy runs on it among the stubs, reached over plain HTTP when the file writes no tls; each row that runs on the
-// file (runsOn) is sent and must get its literal for the target and the file (literalFor). It needs Docker, so it is
-// built only with the tag conformance:
+// file (fileKeys.runs) is sent and must get its literal for the target and the file (literalFor). It needs Docker, so
+// it is built only with the tag conformance:
 // go test -tags conformance -count=1 -timeout 30m ./conformance/...
 func TestBattery(t *testing.T) {
 	// No unit test checks the battery's own rows, because the battery is the test, so it checks them here, before any
 	// container starts: each row names core keys of the format, the keys a target's declaration speaks of; each
 	// literal sits on a file the row runs on, each target's own literal names a row its target declares partial and
 	// sits on a file of the target's entries the row runs on, and each row runs on a file of an Envoy entry, where its
-	// literals were measured (rowProblems); every key Envoy's rows exercise is exercised on each entry's files or
-	// refused by its target (coverage); every row that runs on an Envoy entry's file runs on one of each entry's files
-	// or names a key its target refuses (rowCoverage); and each entry's target has a declaration and a generator (in its
-	// subtest).
+	// literals were measured (rowProblems); every key Envoy's rows exercise is exercised on the files of each version's
+	// entries or refused by its target (coverage); every row that runs on an Envoy entry's file runs on one of the files
+	// of each version's entries or names a key its target refuses (rowCoverage), the entries of one target and version
+	// judged together (versions); and each entry's target has a declaration and a generator (in its subtest).
 	keys := format.CoreKeys(format.Proxyfile)
 	for _, s := range scenarios {
 		for _, e := range s.exchanges {
@@ -130,14 +131,15 @@ func runFile(t *testing.T, tg target, f file, config string, lock func(*testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := startWorld(t, tg, mounted, !slices.Contains(written, "tls"), bytes.Contains(source, []byte(holdAddress)))
+	w := startWorld(t, tg, mounted, !slices.Contains(written, "tls"), bytes.Contains(source, []byte(holdAddress)), f.collector)
+	keys := fileKeys{label: f.label, keys: written, scenarios: f.scenarios}
 	limited := slices.Contains(written, "routes[].rate_limit")
 	// In order and never in parallel, but for the rows that overlap: a scenario's quiet and burst count on nothing else
 	// reaching the proxy.
 	for _, s := range scenarios {
 		var rows []exchange
 		for _, e := range s.exchanges {
-			if runsOn(e, written) {
+			if keys.runs(s, e) {
 				rows = append(rows, e)
 			}
 		}
@@ -147,6 +149,7 @@ func runFile(t *testing.T, tg target, f file, config string, lock func(*testing.
 		}
 		t.Run(s.name, func(t *testing.T) {
 			time.Sleep(s.quiet)
+			reads := newSpanReads(w, rows, tg.name, f.label)
 			// A row that overlaps sends its request here, at the start, and calls t.Parallel, so the testing package
 			// runs the rest of its subtest once this function has run the rows in sequence; the scenario's subtest ends
 			// after it, so no row of the next scenario runs beside it. Its connections are its own (world.apart).
@@ -158,14 +161,18 @@ func runFile(t *testing.T, tg target, f file, config string, lock func(*testing.
 					panic(fmt.Sprintf("exchange %q overlaps the rows in sequence with a refused backend, a flood, holds, a repeat, streams or a refill", e.name))
 				}
 				t.Run(e.name, func(t *testing.T) {
+					l := literalFor(e, tg.name, f.label)
 					apart, closeIdle := w.apart()
 					done := make(chan []string, 1)
+					var requests []sentRequest
+					sent := reads.start(l)
 					go func() {
 						defer closeIdle()
-						done <- sendRepeated(apart, e, literalFor(e, tg.name, f.label))
+						defer sent()
+						done <- sendRepeated(apart, e, l, &requests)
 					}()
 					t.Parallel()
-					for _, difference := range <-done {
+					for _, difference := range slices.Concat(<-done, reads.judge(l, requests)) {
 						t.Error(difference)
 					}
 				})
@@ -175,17 +182,25 @@ func runFile(t *testing.T, tg target, f file, config string, lock func(*testing.
 					continue
 				}
 				t.Run(e.name, func(t *testing.T) {
+					l := literalFor(e, tg.name, f.label)
+					// A row that fails before its requests are sent still counts as sent, so the rows that wait for the
+					// spans do not wait for it.
+					sent := reads.start(l)
+					defer sent()
 					if limited {
 						time.Sleep(e.refill)
 					}
+					var accepts []func()
 					if e.refusing != "" {
 						for _, role := range strings.Split(e.refusing, ",") {
-							w.refuse(t, role)
+							accepts = append(accepts, w.refuse(t, role))
 						}
 					}
-					l := literalFor(e, tg.name, f.label)
 					var differences []string
+					var requests []sentRequest
 					switch {
+					case wantsSpans(l) && (e.flood != nil || e.holds != nil || e.streams > 0):
+						panic(fmt.Sprintf("exchange %q wants spans of a flood, holds or streams, whose requests carry no id of their own", e.name))
 					case e.flood != nil:
 						differences = sendFlood(w, e, l, t.Logf)
 					case e.holds != nil:
@@ -193,7 +208,18 @@ func runFile(t *testing.T, tg target, f file, config string, lock func(*testing.
 					case e.streams > 0:
 						differences = sendStreams(w, e, l)
 					default:
-						differences = sendRepeated(w, e, l)
+						differences = sendRepeated(w, e, l, &requests)
+					}
+					if wantsSpans(l) {
+						// The spans are read once the rows in sequence are done, so the backends this row refused
+						// are opened first, as the rows after it must find them, and the rest of the row waits beside
+						// the rows that overlap.
+						for _, accept := range accepts {
+							accept()
+						}
+						sent()
+						t.Parallel()
+						differences = append(differences, reads.judge(l, requests)...)
 					}
 					for _, difference := range differences {
 						t.Error(difference)
@@ -204,6 +230,172 @@ func runFile(t *testing.T, tg target, f file, config string, lock func(*testing.
 	}
 }
 
+// wantsSpans reports whether l wants a span of its request, or none, which the collector's spans answer (spanReads).
+func wantsSpans(l literal) bool {
+	return l.want.spanned != nil || l.want.noSpan
+}
+
+// sentRequest is one request a row that wants spans sent: the x-request-id it carried, which names its span
+// (answer.spanned), and its answer, whose echo says the traceparent the service received.
+type sentRequest struct {
+	id  string
+	got result
+}
+
+// spanReadAfter is how long after the last request of a scenario's span rows its spans are read, and read again for
+// a row whose span is still missing or that wants none: nginx's exporter and the Envoy output's tracer each send the
+// spans they hold every 5 s, so a span is sent within 5 s of its request's end.
+const spanReadAfter = 6 * time.Second
+
+// spanReads reads the collector's spans for the rows of one scenario that want spans (wantsSpans), once for them all:
+// spanReadAfter after the last of their requests was sent, and once more spanReadAfter later when a row's span is
+// still missing or a row wants none, which is judged on that last read alone. Each such row is counted when its subtest
+// starts and until its requests are sent (start), so the first read waits for every one of them: a row judges its spans
+// only after t.Parallel, once every row of the scenario has started, and a row the -run flag leaves out is never counted.
+type spanReads struct {
+	w           *world
+	pending     sync.WaitGroup
+	mu          sync.Mutex
+	last        time.Time
+	first, then func() ([]span, error)
+}
+
+// newSpanReads returns the reads of rows on the file labelled label of the target named target, and panics when one
+// of them wants spans on a file whose world starts no collector: a mistake in the scenario data.
+func newSpanReads(w *world, rows []exchange, target, label string) *spanReads {
+	r := &spanReads{w: w}
+	for _, e := range rows {
+		if l := literalFor(e, target, label); wantsSpans(l) {
+			if !w.collector {
+				panic(fmt.Sprintf("exchange %q wants spans on %s, whose world starts no collector (file.collector)", e.name, label))
+			}
+			if _, ok := e.send.headers["x-request-id"]; !ok || e.repeat > 1 && !strings.Contains(e.send.headers["x-request-id"], "{i}") {
+				panic(fmt.Sprintf("exchange %q wants spans of requests that do not each carry an x-request-id of their own", e.name))
+			}
+		}
+	}
+	r.first = sync.OnceValues(func() ([]span, error) {
+		r.pending.Wait()
+		r.mu.Lock()
+		last := r.last
+		r.mu.Unlock()
+		time.Sleep(time.Until(last.Add(spanReadAfter)))
+		return w.spans()
+	})
+	r.then = sync.OnceValues(func() ([]span, error) {
+		r.first()
+		time.Sleep(spanReadAfter)
+		return w.spans()
+	})
+	return r
+}
+
+// start counts a row whose literal is l, when l wants spans, and returns the function that marks the end of its
+// requests, which does nothing after its first call.
+func (r *spanReads) start(l literal) (sent func()) {
+	if !wantsSpans(l) {
+		return func() {}
+	}
+	r.pending.Add(1)
+	return sync.OnceFunc(func() {
+		r.mu.Lock()
+		r.last = time.Now()
+		r.mu.Unlock()
+		r.pending.Done()
+	})
+}
+
+// judge returns each way the spans of requests differ from what l wants (compareSpans), or nothing when l wants none.
+func (r *spanReads) judge(l literal, requests []sentRequest) []string {
+	if !wantsSpans(l) {
+		return nil
+	}
+	first, err := r.first()
+	if err != nil {
+		return []string{fmt.Sprintf("reading the spans: %v", err)}
+	}
+	var differences []string
+	for _, request := range requests {
+		found := spansOf(first, request.id)
+		if l.want.noSpan || len(found) == 0 {
+			then, err := r.then()
+			if err != nil {
+				return append(differences, fmt.Sprintf("reading the spans again: %v", err))
+			}
+			found = spansOf(then, request.id)
+		}
+		differences = append(differences, compareSpans(l.want, request, found)...)
+	}
+	return differences
+}
+
+// spansOf returns the spans whose guid:x-request-id is id.
+func spansOf(kept []span, id string) []span {
+	var found []span
+	for _, s := range kept {
+		if value, ok := s.Attributes["guid:x-request-id"]; ok && value == id {
+			found = append(found, s)
+		}
+	}
+	return found
+}
+
+// traceparent00 is a traceparent of version 00, its trace id and parent id captured.
+var traceparent00 = regexp.MustCompile(`^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$`)
+
+// compareSpans returns each way found, the spans that carry request's x-request-id, differ from want: none when want
+// says noSpan; otherwise exactly one, holding each value of want.spanned, whose trace id and span id are those of the
+// traceparent the service received, when it received one of version 00.
+func compareSpans(want answer, request sentRequest, found []span) []string {
+	if want.noSpan {
+		if len(found) > 0 {
+			return []string{fmt.Sprintf("span of %s: got %d named %q, want none", request.id, len(found), found[0].Name)}
+		}
+		return nil
+	}
+	if len(found) != 1 {
+		return []string{fmt.Sprintf("span of %s: got %d, want one", request.id, len(found))}
+	}
+	s := found[0]
+	var differences []string
+	// The collector stub gives a key the span carries twice the type twice, whose one value a row cannot read.
+	for _, key := range slices.Sorted(maps.Keys(s.Types)) {
+		if s.Types[key] == "twice" {
+			differences = append(differences, fmt.Sprintf("span of %s %s: sent twice", request.id, key))
+		}
+	}
+	for _, key := range slices.Sorted(maps.Keys(want.spanned)) {
+		pattern := want.spanned[key]
+		var value string
+		var ok bool
+		switch {
+		case key == "name":
+			value, ok = s.Name, true
+		case key == "parent":
+			value, ok = s.Parent, true
+		case key == "state":
+			value, ok = s.State, true
+		case strings.HasPrefix(key, "type:"):
+			value, ok = s.Types[strings.TrimPrefix(key, "type:")]
+		default:
+			value, ok = s.Attributes[key]
+		}
+		switch {
+		case pattern == nil && ok:
+			differences = append(differences, fmt.Sprintf("span of %s %s: got %q, want none", request.id, key, value))
+		case pattern != nil && (!ok || !pattern.MatchString(value)):
+			differences = append(differences, fmt.Sprintf("span of %s %s: got %q, want a value %s matches", request.id, key, value, pattern))
+		}
+	}
+	if request.got.echo != nil {
+		if ids := traceparent00.FindStringSubmatch(request.got.echo.Headers["traceparent"]); ids != nil && (ids[1] != s.Trace || ids[2] != s.ID) {
+			differences = append(differences, fmt.Sprintf("span of %s: trace %s and id %s, where the service received the traceparent %s",
+				request.id, s.Trace, s.ID, request.got.echo.Headers["traceparent"]))
+		}
+	}
+	return differences
+}
+
 // sendRepeated sends e's request e.repeat times back to back, or once, and every second time e.alternate when e names
 // it, and returns each way the answers differ from l, the row's literal on the file: each of the first l.admitted
 // answers that is not 200, and, when no later answer is what l.want asks, the last one's differences, or with e.every
@@ -211,8 +403,9 @@ func runFile(t *testing.T, tg target, f file, config string, lock func(*testing.
 // later answer is l.want or none is l.also; and, when l.want asks for one instance, the instances the later answers
 // came from when they are more than one. Back to back, one after the other on the same client, is how a rate limit's
 // burst is sent, so a failure of a repeated row also says how long its requests took: a runner too slow for the burst
-// shows there.
-func sendRepeated(w *world, e exchange, l literal) []string {
+// shows there. When l wants spans, each request and its answer is added to requests, its x-request-id with the
+// request's number in place of {i}, so each of a repeated row's requests names a span of its own.
+func sendRepeated(w *world, e exchange, l literal, requests *[]sentRequest) []string {
 	count := max(e.repeat, 1)
 	if l.admitted >= count {
 		// A row that compares no answer with want is a mistake in the scenario data, which panics, as send does.
@@ -254,7 +447,14 @@ func sendRepeated(w *world, e exchange, l literal) []string {
 		if e.alternate != nil && i%2 == 0 {
 			r = *e.alternate
 		}
+		if id := r.headers["x-request-id"]; strings.Contains(id, "{i}") {
+			r.headers = maps.Clone(r.headers)
+			r.headers["x-request-id"] = strings.ReplaceAll(id, "{i}", strconv.Itoa(i))
+		}
 		got := w.send(r)
+		if wantsSpans(l) {
+			*requests = append(*requests, sentRequest{id: r.headers["x-request-id"], got: got})
+		}
 		if l.want.logged != nil {
 			got.logs = w.logLines(got.header.Get("x-request-id"), wait)
 		}
