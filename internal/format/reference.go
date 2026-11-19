@@ -155,10 +155,15 @@ func codes(values []string, conjunction string) string {
 	for i, value := range values {
 		quoted[i] = "`" + value + "`"
 	}
-	if len(quoted) == 1 {
-		return quoted[0]
+	return joined(quoted, conjunction)
+}
+
+// joined writes values joined by commas and the last by conjunction: a, b and c.
+func joined(values []string, conjunction string) string {
+	if len(values) == 1 {
+		return values[0]
 	}
-	return strings.Join(quoted[:len(quoted)-1], ", ") + " " + conjunction + " " + quoted[len(quoted)-1]
+	return strings.Join(values[:len(values)-1], ", ") + " " + conjunction + " " + values[len(values)-1]
 }
 
 func sentence(words string) string {

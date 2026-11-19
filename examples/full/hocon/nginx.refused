@@ -18,17 +18,3 @@ examples/full/hocon/Proxyfile: services.shop.health.interval: "services.<service
 examples/full/hocon/Proxyfile: services.shop.health.path: "services.<service name>.health.path" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
 examples/full/hocon/Proxyfile: services.shop.health.timeout: "services.<service name>.health.timeout" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
 examples/full/hocon/Proxyfile: services.shop.health.unhealthy: "services.<service name>.health.unhealthy" is refused by --target nginx: nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool
-examples/full/hocon/Proxyfile: tracing: "tracing" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: tracing.path_in_url: "tracing.path_in_url" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: tracing.provider: "tracing.provider" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: tracing.provider.otel: "tracing.provider.otel" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: tracing.provider.otel.endpoint: "tracing.provider.otel.endpoint" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: tracing.provider.otel.sample: "tracing.provider.otel.sample" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: tracing.provider.otel.sample.rate: "tracing.provider.otel.sample.rate" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: tracing.provider.otel.service: "tracing.provider.otel.service" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: tracing.tags: "tracing.tags" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: tracing.tags.environment: "tracing.tags.<tag name>" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: tracing.tags.environment.default: "tracing.tags.<tag name>.default" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: tracing.tags.environment.env: "tracing.tags.<tag name>.env" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: tracing.tags.request_id: "tracing.tags.<tag name>" is refused by --target nginx: not written by this version's nginx generator; render it for envoy
-examples/full/hocon/Proxyfile: tracing.tags.request_id.header: "tracing.tags.<tag name>.header" is refused by --target nginx: not written by this version's nginx generator; render it for envoy

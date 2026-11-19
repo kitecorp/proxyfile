@@ -32,6 +32,14 @@ func (b *backend) check(w http.ResponseWriter, r *http.Request) {
 	case "report-forwarded":
 		allowed(w, fmt.Sprintf("proto=%s host=%s", r.Header.Get("x-forwarded-proto"), r.Host))
 		w.WriteHeader(http.StatusOK)
+	case "report-trace":
+		// The trace the proxy told the check of, which the Envoy output sends from the span of its own request to the check.
+		allowed(w, fmt.Sprintf("traceparent=%s tracestate=%s", r.Header.Get("traceparent"), r.Header.Get("tracestate")))
+		w.WriteHeader(http.StatusOK)
+	case "report-tracestate":
+		// The tracestate alone, whose bytes a row compares, where report-trace's traceparent holds an id of the proxy's own.
+		allowed(w, "tracestate="+r.Header.Get("tracestate"))
+		w.WriteHeader(http.StatusOK)
 	case "report-removed":
 		// What the check received of the headers a client may not send it: one remove_from_clients names and send
 		// covers, the user its answer accepts, and the unchecked mark.

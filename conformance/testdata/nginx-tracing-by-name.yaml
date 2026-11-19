@@ -1,0 +1,27 @@
+# The conformance battery's file for nginx with tracing to a collector found by DNS name: nginx-tracing.yaml's shop
+# service and route, its draw of 5% and its service name, with its collector named collector.internal.example and
+# dns.resolver naming the battery's resolver, which gives that name the collector's address, 10.0.3.40. nginx then
+# sends its spans through the relay it writes for a name, where nginx-tracing.yaml has it ask the collector's address
+# directly. It writes no tls and no client_address key, so a row's own x-request-id reaches the draw, as there. Only
+# the tracing rows run on it (file.scenarios), the ones whose keys it writes; nginx-tracing.yaml runs every other row on
+# the same proxies. Only the nginx images tagged -otel load the tracing module, so only their entries run it, beside
+# Envoy's, which measures its literals.
+listen: 10000
+admin: 9901
+services:
+  shop:
+    http: 8080
+    grpc: 8081
+    addresses: ["10.0.1.11", "10.0.1.12"]
+origins:
+  local: {hosts: [127.0.0.1, localhost]}
+routes:
+  - {name: shop, prefix: /, to: shop}
+dns: {resolver: "10.0.0.2:53"}
+tracing:
+  provider:
+    otel:
+      endpoint: "collector.internal.example:4317"
+      service: edge-gateway
+      sample: {rate: 5%}
+  path_in_url: true

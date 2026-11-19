@@ -463,8 +463,8 @@ func TestRetryScript(t *testing.T) {
 	if missing := testsupport.FirstMissingBlock(script, [][]string{want}); missing != "" {
 		t.Errorf("the script lacks:\n%s", missing)
 	}
-	if line := "export default {headerNames, forwardedProto, origin, relay, check, clientKey, hashKey, limitedKind, retrySpent};"; !strings.Contains(script, line) {
-		t.Errorf("the script does not end %q", line)
+	if !strings.Contains(script, scriptExport) {
+		t.Errorf("the script does not end %q", scriptExport)
 	}
 }
 
@@ -627,9 +627,9 @@ func TestRetryHashSizes(t *testing.T) {
 		// of them with the bucket's 8 take 136, which the cache line of 64 rounds up to 192.
 		"  map_hash_bucket_size 192;",
 		// 4 slots for each variable the http block declares: the 4,096 route maps and 65 group maps of the route
-		// choice, the 86 the rest of the file declares, and the retries' 16, their request log's two maps of flags
+		// choice, the 87 the rest of the file declares, and the retries' 16, their request log's two maps of flags
 		// among them.
-		"  variables_hash_max_size 17052;",
+		"  variables_hash_max_size 17056;",
 	} {
 		if !hasLine(many, line) {
 			t.Errorf("no line %q", line)

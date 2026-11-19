@@ -2,6 +2,10 @@
 # Runs nginx's own check, nginx -t, on generated files with each nginx release proxyfile writes for. The tests prove
 # that a file is the one the generator writes; only nginx proves that it loads.
 #
+# A file that writes tracing loads ngx_otel_module, which only the images tagged -otel carry (nginx -t on a plain image
+# stops at that load_module line), so such a file is checked on each image of nginx-otel-images and every other file
+# on each image of nginx-images.
+#
 # nginx -t checks the syntax and then opens every file the configuration names. An nginx.conf this version writes names
 # the njs module, which the image carries, and proxyfile.js, which render writes beside it and nginx reads from the
 # configuration's folder, so the folder of the configuration is mounted and holds both. It also loads the certificate,
@@ -18,7 +22,11 @@ if (($# == 0)); then
 fi
 
 source "$(dirname "$0")/pinned-images.sh"
+# pinned_images fills the one global images, so each list is copied before the next call.
 pinned_images nginx nginx
+plain=("${images[@]}")
+pinned_images nginx-otel nginx
+otel=("${images[@]}")
 
 files=$(mktemp -d)
 trap 'rm -rf "$files"' EXIT
@@ -29,7 +37,11 @@ status=0
 for file in "$@"; do
   dir=$(cd "$(dirname "$file")" && pwd)
   name=$(basename "$file")
-  for image in "${images[@]}"; do
+  checked_on=("${plain[@]}")
+  if grep -qxF 'load_module modules/ngx_otel_module.so;' "$file"; then
+    checked_on=("${otel[@]}")
+  fi
+  for image in "${checked_on[@]}"; do
     # The image's entrypoint runs its start-up scripts before nginx and prints their lines; nginx alone prints only
     # its check. nginx -t passes a file it loads with a warning, such as a server name two servers on one port hold,
     # where nginx ignores the second, so the file would not do what it says: a [warn] line refuses it too.

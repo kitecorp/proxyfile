@@ -34,7 +34,8 @@ func haproxyEntries(t testing.TB) []target {
 			ready: "http://127.0.0.1:9901/ready",
 			// The header the generator writes for when_unavailable: allow, the one docs/auth.md names whatever the proxy,
 			// so a service reads one name.
-			mark: generator.UncheckedMark,
+			mark:    generator.UncheckedMark,
+			version: p.version,
 		})
 	}
 	return entries

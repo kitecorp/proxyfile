@@ -34,7 +34,7 @@ const (
 // proxy while accounts still shares its network namespace succeeds, and accounts runs on until it is removed too.
 var containers = []string{accounts, proxy, "proxyfile-conformance-shop-1", "proxyfile-conformance-shop-2",
 	"proxyfile-conformance-catalog", "proxyfile-conformance-check-1", "proxyfile-conformance-check-2",
-	"proxyfile-conformance-resolver", hold, hold2}
+	"proxyfile-conformance-resolver", hold, hold2, collector}
 
 // hold and hold2 are the backends that take no connection (stub hold), at holdAddress:8095 and hold2Address:8095, the
 // addresses nginx-plain's hold service and its held service name: a client's connect to either waits until the
@@ -44,6 +44,12 @@ const (
 	hold2, hold2Address = "proxyfile-conformance-hold-2", "10.0.2.31"
 )
 
+// collector is the stub's collector (stub collector) at collectorAddress, the address nginx-tracing.yaml and
+// examples/full send their spans to, on port 4317, and the address the world's resolver gives collectorName, the name
+// nginx-tracing-by-name.yaml sends them to. The world starts it for a file whose entry asks (file.collector), and the
+// battery reads the spans it kept on port 8080 inside its container (world.spans).
+const collector, collectorAddress, collectorName = "proxyfile-conformance-collector", "10.0.3.40", "collector.internal.example"
+
 // runFolder holds all a run writes to disk: the rendered file in config, the stub's build in stub, and the TLS files
 // with the server's key in tls and jwt. The battery names it as it names its Docker objects, so a run killed before
 // its cleanup leaves it where the next run's start removes it.
@@ -51,11 +57,12 @@ var runFolder = filepath.Join(os.TempDir(), "proxyfile-conformance")
 
 // world is a running proxy among the stubs of the examples the battery runs, reached from the host.
 type world struct {
-	listener string            // the host and port Docker published the proxy's listener on
-	ports    map[string]string // each backend's ports by its role, as its -ports flag lists them
-	files    tlsFiles
-	mark     string // the proxy's unchecked mark (target.mark), which send forges and compare reads
-	plain    bool   // the listener speaks plain HTTP, as one of a file that writes no tls does (newClients)
+	listener  string            // the host and port Docker published the proxy's listener on
+	ports     map[string]string // each backend's ports by its role, as its -ports flag lists them
+	files     tlsFiles
+	mark      string // the proxy's unchecked mark (target.mark), which send forges and compare reads
+	plain     bool   // the listener speaks plain HTTP, as one of a file that writes no tls does (newClients)
+	collector bool   // the stub's collector takes the proxy's spans (startWorld)
 	// http1, http2, http1NoCertificate, http1OtherCA and http1Expired send the requests (client_test.go): they are
 	// made once, so the requests of a burst share their connections as a client's would.
 	http1, http2, http1NoCertificate, http1OtherCA, http1Expired *http.Client
@@ -110,16 +117,19 @@ func claimWorld(t *testing.T) {
 // startWorld starts the network of the examples the battery runs and the proxy tg on the rendered file in config, and
 // waits until the proxy is ready; claimWorld, called first, removes all of it when the test ends. The addresses are
 // those examples/full and examples/portable both write: the shop backends at 10.0.1.11 and 10.0.1.12, the resolver at
-// 10.0.0.2 answering catalog.internal.example with 10.0.2.21, and accounts on 127.0.0.1:7070, which only a container in
-// the proxy's own network namespace can answer; the two backends of the check service of
-// conformance/testdata/two-checks.yaml, check-1 at 10.0.3.31 and check-2 at 10.0.3.32, each the stub's accounts on
-// 7070, so a row can make one of them refuse connections; and, for a file that names it (held), the hold backends at
-// holdAddress and hold2Address, which nginx-plain's hold and held services name, as no other file's rows send to them
-// and the start of each waits for its queue to fill. 10.0.0.0/22 is the smallest block holding every one of them. The collector at 10.0.3.40, which only
-// examples/full names, is left unreachable: no request waits for it. The ports 10000 and 9901 and the folders /config,
-// /etc/gateway/tls and /etc/gateway/jwt are the examples' listen, admin and tls keys and examples/full's auth.jwt.ca,
-// the same for every target. plain says the rendered file's listener speaks plain HTTP, so the clients do too.
-func startWorld(t *testing.T, tg target, config string, plain, held bool) *world {
+// 10.0.0.2 answering catalog.internal.example with 10.0.2.21 and collectorName with collectorAddress, and accounts on
+// 127.0.0.1:7070, which only a container in the proxy's own network namespace can answer; the two backends of the check
+// service of conformance/testdata/two-checks.yaml, check-1 at 10.0.3.31 and check-2 at 10.0.3.32, each the stub's
+// accounts on 7070, so a row can make one of them refuse connections; and, for a file that names it (held), the hold
+// backends at holdAddress and hold2Address, which nginx-plain's hold and held services name, as no other file's rows
+// send to them and the start of each waits for its queue to fill; and, for a file whose entry asks (collects), the
+// stub's collector at collectorAddress, which examples/full and nginx-tracing.yaml send their spans to, started before
+// the proxy so its first spans have somewhere to go; for every other file that address is left unreachable, and no
+// request waits for it. 10.0.0.0/22 is the smallest block holding every one of them. The ports 10000 and 9901 and the
+// folders /config, /etc/gateway/tls and /etc/gateway/jwt are the examples' listen, admin and tls keys and
+// examples/full's auth.jwt.ca, the same for every target. plain says the rendered file's listener speaks plain HTTP, so
+// the clients do too.
+func startWorld(t *testing.T, tg target, config string, plain, held, collects bool) *world {
 	buildStub(t, filepath.Join(runFolder, "stub"))
 	files := certificates(t, runFolder)
 	if _, err := docker("network", "create", "--subnet", "10.0.0.0/22", network); err != nil {
@@ -145,7 +155,7 @@ func startWorld(t *testing.T, tg target, config string, plain, held bool) *world
 	serve("catalog", "10.0.2.21", "catalog", "8090")
 	serve("check-1", "10.0.3.31", "accounts", "7070")
 	serve("check-2", "10.0.3.32", "accounts", "7070")
-	backend("resolver", "10.0.0.2", "dns", "-listen", ":53", "catalog.internal.example=10.0.2.21")
+	backend("resolver", "10.0.0.2", "dns", "-listen", ":53", "catalog.internal.example=10.0.2.21", collectorName+"="+collectorAddress)
 	if held {
 		// The queue of a listener holds one past its backlog, which net.core.somaxconn caps, so at 1 it fills with two
 		// of the stub's own connections. The sysctl is the network namespace's own, which docker run sets.
@@ -156,6 +166,10 @@ func startWorld(t *testing.T, tg target, config string, plain, held bool) *world
 		waitHeld(t, hold)
 		waitHeld(t, hold2)
 	}
+	if collects {
+		mustDocker(t, "run", "-d", "--name", collector, "--network", network, "--ip", collectorAddress, image, "collector")
+		waitSpans(t)
+	}
 	// The listener is published on a port Docker picks, so a run never meets a port another program holds.
 	mustDocker(t, append([]string{"run", "-d", "--name", proxy, "--network", network, "--ip", "10.0.0.10",
 		"-p", "127.0.0.1::10000", "-v", config + ":/config:ro", "-v", files.tls + ":/etc/gateway/tls:ro",
@@ -164,7 +178,7 @@ func startWorld(t *testing.T, tg target, config string, plain, held bool) *world
 		"-v", state, image, "serve", "-service", "accounts", "-instance", "accounts", "-ports", "7070")
 	waitReady(t, tg.ready)
 	listener := strings.TrimSpace(mustDocker(t, "port", proxy, "10000/tcp"))
-	w := &world{listener: listener, ports: ports, files: files, mark: tg.mark, plain: plain}
+	w := &world{listener: listener, ports: ports, files: files, mark: tg.mark, plain: plain, collector: collects}
 	w.http1, w.http2, w.http1NoCertificate, w.http1OtherCA, w.http1Expired = newClients(t, files, plain, listener)
 	w.rawTLS = clientTLS(t, files, &files.client)
 	return w
@@ -172,10 +186,12 @@ func startWorld(t *testing.T, tg target, config string, plain, held bool) *world
 
 // refuse makes the backend role refuse connections on every port until the test ends, as a backend that is down
 // does: it signals the stub (serve in conformance/stub) and waits until each port refuses a connection made inside
-// the backend's container, and when the test ends it opens the ports again and waits until each answers. A row this
-// short never takes the backend out of the proxy's pool: the full example's health check needs three failures 10 s
-// apart, so the rows after it find both backends as before.
-func (w *world) refuse(t *testing.T, role string) {
+// the backend's container, and when the test ends it opens the ports again and waits until each answers. It returns that
+// opening as a function too, for a row that waits on after its requests, such as for its spans, while the rows after it
+// run: the test's end then opens nothing a second time. A row this short never takes the backend out of the proxy's
+// pool: the full example's health check needs three failures 10 s apart, so the rows after it find both backends as
+// before.
+func (w *world) refuse(t *testing.T, role string) (accept func()) {
 	ports, ok := w.ports[role]
 	if !ok {
 		// A role the world does not serve is a mistake in the scenario data, which panics, as send does.
@@ -184,10 +200,15 @@ func (w *world) refuse(t *testing.T, role string) {
 	container := "proxyfile-conformance-" + role
 	mustDocker(t, "kill", "--signal", "USR1", container)
 	waitPorts(t, container, ports, false)
-	t.Cleanup(func() {
-		mustDocker(t, "kill", "--signal", "USR2", container)
-		waitPorts(t, container, ports, true)
-	})
+	var once sync.Once
+	accept = func() {
+		once.Do(func() {
+			mustDocker(t, "kill", "--signal", "USR2", container)
+			waitPorts(t, container, ports, true)
+		})
+	}
+	t.Cleanup(accept)
+	return accept
 }
 
 // waitPorts fetches /healthz on each of ports, a list such as 8080,8081, from inside container every 100 ms until
@@ -223,6 +244,45 @@ func waitHeld(t testing.TB, name string) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("%s did not fill its queue within 10s; its log:\n%s", name, logs)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// span is one span the stub's collector kept, as its GET /spans answers it (conformance/stub/collector.go): the ids in
+// hex, the parent's empty for a span with none, and each attribute's value as text with its type beside it.
+type span struct {
+	Trace, ID, Parent, State, Name string
+	Kind, Status                   int
+	Attributes, Types              map[string]string
+}
+
+// spans returns every span the collector has kept, read inside its container, where the stub's fetch asks its port
+// 8080: no port of it is published, so a run never meets one another program holds.
+func (w *world) spans() ([]span, error) {
+	out, err := dockerStdout("exec", collector, "/stub", "fetch", "http://127.0.0.1:8080/spans")
+	if err != nil {
+		return nil, err
+	}
+	body, ok := strings.CutPrefix(out, "200 ")
+	var kept []span
+	if !ok || json.Unmarshal([]byte(body), &kept) != nil {
+		return nil, fmt.Errorf("the collector answered %q, not 200 and its spans", out)
+	}
+	return kept, nil
+}
+
+// waitSpans fetches the collector's spans every 100 ms until it answers, for 10 s at most, so the proxy starts with
+// its collector listening.
+func waitSpans(t testing.TB) {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		_, err := docker("exec", collector, "/stub", "fetch", "http://127.0.0.1:8080/spans")
+		if err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the collector did not answer within 10s; the last try: %v", err)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

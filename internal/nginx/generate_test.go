@@ -63,6 +63,13 @@ func generateIn(t *testing.T, dir, proxyfile string) ([]generator.File, error) {
 	t.Helper()
 	path := filepath.Join(dir, "proxyfile.yaml")
 	testsupport.WriteFile(t, path, proxyfile)
+	return generateAt(t, path)
+}
+
+// generateAt returns what nginx.Generate returns for the proxyfile at path, read as render reads a proxyfile that
+// writes its origins and its RPC methods, so a file it names is read beside it. A problem ends the test.
+func generateAt(t *testing.T, path string) ([]generator.File, error) {
+	t.Helper()
 	file, problems := read.Proxyfile(path)
 	if problems != nil {
 		t.Fatalf("read.Proxyfile: %q", testsupport.ProblemStrings(problems))
@@ -623,9 +630,10 @@ func TestSecurityLines(t *testing.T) {
 			return ""
 		}},
 		{"the case-blind keys", func() string {
-			// RFC 9110 compares a Connection token and an upgrade's protocol name ignoring case, and the Envoy output an
-			// exact origin; a route, a pattern and a host compare in the case written.
+			// RFC 9110 compares a Connection token and an upgrade's protocol name ignoring case, RFC 3986 a scheme, and the
+			// Envoy output an exact origin; a route, a pattern and a host compare in the case written.
 			want := []string{
+				`"~*^[^ ]+ +https?://"`,
 				`"~*^,*(?:(?:[ \\t]*(?:close|keep-alive|upgrade|http2-settings|te)[ \\t]*|[ \\t]+)(?:,+(?:[ \\t]*(?:close|keep-alive|upgrade|http2-settings|te)[ \\t]*|[ \\t]+)){0,8})?,*\\z"`,
 				`"~*(?:^|,)[ \\t]*te[ \\t]*(?:,|\\z)"`,
 				`"~*^1:(?:.*,)?[ \\t]*trailers[ \\t]*(?:,|\\z)"`,
@@ -767,7 +775,8 @@ func TestSecurityLines(t *testing.T) {
 				`  map "$server_protocol:$http_connection$http_keep_alive$http_proxy_connection$http_transfer_encoding$http_upgrade" $pf_f_h2_connection { "~^HTTP/2\\.0:." 1; default 0; }`,
 				`  map "$server_protocol:$http_te" $pf_f_h2_te { "~^HTTP/2\\.0:(?!trailers\\z)." 1; default 0; }`,
 				`  map $server_protocol $pf_f_version { "~^HTTP/[0-9]\\.[0-9]\\z" 0; default 1; }`,
-				`  map "$pf_f_method$pf_f_connection$pf_f_raw$pf_f_h2_connection$pf_f_h2_te$pf_f_authority$pf_f_names$pf_f_version" $pf_f_request { "~1" 1; default 0; }`,
+				`  map $request $pf_f_scheme { "~*^[^ ]+ +https?://" 0; "~^[^ ]+ +[A-Za-z][A-Za-z0-9+.-]*://" 1; default 0; }`,
+				`  map "$pf_f_method$pf_f_connection$pf_f_raw$pf_f_h2_connection$pf_f_h2_te$pf_f_authority$pf_f_scheme$pf_f_names$pf_f_version" $pf_f_request { "~1" 1; default 0; }`,
 				`  map "$pf_f_method$pf_f_fragment" $pf_f_refused { "~^2|1\\z" 1; default 0; }`,
 				`  map "$pf_f_request$pf_f_refused$pf_f_426" $pf_refusal { "~^1" bad-request; "~^01" refused; "~^001" upgrade-required; default 0; }`,
 				`  map "$pf_reached:$pf_refusal" $pf_answer_id { "~^1:0\\z" $pf_request_id; default ""; }`,
@@ -1723,7 +1732,7 @@ func TestManyRoutes(t *testing.T) {
 		`  map "` + strings.Join(last, ":") + `:" $pf_g10` + group,
 		`  map "` + strings.Join(top, ":") + `:" $pf_g11` + group,
 		`  map "$pf_f_dotparam$pf_f_backslash$pf_f_control$pf_f_upgrade$pf_f_preflight:$pf_mode:$pf_g11" $pf_route {`,
-		"  variables_hash_max_size 2788;",
+		"  variables_hash_max_size 2792;",
 	} {
 		if broken := missing(out, line); broken != "" {
 			t.Error(broken)
@@ -1762,10 +1771,10 @@ func TestAcceptNamesCounted(t *testing.T) {
 		rpc  bool
 		want string
 	}{
-		// 808 variables, four times over: the 607 of the file without one, 200 _grpc maps and the RPC route's own.
-		{"with an RPC route", true, "  variables_hash_max_size 3232;"},
-		// 607 variables, four times over.
-		{"without one", false, "  variables_hash_max_size 2428;"},
+		// 809 variables, four times over: the 608 of the file without one, 200 _grpc maps and the RPC route's own.
+		{"with an RPC route", true, "  variables_hash_max_size 3236;"},
+		// 608 variables, four times over.
+		{"without one", false, "  variables_hash_max_size 2432;"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if broken := missing(generate(t, file(tc.rpc)), tc.want); broken != "" {
@@ -2389,68 +2398,87 @@ func TestPathModes(t *testing.T) {
 // script's own comment syntax, and defines and exports each function the configuration names: nginx -t passes a
 // configuration whose function the script lacks, and nginx then answers every request 500. The battery file is read
 // with client_address forwarded, a route limited by client and a service that hashes a header, so the configuration
-// names every function the script holds.
+// names every function the script exports but the ones only a file with tracing calls, and then with tracing too, so
+// it names every one.
 func TestScript(t *testing.T) {
 	file := rewritten(t, string(testsupport.ReadFile(t, authFile)), "client_address: connection\n", "client_address: forwarded\n")
 	file = rewritten(t, file, "  - {name: public, prefix: /public/, to: shop, auth: off}",
 		"  - {name: public, prefix: /public/, to: shop, auth: off, rate_limit: {requests: 20, per: 1s, by: client}, retries: 1}")
 	file = rewritten(t, file, `  catalog: {http: 8090, address: "10.0.2.21"}`,
 		`  catalog: {http: 8090, address: "10.0.2.21", balance: hash, hash: {header: x-session-id}}`)
-	config, script := generateFiles(t, file)
-	if first, _, _ := strings.Cut(script, "\n"); first != "// Generated by proxyfile. Do not edit: change the proxyfile beside it and run proxyfile render; proxyfile check fails on a hand edit." {
-		t.Errorf("the script's first line is %q", first)
+	base := []string{"headerNames", "forwardedProto", "origin", "clientKey", "limitedKind", "retrySpent", "hashKey", "check", "relay"}
+	tracing := []string{"traced", "traceparent", "tracestate", "checkTraceparent", "checkTracestate", "requestId", "traceLines", "readTags"}
+	cases := []struct {
+		name, file string
+		// named is each function the configuration calls, once, in the order it first calls it, and exported every
+		// function the script exports: the script is one text for every file, so it exports the tracing functions to a
+		// file that does not call them.
+		named, exported []string
+	}{
+		// The client key, the rate limit's answer, the retries' time spent and the hash key in the http block, the
+		// handler on every checked route location and the relay in the stream block among them.
+		{"without tracing", file, base, slices.Concat(base, tracing)},
+		// The tracing lines come first in the http block.
+		{"with tracing", file + tracingBlock, slices.Concat(tracing, base), slices.Concat(tracing, base)},
 	}
-	// Each function the configuration calls, once, in the order it first calls it: the client key, the rate limit's
-	// answer, the retries' time spent and the hash key in the http block, the handler on every checked route location
-	// and the relay in the stream block among them.
-	var named []string
-	for _, m := range regexp.MustCompile(`(?m)^\s*js_(?:set \$\w+|content|header_filter|body_filter|access|filter) pf\.(\w+)(?: nocache)?;$`).FindAllStringSubmatch(config, -1) {
-		if !slices.Contains(named, m[1]) {
-			named = append(named, m[1])
-		}
-	}
-	if want := []string{"headerNames", "forwardedProto", "origin", "clientKey", "limitedKind", "retrySpent", "hashKey", "check", "relay"}; !slices.Equal(named, want) {
-		t.Fatalf("the configuration names the functions %q, want %q", named, want)
-	}
-	// A header value holding a control byte other than a tab is refused: nginx passes one to the service, where Envoy
-	// answers 400 over HTTP/1.1 and closes the connection over HTTP/2 (measured on nginx 1.30.6 and 1.31.8 beside
-	// Envoy 1.40.2).
-	if check := "\n        if (/[\\x00-\\x08\\x0A-\\x1F\\x7F]/.test(raw[i][1])) {\n            return \"1\";\n        }\n"; !strings.Contains(script, check) {
-		t.Errorf("the script holds no %q", check)
-	}
-	// Over HTTP/2 a request with more fields than limits.request_headers.count as Envoy counts them is refused: with all
-	// four pseudo-headers, :authority counted whether or not the client sent it, because nginx gives :authority, a host
-	// field or both one host line, and max_headers counts none of them; and with each cookie field, which nginx joins
-	// into one line and max_headers does not count either (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2).
-	for _, check := range []string{
-		"\n    var h2 = r.httpVersion == \"2.0\";\n    var fields = fieldCount(r) + 4;\n",
-		"\n        if (r.httpVersion == \"2.0\" && raw[i][0].toLowerCase() == \"cookie\") {\n            fields += raw[i][1].split(\"; \").length - 1;\n        }\n",
-		"\n    if (h2 && fields > Number(r.variables.pf_header_count)) {\n        return \"1\";\n    }\n    return \"0\";\n}\n",
-		// An X-Forwarded-Proto line that is empty as Envoy reads it, over HTTP/1 once the spaces and tabs around it are
-		// left out, is flagged.
-		"\n        if (raw[i][0].toLowerCase() == \"x-forwarded-proto\" && asEnvoyReads(r, raw[i][1]) == \"\") {\n            return \"1\";\n        }\n",
-		"\nfunction asEnvoyReads(r, value) {\n    if (r.httpVersion == \"2.0\") {\n        return value;\n    }\n    return trimmed(value);\n}\n",
-	} {
-		if !strings.Contains(script, check) {
-			t.Errorf("the script holds no %q", check)
-		}
-	}
-	exported := regexp.MustCompile(`(?m)^export default \{(.*)\};$`).FindStringSubmatch(script)
-	if exported == nil {
-		t.Fatal("the script exports no default object")
-	}
-	// The handler is asynchronous, as it waits for the check, and the relay is a stream filter, which takes a session.
-	definitions := map[string]string{"check": "\nasync function check(r) {\n", "relay": "\nfunction relay(s) {\n"}
-	for _, name := range named {
-		definition, ok := definitions[name]
-		if !ok {
-			definition = "\nfunction " + name + "(r) {\n"
-		}
-		if !strings.Contains(script, definition) {
-			t.Errorf("the script holds no %q", definition)
-		}
-	}
-	if got := strings.Split(exported[1], ", "); !slices.Equal(slices.Sorted(slices.Values(got)), slices.Sorted(slices.Values(named))) {
-		t.Errorf("the script exports %q, want the functions the configuration calls, %q", got, named)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			config, script := generateFiles(t, c.file)
+			if first, _, _ := strings.Cut(script, "\n"); first != "// Generated by proxyfile. Do not edit: change the proxyfile beside it and run proxyfile render; proxyfile check fails on a hand edit." {
+				t.Errorf("the script's first line is %q", first)
+			}
+			var named []string
+			for _, m := range regexp.MustCompile(`(?m)^\s*js_(?:set \$\w+|content|header_filter|body_filter|access|filter) pf\.(\w+)(?: nocache)?;$`).FindAllStringSubmatch(config, -1) {
+				if !slices.Contains(named, m[1]) {
+					named = append(named, m[1])
+				}
+			}
+			if !slices.Equal(named, c.named) {
+				t.Fatalf("the configuration names the functions %q, want %q", named, c.named)
+			}
+			// A header value holding a control byte other than a tab is refused: nginx passes one to the service, where
+			// Envoy answers 400 over HTTP/1.1 and closes the connection over HTTP/2 (measured on nginx 1.30.6 and 1.31.8
+			// beside Envoy 1.40.2).
+			if check := "\n        if (/[\\x00-\\x08\\x0A-\\x1F\\x7F]/.test(raw[i][1])) {\n            return \"1\";\n        }\n"; !strings.Contains(script, check) {
+				t.Errorf("the script holds no %q", check)
+			}
+			// Over HTTP/2 a request with more fields than limits.request_headers.count as Envoy counts them is refused:
+			// with all four pseudo-headers, :authority counted whether or not the client sent it, because nginx gives
+			// :authority, a host field or both one host line, and max_headers counts none of them; and with each cookie
+			// field, which nginx joins into one line and max_headers does not count either (measured on nginx 1.30.6 and
+			// 1.31.8 beside Envoy 1.40.2).
+			for _, check := range []string{
+				"\n    var h2 = r.httpVersion == \"2.0\";\n    var fields = fieldCount(r) + 4;\n",
+				"\n        if (r.httpVersion == \"2.0\" && raw[i][0].toLowerCase() == \"cookie\") {\n            fields += raw[i][1].split(\"; \").length - 1;\n        }\n",
+				"\n    if (h2 && fields > Number(r.variables.pf_header_count)) {\n        return \"1\";\n    }\n    return \"0\";\n}\n",
+				// An X-Forwarded-Proto line that is empty as Envoy reads it, over HTTP/1 once the spaces and tabs around
+				// it are left out, is flagged.
+				"\n        if (raw[i][0].toLowerCase() == \"x-forwarded-proto\" && asEnvoyReads(r, raw[i][1]) == \"\") {\n            return \"1\";\n        }\n",
+				"\nfunction asEnvoyReads(r, value) {\n    if (r.httpVersion == \"2.0\") {\n        return value;\n    }\n    return trimmed(value);\n}\n",
+			} {
+				if !strings.Contains(script, check) {
+					t.Errorf("the script holds no %q", check)
+				}
+			}
+			exported := regexp.MustCompile(`(?m)^export default \{(.*)\};$`).FindStringSubmatch(script)
+			if exported == nil {
+				t.Fatal("the script exports no default object")
+			}
+			// The handler is asynchronous, as it waits for the check, and the relay is a stream filter, which takes a
+			// session.
+			definitions := map[string]string{"check": "\nasync function check(r) {\n", "relay": "\nfunction relay(s) {\n"}
+			for _, name := range named {
+				definition, ok := definitions[name]
+				if !ok {
+					definition = "\nfunction " + name + "(r) {\n"
+				}
+				if !strings.Contains(script, definition) {
+					t.Errorf("the script holds no %q", definition)
+				}
+			}
+			if got := strings.Split(exported[1], ", "); !slices.Equal(slices.Sorted(slices.Values(got)), slices.Sorted(slices.Values(c.exported))) {
+				t.Errorf("the script exports %q, want %q", got, c.exported)
+			}
+		})
 	}
 }

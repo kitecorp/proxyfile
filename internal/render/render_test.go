@@ -1730,6 +1730,70 @@ provider:
 	}
 }
 
+// The otel example writes path_in_url: false, which nginx refuses, as its tracer puts the request's path and query in
+// every span, and its collector by name in a file with no dns.resolver, which nginx refuses, as it follows a name only
+// through the name server it is given: render refuses both keys for nginx, before the generator runs, and writes no
+// file. With path_in_url: true the name alone is refused; with dns.resolver too it writes nginx.conf, which loads the
+// tracer and sends the spans through a relay that looks the collector's name up, and proxyfile.js.
+func TestNginxTracingRefusals(t *testing.T) {
+	const (
+		inURL = `../../examples/otel/yaml/proxyfile.yaml:12:1: "tracing" without path_in_url: true is refused by --target nginx: ` +
+			"nginx's tracer always puts the request's path and query in the span, which path_in_url: false keeps out; write " +
+			"path_in_url: true, or render it for envoy"
+		byName = `"tracing.provider.otel.endpoint" a DNS name with no dns.resolver is refused by --target nginx: nginx looks a ` +
+			"name up only through the name server it is given; write dns.resolver, or write the collector's IP address"
+	)
+	example := string(testsupport.ReadFile(t, "../../examples/otel/yaml/proxyfile.yaml"))
+	if !strings.Contains(example, "  path_in_url: false\n") {
+		t.Fatal("the otel example holds no path_in_url: false to replace")
+	}
+	inURLTrue := strings.Replace(example, "  path_in_url: false\n", "  path_in_url: true\n", 1)
+	t.Run("path_in_url: false", func(t *testing.T) {
+		req := requestFor(t, "otel/yaml", "nginx.conf")
+		req.Target = "nginx"
+		files, problems := render(req)
+		if files != nil {
+			t.Errorf("render returned files %q next to problems", paths(files))
+		}
+		want := []string{inURL, "../../examples/otel/yaml/proxyfile.yaml:15:7: " + byName}
+		if got := testsupport.ProblemStrings(problems); !slices.Equal(got, want) {
+			t.Errorf("problems = %q\nwant %q", got, want)
+		}
+	})
+	t.Run("path_in_url: true, with no dns.resolver", func(t *testing.T) {
+		dir := t.TempDir()
+		testsupport.WriteFile(t, filepath.Join(dir, "proxyfile.yaml"), inURLTrue)
+		files, problems := render(Request{Proxyfile: filepath.Join(dir, "proxyfile.yaml"), Out: filepath.Join(dir, "nginx.conf"), Target: "nginx"})
+		if files != nil {
+			t.Errorf("render returned files %q next to problems", paths(files))
+		}
+		want := []string{filepath.Join(dir, "proxyfile.yaml") + ":15:7: " + byName}
+		if got := testsupport.ProblemStrings(problems); !slices.Equal(got, want) {
+			t.Errorf("problems = %q\nwant %q", got, want)
+		}
+	})
+	t.Run("path_in_url: true, with dns.resolver", func(t *testing.T) {
+		dir := t.TempDir()
+		testsupport.WriteFile(t, filepath.Join(dir, "proxyfile.yaml"), inURLTrue+"dns: {resolver: \"10.0.0.2:53\"}\n")
+		files, problems := render(Request{Proxyfile: filepath.Join(dir, "proxyfile.yaml"), Out: filepath.Join(dir, "nginx.conf"), Target: "nginx"})
+		if problems != nil {
+			t.Fatalf("render problems = %q, want none", testsupport.ProblemStrings(problems))
+		}
+		if got, want := baseNames(files), []string{"nginx.conf", "proxyfile.js"}; !slices.Equal(got, want) {
+			t.Fatalf("render wrote %q, want %q", got, want)
+		}
+		config := strings.Split(string(files[0].Bytes), "\n")
+		if got, want := config[1], "# Needs the njs module, 1.0.2 or later, and ngx_otel_module, in the nginx images tagged -otel."; got != want {
+			t.Errorf("line 2 = %q, want %q", got, want)
+		}
+		for _, line := range []string{"  otel_exporter { endpoint unix:/run/proxyfile-8000/collector.sock; }", "    server otel-collector:4317 resolve max_fails=0;"} {
+			if !slices.Contains(config, line) {
+				t.Errorf("nginx.conf holds no line %q", line)
+			}
+		}
+	})
+}
+
 // names returns the name of each item of a list, or the value unchanged when it is not a list, so a difference
 // names what was found.
 func names(value any) any {

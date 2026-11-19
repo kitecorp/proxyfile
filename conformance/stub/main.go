@@ -1,5 +1,6 @@
-// Stub plays every backend of examples/full, its auth check and its DNS resolver for the conformance battery. It
-// uses the standard library only, so the battery adds nothing to go.mod and nothing to the released program.
+// Stub plays every backend of examples/full, its auth check, its DNS resolver and its tracing collector for the
+// conformance battery. It uses the standard library only, so the battery adds nothing to go.mod and nothing to the
+// released program.
 package main
 
 import (
@@ -18,6 +19,7 @@ import (
 const usage = `usage: stub serve -service <name> -instance <id> -ports <port>[,<port>...] [-state <dir>] [-hang <duration>]
        stub hold -port <port>
        stub dns -listen <addr> <name>=<ipv4>...
+       stub collector
        stub fetch <url>`
 
 func main() {
@@ -31,6 +33,8 @@ func main() {
 		hold(os.Args[2:])
 	case "dns":
 		dns(os.Args[2:])
+	case "collector":
+		collector(os.Args[2:])
 	case "fetch":
 		fetch(os.Args[2:])
 	default:

@@ -219,6 +219,19 @@ type answer struct {
 	// counted, on a row sent in sequence, wants lines of the proxy's log of an event that carries no request id, which
 	// logged cannot find, such as gateway_upstream_failure (sendRepeated reads them).
 	counted *countedLines
+	// receivedForms holds headers the stub must have received with a value the regular expression matches, which the
+	// answer need not carry, unlike forms: a value the proxy makes anew for the service alone, such as a traceparent.
+	receivedForms map[string]*regexp.Regexp
+	// spanned holds what the one span the collector kept for the request must carry: the span whose guid:x-request-id
+	// is the x-request-id the row sent, two of which fail the row. Each key is an attribute's name, or name, parent or
+	// state, or type:<attribute name> for the attribute's type, and its regular expression must match the value; a nil
+	// expression wants the attribute absent. The span's trace id and span id must be those of the traceparent the service
+	// received, when it received one of version 00, so the ids the service reads are the span's (compareSpans).
+	spanned map[string]*regexp.Regexp
+	// noSpan wants no span carrying the x-request-id the row sent, on the last read of the spans. A row that wants a span
+	// or none runs only on a file whose world starts the collector (file.collector), and its spans are read with the
+	// other such rows of its scenario (spanReads).
+	noSpan bool
 }
 
 // countedLines are the lines of event a row wants among the lines the proxy wrote after the row began: those whose find
@@ -335,6 +348,11 @@ func compare(want answer, got result, mark string) []string {
 		}
 		if answered := strings.Join(got.header.Values(name), ","); answered != value {
 			differ("header %s: got %q, want the %q the service received", name, answered, value)
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(want.receivedForms)) {
+		if value, ok := e.Headers[name]; !ok || !want.receivedForms[name].MatchString(value) {
+			differ("received %s: got %q, want a value %s matches", name, value, want.receivedForms[name])
 		}
 	}
 	if want.body != "" && e.Body != want.body {

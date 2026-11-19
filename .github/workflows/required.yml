@@ -34,12 +34,14 @@ jobs:
           scripts/check-site.sh "$RUNNER_TEMP/site"
       - name: Envoy 1.40.2 loads every generated example
         run: scripts/validate-envoy.sh examples/*/*/envoy.yaml
-      # No example asks an auth check, so the battery's two files that ask one are rendered and loaded too: only they
-      # carry the stream block, its module and the relay's socket folder.
-      - name: nginx 1.30 and 1.31 load every generated example and the battery's two files with the auth check
+      # No example asks an auth check or writes tracing for nginx, so the battery's files that do are rendered and
+      # loaded too: only the two with the check carry the stream block and its module, the check's files and the
+      # tracing file with its collector by name carry the relays' socket folder, and only the two tracing files load
+      # ngx_otel_module, which the validator checks on the images tagged -otel.
+      - name: nginx loads every generated example and the battery's files with the auth check and tracing, each on the images it needs
         run: |
           checked=$(mktemp -d)
-          for file in nginx-auth nginx-checks; do
+          for file in nginx-auth nginx-checks nginx-tracing nginx-tracing-by-name; do
             mkdir "$checked/$file"
             go run ./cmd/proxyfile render "conformance/testdata/$file.yaml" --target nginx -o "$checked/$file/nginx.conf"
           done
