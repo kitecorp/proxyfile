@@ -10,9 +10,10 @@
 You describe your gateway in one short file: the services behind it, the routes to them, who may call what. proxyfile
 writes the complete configuration of the proxy you run from it.
 
-Generators: Envoy writes every key. nginx and HAProxy write the keys that
+Generators: Envoy writes every key. nginx and HAProxy accept the keys that
 [the support table](docs/portability.md#support-by-proxy-from-the-generators) marks supported or partial in their
-columns, and each refuses the others by name ([docs/nginx.md](docs/nginx.md), [docs/haproxy.md](docs/haproxy.md)).
+columns, where a partial cell says what differs, and each refuses the others by name
+([docs/nginx.md](docs/nginx.md), [docs/haproxy.md](docs/haproxy.md)).
 
 ```mermaid
 flowchart TB
@@ -102,8 +103,8 @@ The release has `proxyfile-linux-amd64`, `proxyfile-linux-arm64`, `proxyfile-dar
 `proxyfile-darwin-arm64`, with `checksums.txt` and `proxyfile.schema.json` beside them.
 
 ```sh
-curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v2.1.0/proxyfile-linux-amd64
-curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v2.1.0/checksums.txt
+curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v2.2.0/proxyfile-linux-amd64
+curl -fsSLO https://github.com/kitecorp/proxyfile/releases/download/v2.2.0/checksums.txt
 shasum -a 256 -c --ignore-missing checksums.txt
 install -m 0755 proxyfile-linux-amd64 /usr/local/bin/proxyfile
 ```
@@ -111,13 +112,13 @@ install -m 0755 proxyfile-linux-amd64 /usr/local/bin/proxyfile
 In a Dockerfile, copy the program out of the image. The image holds `/proxyfile` and nothing else.
 
 ```dockerfile
-COPY --from=ghcr.io/kitecorp/proxyfile:2.1.0 /proxyfile /usr/local/bin/proxyfile
+COPY --from=ghcr.io/kitecorp/proxyfile:2.2.0 /proxyfile /usr/local/bin/proxyfile
 ```
 
 With Go installed (the Go version `go.mod` names or newer):
 
 ```sh
-go install github.com/kitecorp/proxyfile/v2/cmd/proxyfile@v2.1.0
+go install github.com/kitecorp/proxyfile/v2/cmd/proxyfile@v2.2.0
 ```
 
 ## Commands
@@ -167,8 +168,9 @@ reads `Proxyfile`, `proxyfile.conf`, `proxyfile.yaml` or `proxyfile.yml` from th
 `rpc.proto`, `envoy.tracing`, the `xray` provider, `hash.client` and the `nginx` and `haproxy` blocks, and the rules
 across keys, [docs/hocon.md](docs/hocon.md) the HOCON form, and [docs/defaults.md](docs/defaults.md) what the Envoy
 generator writes with no key. [docs/portability.md](docs/portability.md) says which keys every proxy can carry and
-which belong to Envoy alone, [From 1.x to 2.0](docs/format.md#from-1x-to-20) which keys a 1.x file moves, and
-[From 2.0 to 2.1](docs/format.md#from-20-to-21) what 2.1 changes for a 2.0 file.
+which belong to Envoy alone, [From 1.x to 2.0](docs/format.md#from-1x-to-20) which keys a 1.x file moves,
+[From 2.0 to 2.1](docs/format.md#from-20-to-21) what 2.1 changes for a 2.0 file, and
+[From 2.1 to 2.2](docs/format.md#from-21-to-22) what 2.2 changes for a 2.1 file.
 
 This README and the pages under `docs/` are also published as a site, at
 [kitecorp.github.io/proxyfile](https://kitecorp.github.io/proxyfile/).
