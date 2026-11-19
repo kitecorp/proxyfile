@@ -100,6 +100,69 @@ func TestBalanceLines(t *testing.T) {
 	}
 }
 
+// TestHealthLines: health is nginx's own passive check, max_fails=<unhealthy> on each server of the service's
+// upstreams, 3 when unhealthy is not written, with the upstream in a zone, so the workers share one count of failures;
+// a DNS name's upstream, which has its zone already, writes one. A service with one address, and each group of a
+// retried route, keeps max_fails=0 and no zone, as nginx ignores max_fails in a group of one server. The check relay's
+// upstream in the stream block is the service's, so it counts the check's failed connections the same way.
+func TestHealthLines(t *testing.T) {
+	servers := func(fails string) []string {
+		return []string{
+			"    server 10.0.2.21:8090 max_fails=" + fails + ";",
+			"    server 10.0.2.22:8090 max_fails=" + fails + ";",
+			"    server 10.0.2.23:8090 max_fails=" + fails + ";",
+		}
+	}
+	kept := []string{"    keepalive 32;", "    keepalive_timeout 1h;", "  }"}
+	const opening, zone = "  upstream catalog_http {", "    zone catalog_http 1m;"
+	byName := "listen: 8000\nservices:\n  catalog: {http: 8090, address: catalog.internal.example, health: {path: /healthz}}\n" +
+		"dns: {resolver: \"10.0.0.2:53\"}\norigins:\n  local: {hosts: [localhost]}\nroutes:\n  - {name: catalog, prefix: /, to: catalog}\n"
+	retried := strings.Replace(balanceFile("connection", ", health: {path: /healthz}"), "to: catalog}", "to: catalog, retries: 1}", 1)
+	const accounts = `  accounts: {grpc: 7070, http: 7070, host_header: "127.0.0.1:7070"}`
+	checked := rewritten(t, string(testsupport.ReadFile(t, authFile)), accounts,
+		`  accounts: {grpc: 7070, http: 7070, host_header: "127.0.0.1:7070", addresses: ["10.0.3.11", "10.0.3.12"], `+
+			`health: {path: /healthz, unhealthy: 2}}`)
+	single := "listen: 8000\nservices:\n  catalog: {http: 8090, address: \"10.0.2.21\", health: {path: /healthz}}\n" +
+		"origins:\n  local: {hosts: [localhost]}\nroutes:\n  - {name: catalog, prefix: /, to: catalog}\n"
+	for _, c := range []struct {
+		name, file string
+		within     string     // the block the blocks are read in, "" for the whole file
+		want       [][]string // each a whole block of the output
+	}{
+		{"unhealthy 1", balanceFile("connection", ", health: {path: /healthz, unhealthy: 1}"), "",
+			[][]string{slices.Concat([]string{opening, zone}, servers("1"), kept)}},
+		{"unhealthy not written", balanceFile("connection", ", health: {path: /healthz}"), "",
+			[][]string{slices.Concat([]string{opening, zone}, servers("3"), kept)}},
+		{"least_requests", balanceFile("connection", ", balance: least_requests, health: {path: /healthz}"), "",
+			[][]string{slices.Concat([]string{opening, "    random two least_conn;", zone}, servers("3"), kept)}},
+		{"a DNS name with dns.resolver", byName, "",
+			[][]string{slices.Concat([]string{opening, zone, "    server catalog.internal.example:8090 resolve max_fails=3;"}, kept)}},
+		{"one address", single, "", [][]string{slices.Concat([]string{opening, "    server 10.0.2.21:8090 max_fails=0;"}, kept)}},
+		{"a retried route's groups", retried, "", [][]string{
+			slices.Concat([]string{opening, zone}, servers("3"), kept),
+			slices.Concat([]string{"  upstream catalog_http_b1 {", "    server 10.0.2.21:8090 max_fails=0;"}, kept),
+		}},
+		{"the check's service", checked, "stream {", [][]string{{"  upstream proxyfile_10000_check {",
+			"    zone proxyfile_10000_check 1m;", "    server 10.0.3.11:7070 max_fails=2;", "    server 10.0.3.12:7070 max_fails=2;", "  }"}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			out := generate(t, c.file)
+			if c.within != "" {
+				within := blocks(lines(out), c.within)
+				if len(within) != 1 {
+					t.Fatalf("the file holds %d blocks opening with %q, want 1", len(within), c.within)
+				}
+				out = strings.Join(within[0], "\n")
+			}
+			for _, want := range c.want {
+				if difference := blockDifference(out, want); difference != "" {
+					t.Error(difference)
+				}
+			}
+		})
+	}
+}
+
 // TestDNSUpstream: a service whose address is a DNS name is an upstream in shared memory, whose server nginx looks up
 // again while it runs through the resolver dns.resolver names, written once in the http block and once in the stream
 // block of the check's relay, which each read their own; an IPv6 resolver is written in brackets.

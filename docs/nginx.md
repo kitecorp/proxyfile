@@ -27,9 +27,12 @@ names](#backends-balance-hash-and-dns-names)).
 nginx's column in the generated table on [Portability](portability.md#support-by-proxy-from-the-generators) says how
 this version writes each key and, for a key it refuses, what to write instead. A key it does not write for nginx, or a
 value of a form it does not write, is refused at render by the key's name where the file writes it, so a file that needs
-one is never rendered as if the key were not there. A value is refused in the same way, by its key, when its nginx form
-is longer than nginx reads: 4094 bytes between quotes, or 4095 without them, and one byte less where a space follows the
-value, as after a map's key or a header's name (measured on nginx 1.30.6 and 1.31.8).
+one is never rendered as if the key were not there; the one exception is `health`'s `path`, `grpc`, `interval`,
+`timeout` and `healthy`, which are accepted and not read ([Passive health checks](#passive-health-checks)). A value is
+refused in the same way, by its key, when its nginx form is longer than nginx reads: 4094 bytes between quotes, or 4095
+without them, and one byte less where a space follows the value, as after a map's key or a header's name (measured on
+nginx 1.30.6 and 1.31.8). `auth.jwt` is refused because open-source nginx verifies no token: `auth_jwt` is NGINX Plus's
+([ngx_http_auth_jwt_module](https://nginx.org/en/docs/http/ngx_http_auth_jwt_module.html)).
 
 ## The path a route is matched on
 
@@ -360,6 +363,19 @@ the Envoy output counts it once. Two differences are less strict and are in [the
 below](#where-nginx-is-less-strict-than-the-envoy-output): a trailer larger than the limit is served over HTTP/1.1, and
 empty frames in a row are served over HTTP/2.
 
+## The connection limit
+
+`limits.connections` is nginx's own `limit_conn`: `limit_conn_zone "all" zone=pf_conn:1m;` in the `http` block and
+`limit_conn pf_conn <number>;` in each environment's server. nginx counts a request on its way to a service while it is
+in process, once its header is read, each HTTP/2 stream as one and an idle connection as none, and answers one past the
+number `503`, before its check, if any, is asked
+([ngx_http_limit_conn_module](https://nginx.org/en/docs/http/ngx_http_limit_conn_module.html)). An answer the file gives
+itself with `return`, such as the `404` of a host no environment names, a refused origin's `403` or a preflight's `200`,
+is neither counted nor refused, as a `return` ends the request before `limit_conn` runs: so the default server, which
+answers every request that way, holds no line, and the admin server none, so that `/stats`, which nginx answers after
+that, is never answered `503`. No line limits a service's connections. Above 65535 the key is refused, as nginx refuses
+it (`ngx_http_limit_conn_module.c` line 705).
+
 ## The timeouts
 
 `timeouts.idle` is written as per-operation timers, the body, send, read and connect times below, where the Envoy output
@@ -689,7 +705,8 @@ nginx itself on the relay's socket, not the request's client. It is refused whet
 file stays valid when the check is turned on.
 
 A service whose `address` is a DNS name gets, in each of its upstreams, `zone <upstream> 1m;` and
-`server <name>:<port> resolve max_fails=0;` in place of the address lines, and the `http` block names the server of
+`server <name>:<port> resolve max_fails=0;` (with `health`, [`max_fails=<unhealthy>`](#passive-health-checks)) in place
+of the address lines, and the `http` block names the server of
 `dns.resolver`, `resolver 10.0.0.2:53 valid=5s;`, as does the `stream` block of the check's relay, which looks the
 check's service up the same way when its address is a name. nginx asks for a name's IPv4 and IPv6 addresses both, and
 asks again every 5 s, as the Envoy output does; [`examples/dns`](../examples/dns/yaml/proxyfile.yaml) writes two such
@@ -750,6 +767,20 @@ the ranges of every time and CPU figure overlap, so those figures are level, but
 1.30.6 to the `hash.header` service in 0.61 to 0.62 ms and through nginx 1.31.8 to the `hash.client` service in 0.60 to
 0.65 ms, where the Envoy output took 0.70 to 0.75 ms and 0.69 to 0.79 ms. nginx held less memory than the Envoy output,
 before the first path and after the last, in every run of both versions.
+
+### Passive health checks
+
+With `health`, each server of the service's upstreams, and of the check relay's in the `stream` block, is written
+`max_fails=<unhealthy>`, 3 when not written, in an upstream with `zone <upstream> 1m;`, so the workers share one count.
+This is nginx's own passive check ([`server`](https://nginx.org/en/docs/http/ngx_http_upstream_module.html#server)): a
+backend whose attempts fail `unhealthy` times within 10 s, the default `fail_timeout`, takes no request for 10 s. In the
+service's upstreams an error, a timeout and an invalid answer count, under the file's `proxy_next_upstream off` and
+`grpc_next_upstream off` too; in the relay's, only an error or a timeout while connecting ([stream
+`server`](https://nginx.org/en/docs/stream/ngx_stream_upstream_module.html#server)). nginx never takes a group's one
+server out, so a service with one address, and each group of a retried route, writes neither line. A service with
+`health` and more than 1,000 addresses is refused, a bound under what its upstream's zone of 1 MiB holds. `path`,
+`grpc`, `interval`, `timeout` and `healthy` are not read: open-source nginx sends no check request (`health_check` is
+NGINX Plus's).
 
 ## The admin port
 
@@ -1158,7 +1189,8 @@ The relay is the `server` at the end of the `stream` block, and the `upstream` a
 example:
 
 - the `upstream` holds one `server` line for each address of the check service, taken in turn (round robin), each with
-  `max_fails=0` so nginx never takes an address out of rotation;
+  `max_fails=0` so nginx never takes an address out of rotation, or with `health` on a check service of two addresses
+  or more [`max_fails=<unhealthy>`](#passive-health-checks);
 - `proxy_next_upstream off` makes the relay try one address for each check and no other when it refuses, as the Envoy
   output's check cluster tries no other backend. With two addresses and one refusing, the checks that reach it fail on
   every proxy (a row of the battery, run on Envoy 1.40.2 and on nginx 1.30.6 and 1.31.8 with `when_unavailable: deny`);
@@ -2076,12 +2108,8 @@ otherwise.
   chunked; a body that comes later is sent on chunked, as by Envoy.
 - **A worker process serves 1024 connections at most**, and 8192 in a file with the auth check ([Checks in flight on
   few workers](#checks-in-flight-on-few-workers)), a client's and a service's counted together (read in nginx's
-  documentation of `worker_connections`, not run), and `limits.connections` is refused, because no nginx setting holds
-  client connections to a number: nginx counts its own listening sockets and every connection to a service against one
-  limit, and closes a client's idle connection to take a new one. With `worker_processes 1` and `worker_connections 6`,
-  nginx served a seventh client by closing an idle one, and with two requests in flight served one and closed the
-  other, where the Envoy output closed the seventh connection and served the six (measured on nginx 1.30.6 and 1.31.8
-  beside Envoy 1.40.2).
+  documentation of `worker_connections`, not run), and `limits.connections` does not change it ([The connection
+  limit](#the-connection-limit)).
 - **nginx 1.30 sends a gRPC service a `host` header beside `:authority`**, and nginx 1.31 sends `:authority` alone, as
   Envoy does.
 - **A render for nginx reads no key of the [`envoy`](envoy.md) block and refuses none of them**, so tracing written at

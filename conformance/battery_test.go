@@ -473,18 +473,8 @@ func sendRepeated(w *world, e exchange, l literal, requests *[]sentRequest) []st
 		case i <= l.admitted && got.status != http.StatusOK:
 			differences = append(differences, fmt.Sprintf("answer %d: got %d, want 200", i, got.status))
 		case i > l.admitted && e.every:
-			wrong := compare(l.want, got, w.mark)
-			if l.also != nil && wrong == nil {
-				sawWant = true
-			} else if l.also != nil {
-				other := compare(*l.also, got, w.mark)
-				if other == nil {
-					sawAlso, wrong = true, nil
-				}
-				for _, difference := range other {
-					wrong = append(wrong, "or "+difference)
-				}
-			}
+			wrong, wanted, other := either(l.want, l.also, got, w.mark)
+			sawWant, sawAlso = sawWant || wanted, sawAlso || other
 			for _, difference := range wrong {
 				differences = append(differences, fmt.Sprintf("answer %d: %s", i, difference))
 			}
@@ -508,12 +498,7 @@ func sendRepeated(w *world, e exchange, l literal, requests *[]sentRequest) []st
 			}
 		}
 	}
-	if l.also != nil && !sawWant {
-		differences = append(differences, "no answer after the first admitted was what want asks")
-	}
-	if l.also != nil && !sawAlso {
-		differences = append(differences, "no answer after the first admitted was what also asks")
-	}
+	differences = append(differences, bothSeen(l.also, sawWant, sawAlso)...)
 	if len(instances) > 1 || instances["no service"] > 0 {
 		var from []string
 		for _, instance := range slices.Sorted(maps.Keys(instances)) {
@@ -531,7 +516,9 @@ func sendRepeated(w *world, e exchange, l literal, requests *[]sentRequest) []st
 // its own whose one connection the same request with i=0 opens first: Go's HTTP/2 client sends the requests to one host
 // on one connection while the proxy's limit of streams allows, 128 on nginx and more on Envoy. It returns the first three
 // answers that differ from l.want with i in place of each {i} in its received values, with how many did, so each stream
-// must be answered by its own check, whose x-user-check reports the path it was told.
+// must be answered by its own check, whose x-user-check reports the path it was told. With l.also, as sendRepeated reads
+// it, each stream's answer may be l.want or l.also, and at least one must be each, for a file whose values give only
+// some of the streams want; the request that opens the connection goes alone, so it must still be l.want.
 func sendStreams(w *world, e exchange, l literal) []string {
 	if l.admitted > 0 || e.repeat > 0 || e.send.raw || e.send.proto != "h2" || strings.Contains(e.send.path, "?") {
 		// Streams are sent as they are, over h2 through net/http, to a path with no query; anything else is a mistake in
@@ -541,33 +528,47 @@ func sendStreams(w *world, e exchange, l literal) []string {
 	transport := w.http2.Transport.(*http.Transport).Clone()
 	client := &http.Client{Transport: transport, Timeout: w.http2.Timeout}
 	defer transport.CloseIdleConnections()
-	send := func(i int) []string {
-		want := l.want
-		want.received = map[string]string{}
-		for name, value := range l.want.received {
-			want.received[name] = strings.ReplaceAll(value, "{i}", strconv.Itoa(i))
+	// numbered is a with i in place of each {i} in its received values. A nil map stays nil, so a refused answer still
+	// compares nothing else (compare).
+	numbered := func(a answer, i int) answer {
+		if a.received != nil {
+			received := map[string]string{}
+			for name, value := range a.received {
+				received[name] = strings.ReplaceAll(value, "{i}", strconv.Itoa(i))
+			}
+			a.received = received
 		}
+		return a
+	}
+	send := func(i int) result {
 		r := e.send
 		r.path += "?i=" + strconv.Itoa(i)
-		return compare(want, w.sendOn(client, r), w.mark)
+		return w.sendOn(client, r)
 	}
-	if differences := send(0); differences != nil {
+	if differences := compare(numbered(l.want, 0), send(0), w.mark); differences != nil {
 		return append([]string{"the request that opens the connection:"}, differences...)
 	}
 	var (
-		mu        sync.Mutex
-		different []string
-		count     int
-		wg        sync.WaitGroup
+		mu               sync.Mutex
+		different        []string
+		count            int
+		sawWant, sawAlso bool
+		wg               sync.WaitGroup
 	)
 	for i := 1; i <= e.streams; i++ {
 		wg.Go(func() {
-			if differences := send(i); differences != nil {
-				mu.Lock()
+			var also *answer
+			if l.also != nil {
+				also = new(numbered(*l.also, i))
+			}
+			differences, wanted, other := either(numbered(l.want, i), also, send(i), w.mark)
+			mu.Lock()
+			defer mu.Unlock()
+			sawWant, sawAlso = sawWant || wanted, sawAlso || other
+			if differences != nil {
 				if count++; count <= 3 {
 					different = append(different, fmt.Sprintf("answer %d: %s", i, strings.Join(differences, "; ")))
 				}
-				mu.Unlock()
 			}
 		})
 	}
@@ -575,7 +576,41 @@ func sendStreams(w *world, e exchange, l literal) []string {
 	if count > 0 {
 		different = append(different, fmt.Sprintf("%d of the %d answers differ", count, e.streams))
 	}
-	return different
+	return append(different, bothSeen(l.also, sawWant, sawAlso)...)
+}
+
+// either compares got with want and, when it differs and also is set, with also, a literal's two answers, as
+// sendRepeated and sendStreams read them: it returns no difference when got is one of the two, and otherwise want's
+// differences with each of also's after "or"; wanted and other say which of the two got was.
+func either(want answer, also *answer, got result, mark string) (differences []string, wanted, other bool) {
+	differences = compare(want, got, mark)
+	if differences == nil || also == nil {
+		return differences, differences == nil, false
+	}
+	others := compare(*also, got, mark)
+	if others == nil {
+		return nil, false, true
+	}
+	for _, difference := range others {
+		differences = append(differences, "or "+difference)
+	}
+	return differences, false, false
+}
+
+// bothSeen returns a line for each of want and also that no answer compared was, or nil without also: a literal with
+// also wants at least one answer of each.
+func bothSeen(also *answer, sawWant, sawAlso bool) []string {
+	if also == nil {
+		return nil
+	}
+	var lines []string
+	if !sawWant {
+		lines = append(lines, "no answer compared was what want asks")
+	}
+	if !sawAlso {
+		lines = append(lines, "no answer compared was what also asks")
+	}
+	return lines
 }
 
 // sendFlood sends e's flood and returns each way it differs from l: the first three answers that differ from l.want,

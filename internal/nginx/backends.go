@@ -23,9 +23,13 @@ func writeUpstream(w *writer, v *values, name string, service model.Service, por
 }
 
 // upstreamLines are the lines of the upstream name that carries port of service to its backends, up to its servers:
-// the service's own upstreams and the check relay's in the stream block. max_fails=0 keeps a backend in use after a
-// failed attempt, where nginx's default takes it out for 10 seconds; Envoy keeps every backend of a service with no
-// health key.
+// the service's own upstreams and the check relay's in the stream block. Without health the format keeps every backend
+// in the pool, so max_fails=0 keeps a backend in use after a failed attempt, where nginx's default takes it out for
+// 10 seconds. With health it is nginx's own passive check, max_fails=<unhealthy> and nginx's default fail_timeout of
+// 10 s, and the upstream is in a zone: without one each worker keeps a count of failures of its own (the upstream
+// page's zone: the group's run-time state is shared between the workers only there). nginx ignores max_fails in a
+// group of one server (the upstream page's server), so one static address, a service's or a retry group's
+// (writeGroups), writes neither line; a DNS name can give several.
 //
 // A DNS name is looked up again while nginx runs only by an upstream in shared memory, its zone (the server's resolve
 // parameter). Each address of the name's answer takes room in it: 1m held 1,000 addresses of a name and not 2,000, and
@@ -37,14 +41,21 @@ func upstreamLines(v *values, name string, service model.Service, port model.Ser
 	if balance := balanceLine(service, e); balance != "" {
 		lines = append(lines, "    "+balance)
 	}
+	checked := service.Health != nil && (service.DNS || len(service.Addresses) > 1)
+	if service.DNS || checked {
+		lines = append(lines, "    zone "+name+" 1m;")
+	}
 	resolve := ""
 	if service.DNS {
-		lines = append(lines, "    zone "+name+" 1m;")
 		resolve = " resolve"
+	}
+	fails := "0"
+	if checked {
+		fails = strconv.FormatInt(service.Health.Unhealthy, 10)
 	}
 	for _, address := range service.Addresses {
 		server := net.JoinHostPort(address.Value, strconv.FormatInt(port.Number, 10))
-		lines = append(lines, "    server "+v.keyToken(addressKey(&service), address.Pos, server)+resolve+" max_fails=0;")
+		lines = append(lines, "    server "+v.keyToken(addressKey(&service), address.Pos, server)+resolve+" max_fails="+fails+";")
 	}
 	return lines
 }

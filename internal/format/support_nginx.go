@@ -14,8 +14,20 @@ import (
 // nginx's refusals that several keys share. Each is named for nginx because every target declares its keys in this
 // package, and another target's refusals say what that proxy offers instead.
 var (
-	nginxNoHealth = Support{Level: Refused,
-		Note: "nginx open source has no active health checks (nginx Plus's health_check); remove health, and nginx keeps every backend in the pool"}
+	// nginxPassiveCheck is health's own declaration: nginx's own passive check, the parameters max_fails and fail_timeout
+	// of the upstream module's server (nginx.org, ngx_http_upstream_module and ngx_stream_upstream_module). A backend
+	// whose attempts fail max_fails times within fail_timeout, 10 s by default, is taken out for fail_timeout; an error,
+	// a timeout and an invalid header count under proxy_next_upstream off and grpc_next_upstream off too, which the file
+	// writes, and in the check relay's stream block an error or a timeout while connecting; a group's one server is
+	// never taken out, so a service with one address writes no check (upstreamLines).
+	nginxPassiveCheck = Support{Level: Partial,
+		Note:    "nginx's own passive check (max_fails): a backend whose requests fail unhealthy times within 10 s, by an error, a timeout or an invalid answer, takes no request for 10 s; nginx sends no check request of its own, and keeps a service's one backend in use",
+		Refuses: []Refusal{nginxHealthOnManyAddresses}}
+	// nginxHealthNotRead is the declaration of health's keys the passive check does not read: open-source nginx sends no
+	// check request of its own, as health_check is NGINX Plus's (nginx.org, ngx_http_upstream_hc_module, "available as
+	// part of our commercial subscription").
+	nginxHealthNotRead = Support{Level: Partial,
+		Note: "not read: open-source nginx sends no check request (health_check is NGINX Plus's), so its passive check reads the service's own requests"}
 	nginxNoJWT = Support{Level: Refused,
 		Note: "nginx open source cannot verify a token (nginx Plus's auth_jwt); verify it in the service, or render it for envoy"}
 	// The official images hold one tracer, ngx_otel_module, in the images tagged -otel, which exports OTLP alone (the
@@ -27,6 +39,29 @@ var (
 	// in upstream", measured on nginx 1.30.6 and 1.31.8).
 	nginxNoZone = "nginx reads no zone in a backend's address; give the service an address without one"
 )
+
+// nginxHealthOnManyAddresses refuses health on a service with more than 1,000 addresses: the passive check keeps each
+// of the service's upstreams, and the check relay's when auth.ask names it, in a zone of 1 MiB, which nginx refuses to
+// load when the servers do not fit ("ngx_slab_alloc() failed: no memory in upstream zone"). Measured with nginx -t on
+// nginx 1.30.6 and 1.31.8, for a checked service with its http and stream upstreams each in a zone: 1,000 and 1,250
+// addresses loaded, and 1,500 did not. A DNS name is one address here, and its answer has a bound of its own (the
+// address key's note).
+var nginxHealthOnManyAddresses = Refusal{Form: "on a service with more than 1,000 addresses",
+	Instead: "nginx's passive check keeps a service's backends in a zone of 1 MiB, which holds 1,000 of them; give the service 1,000 addresses or fewer, remove health, or render it for envoy",
+	Applies: func(value, proxyfile *tree.Node) bool {
+		services := proxyfile.Get("services")
+		if services == nil {
+			return false
+		}
+		for _, entry := range services.Entries {
+			if entry.Value.Get("health") != value {
+				continue
+			}
+			addresses := entry.Value.Get("addresses")
+			return addresses != nil && len(addresses.Items) > 1000
+		}
+		return false
+	}}
 
 // nginxNameWithoutResolver refuses a service's DNS name in a file with no dns.resolver: nginx looks a name up while it
 // runs only through its resolver directive, never through the host's configuration, and refuses to load an upstream
@@ -314,11 +349,21 @@ var nginxTarget = Target{Name: "nginx", Title: "nginx", Keys: map[string]Support
 		Note: "with forwarded, an X-Forwarded-Proto line with no colon is answered 404, where the Envoy output answers 400"},
 
 	"limits": {Level: Supported},
-	// With worker_processes 1 and worker_connections 6, nginx served a seventh client by closing an idle one, and with
-	// two requests in flight served one and closed the other, where the Envoy output closed the seventh connection and
-	// served the six (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2).
-	"limits.connections": {Level: Refused,
-		Note: "nginx counts its own listening sockets and every connection to a service against one limit, and closes a client's idle connection to take a new one, so no nginx setting holds client connections to a number; remove limits.connections, or render it for envoy"},
+	// nginx's own limit_conn (nginx.org, ngx_http_limit_conn_module): a connection counts only while it has a request in
+	// process whose header was read, each HTTP/2 stream counts as one, and a request past the number is answered 503,
+	// limit_conn_status's default. It runs in the preaccess phase (ngx_http_limit_conn_module.c, the same at both tags
+	// below), after a return has ended a request and before js_access asks the check, so it counts and refuses only a
+	// request on its way to a service (the generator's connectionLimit). nginx refuses to load a number above 65535
+	// (src/http/modules/ngx_http_limit_conn_module.c line 705 at tags release-1.30.6 and release-1.31.8: "connection
+	// limit must be less 65536").
+	"limits.connections": {Level: Partial,
+		Note: "nginx's own limit_conn: a request on its way to a service past the number of such requests in flight is answered 503, before its check, if any, is asked, each HTTP/2 stream counted as one and an idle connection as none; an answer the file gives itself, such as a 404 or a preflight's 200, is neither counted nor refused, and no line limits a service's connections",
+		Refuses: []Refusal{{Form: "above 65535",
+			Instead: "nginx's limit_conn takes at most 65535; write 65535 or less, or render it for envoy",
+			Applies: func(value, _ *tree.Node) bool {
+				number, _ := strconv.ParseInt(value.Text, 10, 64)
+				return number > 65535
+			}}}},
 	"limits.request_headers": {Level: Supported},
 	// The generator's headerLines says how nginx's buffers hold the size; measured on nginx 1.30.6 and 1.31.8 beside
 	// Envoy 1.40.2 at 4 KiB, 60 KiB, 96 KiB, 128 KiB and 8 MiB.
@@ -383,16 +428,17 @@ var nginxTarget = Target{Name: "nginx", Title: "nginx", Keys: map[string]Support
 	// does, on another ring of its own: the header's lines are joined in sorted order, as Envoy joins them, an empty
 	// header is hashed and an absent one goes round robin, and no backend that refuses is tried again (measured on
 	// nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2 with 300 values over HTTP/1.1 and HTTP/2).
-	"services.<service name>.hash":             {Level: Supported},
-	"services.<service name>.hash.header":      {Level: Supported},
-	"services.<service name>.hash.client":      {Level: Supported},
-	"services.<service name>.health":           nginxNoHealth,
-	"services.<service name>.health.path":      nginxNoHealth,
-	"services.<service name>.health.grpc":      nginxNoHealth,
-	"services.<service name>.health.interval":  nginxNoHealth,
-	"services.<service name>.health.timeout":   nginxNoHealth,
-	"services.<service name>.health.healthy":   nginxNoHealth,
-	"services.<service name>.health.unhealthy": nginxNoHealth,
+	"services.<service name>.hash":            {Level: Supported},
+	"services.<service name>.hash.header":     {Level: Supported},
+	"services.<service name>.hash.client":     {Level: Supported},
+	"services.<service name>.health":          nginxPassiveCheck,
+	"services.<service name>.health.path":     nginxHealthNotRead,
+	"services.<service name>.health.grpc":     nginxHealthNotRead,
+	"services.<service name>.health.interval": nginxHealthNotRead,
+	"services.<service name>.health.timeout":  nginxHealthNotRead,
+	"services.<service name>.health.healthy":  nginxHealthNotRead,
+	// max_fails counts failed attempts within fail_timeout, not checks in a row (ngx_http_upstream_module, server).
+	"services.<service name>.health.unhealthy": {Level: Partial, Note: "the failed requests within 10 s that take a backend out (max_fails), not checks in a row"},
 
 	// resolver with valid=5s in the http block, and in the stream block of the check's relay, asks for IPv4 and IPv6
 	// addresses and asks again over TCP after an answer cut short, as Envoy does (measured on nginx 1.30.6 and 1.31.8

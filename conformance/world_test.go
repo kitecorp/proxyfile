@@ -189,8 +189,8 @@ func startWorld(t *testing.T, tg target, config string, plain, held, collects bo
 // the backend's container, and when the test ends it opens the ports again and waits until each answers. It returns that
 // opening as a function too, for a row that waits on after its requests, such as for its spans, while the rows after it
 // run: the test's end then opens nothing a second time. A row this short never takes the backend out of the proxy's
-// pool: the full example's health check needs three failures 10 s apart, so the rows after it find both backends as
-// before.
+// pool on the full example, whose health check needs three failures 10 s apart, so the rows after it find both
+// backends as before. On nginx-limits it does on nginx, for 10 s, as the row after it reads (backendLimits).
 func (w *world) refuse(t *testing.T, role string) (accept func()) {
 	ports, ok := w.ports[role]
 	if !ok {

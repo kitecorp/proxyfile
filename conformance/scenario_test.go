@@ -112,10 +112,10 @@ type own struct {
 type literal struct {
 	want     answer
 	admitted int
-	// also, on a row that says every, is the other answer the answers after the first admitted may be, on a file whose
-	// values give only some of the requests want: each must be want or also, and at least one must be each. On a file
-	// whose route writes retries: 0, a retry row's requests that the refusing backend draws get the proxy's answer, and
-	// the others the service's.
+	// also, on a row that says every or sends streams, is the other answer the answers after the first admitted, or the
+	// streams, may be, on a file whose values give only some of the requests want: each must be want or also, and at
+	// least one must be each. On a file whose route writes retries: 0, a retry row's requests that the refusing backend
+	// draws get the proxy's answer, and the others the service's.
 	also *answer
 }
 
