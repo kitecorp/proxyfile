@@ -2,7 +2,8 @@
 
 A proxyfile describes one gateway in keys, in YAML or in HOCON. This page holds a file with every key but the few it
 names, the forms of sizes, times and percentages, the rules that compare keys with each other, the two JSON files of
-1.0, [which keys a 1.x file moves](#from-1x-to-20) and [what 2.1 changes for a 2.0 file](#from-20-to-21).
+1.0, [which keys a 1.x file moves](#from-1x-to-20), [what 2.1 changes for a 2.0 file](#from-20-to-21) and
+[what 2.2 changes for a 2.1 file](#from-21-to-22).
 
 `examples/full/yaml/proxyfile.yaml` holds every key a proxyfile can have, with invented values, except `rpc.proto`,
 `envoy.tracing`, the `xray` provider, `hash.client` and the `nginx` and `haproxy` blocks, which take no key in this
@@ -226,3 +227,27 @@ The keys 2.1 adds:
 - [`tracing` with `otel`](tracing.md#opentelemetry): spans sent to an OpenTelemetry collector.
 - [`auth.send_request`](auth.md#what-the-check-is-told): the check learns which request it is asked about.
 - [`auth.jwt`](auth.md#tokens): the proxy verifies a signed token on the request itself.
+
+## From 2.1 to 2.2
+
+Render every Envoy file again after the upgrade, because every generated configuration changes: the first route of
+each virtual host, `refused:dot-segment-with-parameter`, also answers `400` to a path that still holds `/.%3B` or
+`/..%3B` after normalisation, with the hex in either case ([Defaults](defaults.md)). Until a file is rendered again,
+`proxyfile check` reports its 2.1 output as different.
+
+The Envoy output also changes in three ways:
+
+- A cluster that looks a DNS name up, for a service's address, the tracing endpoint or the keys URL's host, is Envoy's
+  `DnsCluster`, so a file with a DNS name needs Envoy 1.33 or later. 2.1 wrote the DNS settings on the cluster itself
+  ([Defaults](defaults.md)).
+- A retry goes to a backend the request has not tried yet when the service has one ([`routes`](routes.md)).
+- With `auth.ask`, no answer carries `x-envoy-upstream-service-time`, a service's own copy included
+  ([Defaults](defaults.md)).
+
+A file 2.1 rendered is refused when a key or a value holds a control character other than tab, as this page says
+above, such as the line break a YAML `|` block keeps at its end (write `|-`); when an `rpc.proto` root lies inside
+another or names one directory twice ([`rpc`](rpc.md#rpc-methods-from-the-protobuf-sources)); or when a bare `!` tag
+stands on the line after an anchor. Each problem names its place.
+
+2.2 adds no key. `proxyfile render --target nginx` and `--target haproxy` write nginx's and HAProxy's files
+([nginx](nginx.md), [HAProxy](haproxy.md)).

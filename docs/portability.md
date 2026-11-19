@@ -1,8 +1,9 @@
 # Portability
 
 proxyfile writes Envoy's configuration, nginx's and HAProxy's from the same file. In this version nginx's and HAProxy's
-generators write the keys their columns of [the support table](#support-by-proxy-from-the-generators) mark supported or
-partial, and each refuses by name every key it does not write yet. Every key is **core** or belongs to one proxy. A core
+generators accept the keys their columns of [the support table](#support-by-proxy-from-the-generators) mark supported or
+partial, where a partial cell says what differs, and each refuses by name every other core key.
+Every key is **core** or belongs to one proxy. A core
 key is one every proxy can carry, at times with a difference this page names, or one a proxy refuses by name where it
 cannot carry it. A key that belongs to one proxy lives in that proxy's block at the top of the file: `envoy`, `nginx` or
 `haproxy`. A render for one target reads the core keys and its own block and leaves the other blocks alone, so one file
@@ -69,7 +70,7 @@ HAProxy's own OpenTelemetry filter from 3.4 on, where its OpenTracing filter is 
 | `envoy.namespace` | the namespace of the gateway's metadata | none | none | envoy |
 
 Everything else in the format, such as the origins file form, the entries of `rpc.methods` and the `name` of an RPC
-mapping, is core. The cost of another proxy is its generator and the proof that it behaves as the Envoy one does.
+mapping, is core. The cost of another proxy is its generator and its rows in the conformance battery.
 
 ## Support by proxy, from the generators
 
@@ -78,7 +79,8 @@ Each generator declares, for every core key, how it carries the key: `supported`
 no key (below): each generator declares them as it declares a key, and none may refuse them. `proxyfile render` and
 `proxyfile check` with `--target <proxy>` refuse a file that writes a key its target refuses, naming the key where it is
 written and what the proxy offers instead. This table is written from those declarations and has a column for each proxy
-with a generator; the table above stays until every proxy's column is written here. A partial cell that names a refused
+with a generator; the table above names what each proxy offers for a key, and this one how each generator carries it.
+A partial cell that names a refused
 form (`refuses <form>: <what to write instead>`) is refused as a refused key is: render and check name the key where it
 is written. What a proxy writes differently with no key is on its own page: [nginx](nginx.md), [HAProxy](haproxy.md).
 The [conformance battery](conformance.md) sends the same requests to each proxy, and checks the refusal for a key the
