@@ -16,7 +16,7 @@ import (
 // wait beside the rest of their own scenario alone: a later scenario's quiet and burst count on nothing else reaching
 // the proxy meanwhile. The rate limit runs last, so the requests the scenarios before it send to its route come first,
 // and its quiet lets that route's bucket fill again before its burst.
-var scenarios = []scenario{routing, mutualTLS, cors, auth, timeout, retry, gRPC, paths, asWritten, offRoute, clientKeys, hash, tracing, tracingRetried, rateLimit, cost, backendLimits, traffic}
+var scenarios = []scenario{routing, mutualTLS, cors, auth, toldScheme, timeout, retry, gRPC, paths, asWritten, offRoute, clientKeys, hash, tracing, tracingRetried, rateLimit, cost, backendLimits, traffic}
 
 // get is a GET over HTTP/1.1 to localhost, a host of the example's local environment.
 func get(path string) request {
@@ -1499,11 +1499,15 @@ var auth = scenario{name: "auth",
 				headers: map[string]string{"authorization": "Bearer allow", "x-api-key": "key"}},
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1?i={i} action= reports= country="}}},
 		// What a client could send past the check.
+		// Under client_address connection nginx tells the check the connection's scheme, whatever scheme the target
+		// names, so https over TLS on nginx-auth and portable, where the Envoy output tells the target's.
 		{name: "an absolute target's host is the host the check is told, whatever the Host header", keys: []string{"auth.ask", "auth.accept"},
 			send: request{proto: "http/1.1", host: "127.0.0.1", line: "GET http://localhost/products/1 HTTP/1.1", raw: true,
 				headers: map[string]string{"authorization": "Bearer report-forwarded", "x-api-key": "key"}},
 			want: answer{status: 200, service: "shop", host: "localhost", received: map[string]string{"x-user-check": "proto=http host=localhost"}},
-			by:   map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
+			by: map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 400}}},
+				"nginx": {difference: "auth.send_request", files: []string{"nginx-auth", "portable"}, literal: literal{want: answer{status: 200,
+					service: "shop", host: "localhost", received: map[string]string{"x-user-check": "proto=https host=localhost"}}}}}},
 		{name: "a client's own user, question and unchecked mark do not reach the service when the check allows with none of them",
 			keys: []string{"auth.ask", "auth.accept"},
 			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", forgedMark: true,
@@ -1791,6 +1795,95 @@ var deniedLateUnderDeny = map[string]literal{
 var refusedUnderAllow = map[string]own{
 	"haproxy": {difference: "auth.when_unavailable", files: []string{"haproxy-file"}, literal: literal{want: answer{status: 403}}},
 	"nginx":   {difference: "auth.when_unavailable", files: allowFiles, literal: literal{want: answer{status: 403}}},
+}
+
+// toldScheme: measured on Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8 and HAProxy 3.2.26 and 3.4.7. Each row asks the
+// check, which reports the scheme it was told, and the service reports the x-forwarded-proto it received. The rows
+// whose keys hold client_address run on the files with client_address connection and send_request; the others on every
+// file with send_request too, two-checks, nginx-checks and nginx-tracing among them, which write no tls and take
+// forwarded. nginx-connection writes connection and no tls, so it is sent over plain HTTP.
+//
+// Under connection a client's own x-forwarded-proto, https or ftp, is replaced by the connection's scheme for the
+// check and the service, by every proxy. An absolute https target over TLS is served and told https, but by HAProxy,
+// which answers every absolute target 400 over HTTP/1.1; over plain HTTP, on nginx-connection, the Envoy output answers
+// it 403 and asks no check, and nginx serves it, a way nginx is less strict that its list names, and tells the check
+// http, the scheme the service is sent. An HTTP/2 request with :scheme https sent over plain HTTP on nginx-connection
+// is told https by the Envoy output, while the service is sent http: it tells the check the :scheme, whatever the
+// connection, where nginx, whose variables hold no :scheme, tells the connection's (auth.send_request).
+//
+// Under forwarded an absolute https target sent with x-forwarded-proto http is told https by the Envoy output and nginx,
+// the target's scheme before the header, while the service is sent the header's http, and an HTTP/2 :scheme https
+// sent with it is told https by the Envoy output and http, the header's, by nginx and HAProxy (auth.send_request). An
+// x-forwarded-proto of ftp reaches the service through every proxy, and the Envoy output tells the check the
+// connection's scheme, http, where nginx and HAProxy tell it ftp as written (auth.send_request).
+var toldScheme = scenario{name: "the scheme the check is told",
+	exchanges: []exchange{
+		{name: "an absolute https target", keys: []string{"client_address", "auth.ask", "auth.accept", "auth.send_request"},
+			send: request{proto: "http/1.1", host: "localhost", line: "GET https://localhost/products/1 HTTP/1.1", raw: true,
+				headers: map[string]string{"authorization": "Bearer report-forwarded", "x-api-key": "key"}},
+			want: answer{status: 200, service: "shop", host: "localhost", received: map[string]string{"x-user-check": "proto=https host=localhost"}},
+			on:   map[string]literal{"nginx-connection": {want: answer{status: 403}}},
+			by: map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 400}}},
+				"nginx": {difference: "client_address", files: []string{"nginx-connection"}, literal: literal{want: answer{status: 200,
+					service: "shop", host: "localhost", received: map[string]string{"x-user-check": "proto=http host=localhost"}}}}}},
+		{name: "an HTTP/2 request with :scheme https under connection", keys: []string{"client_address", "auth.ask", "auth.accept", "auth.send_request"},
+			send: request{proto: "h2", method: "GET", host: "localhost", path: "/products/1", raw: true, scheme: "https",
+				headers: schemeReport("")},
+			want: toldTo("https", "https"),
+			on:   map[string]literal{"nginx-connection": {want: toldTo("https", "http")}},
+			by: map[string]own{"nginx": {difference: "auth.send_request", files: []string{"nginx-connection"},
+				literal: literal{want: toldTo("http", "http")}}}},
+		{name: "a client's own x-forwarded-proto https under connection", keys: []string{"client_address", "auth.ask", "auth.accept", "auth.send_request"},
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", headers: schemeReport("https")},
+			want: toldTo("https", "https"),
+			on:   map[string]literal{"nginx-connection": {want: toldTo("http", "http")}}},
+		{name: "an absolute https target sent with x-forwarded-proto http", keys: []string{"auth.ask", "auth.accept", "auth.send_request"},
+			send: request{proto: "http/1.1", host: "localhost", line: "GET https://localhost/products/1 HTTP/1.1", raw: true,
+				headers: schemeReport("http")},
+			want: withHost(toldTo("https", "https")),
+			on: map[string]literal{"two-checks": {want: withHost(toldTo("https", "http"))}, "nginx-checks": {want: withHost(toldTo("https", "http"))},
+				"nginx-tracing": {want: withHost(toldTo("https", "http"))}, "nginx-connection": {want: answer{status: 403}}},
+			by: map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 400}}},
+				"nginx": {difference: "client_address", files: []string{"nginx-connection"}, literal: literal{want: withHost(toldTo("http", "http"))}}}},
+		{name: "an HTTP/2 request with :scheme https sent with x-forwarded-proto http", keys: []string{"auth.ask", "auth.accept", "auth.send_request"},
+			send: request{proto: "h2", method: "GET", host: "localhost", path: "/products/1", raw: true, scheme: "https",
+				headers: schemeReport("http")},
+			want: toldTo("https", "https"),
+			on:   onEach([]string{"two-checks", "nginx-checks", "nginx-tracing", "nginx-connection"}, literal{want: toldTo("https", "http")}),
+			by: map[string]own{"nginx": {difference: "auth.send_request", files: []string{"nginx-checks", "nginx-tracing", "nginx-connection"},
+				literal: literal{want: toldTo("http", "http")}},
+				"haproxy": {difference: "auth.send_request", files: []string{"two-checks"}, literal: literal{want: toldTo("http", "http")}}}},
+		{name: "an x-forwarded-proto that is neither http nor https", keys: []string{"auth.ask", "auth.accept", "auth.send_request"},
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", headers: schemeReport("ftp")},
+			want: toldTo("https", "https"),
+			on: map[string]literal{"two-checks": {want: toldTo("http", "ftp")}, "nginx-checks": {want: toldTo("http", "ftp")},
+				"nginx-tracing": {want: toldTo("http", "ftp")}, "nginx-connection": {want: toldTo("http", "http")}},
+			by: map[string]own{"nginx": {difference: "auth.send_request", files: []string{"nginx-checks", "nginx-tracing"},
+				literal: literal{want: toldTo("ftp", "ftp")}},
+				"haproxy": {difference: "auth.send_request", files: []string{"two-checks"}, literal: literal{want: toldTo("ftp", "ftp")}}}},
+	}}
+
+// schemeReport is the headers of a request the check answers with the scheme it was told (report-forwarded), with the
+// client's own x-forwarded-proto when forwardedProto is not empty.
+func schemeReport(forwardedProto string) map[string]string {
+	headers := map[string]string{"authorization": "Bearer report-forwarded", "x-api-key": "key"}
+	if forwardedProto != "" {
+		headers["x-forwarded-proto"] = forwardedProto
+	}
+	return headers
+}
+
+// toldTo is a request of toldScheme served by shop, whose check was told the scheme check and whose service received
+// the x-forwarded-proto service.
+func toldTo(check, service string) answer {
+	return answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "proto=" + check + " host=localhost",
+		"x-forwarded-proto": service}}
+}
+
+// withHost is a, which also wants the service to receive the host localhost, the one an absolute target names.
+func withHost(a answer) answer {
+	a.host = "localhost"
+	return a
 }
 
 // timeout: measured on Envoy 1.40.2. The check holds the request for 3 s, past auth.timeout's 1500 ms, and
@@ -2795,7 +2888,8 @@ func servedOnFull(forms map[string]*regexp.Regexp, received map[string]string) m
 const otelRow = "tracing.provider.otel"
 
 // tracing: every want measured on Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8 on their images tagged -otel, and each of
-// nginx's own literals (by) is a difference its support table declares. nginx-tracing.yaml traces 5% of the requests,
+// nginx's own literals (by) is a difference its support table declares. The proxy runs with the two variables
+// nginx-tracing.yaml's set env tags read (proxyEnvironment). nginx-tracing.yaml traces 5% of the requests,
 // drawn by the id, and sends its spans to the battery's collector (file.collector), so each row sends an id whose draw
 // is known (drawnID, undrawnID) and reads the span that carries it, or wants none; examples/full traces 10% to a
 // collector the world leaves unreachable, with client_address = connection, so on it a row reads what the service
@@ -3076,6 +3170,19 @@ var tracing = scenario{name: "tracing",
 			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"inherited": regexp.MustCompile(`^own$`),
 				"tenant": regexp.MustCompile(`^acme$`)}},
 			on: map[string]literal{"full": {want: answer{status: 200, service: "shop"}}}},
+		{name: "an env tag whose variable is set reads it", keys: []string{"tracing", "tracing.tags.<tag name>.env"}, overlap: true,
+			send: tracedTo("/products/b7", drawnID("0000000000b7"), nil),
+			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"region": regexp.MustCompile(`^eu-1$`)}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}}},
+		// njs leaves a variable named like a property every object has out of process.env, so nginx reads toString as
+		// unset, where Envoy reads it.
+		{name: "an env tag on a set variable named like a property every object has", keys: []string{"tracing",
+			"tracing.tags.<tag name>.env", "tracing.tags.<tag name>.default"}, overlap: true,
+			send: tracedTo("/products/b8", drawnID("0000000000b8"), nil),
+			want: answer{status: 200, service: "shop", spanned: map[string]*regexp.Regexp{"inherited_set": regexp.MustCompile(`^ts1$`)}},
+			on:   map[string]literal{"full": {want: answer{status: 200, service: "shop"}}},
+			by: map[string]own{"nginx": {difference: "tracing.tags.<tag name>.env", literal: literal{want: answer{status: 200, service: "shop",
+				spanned: map[string]*regexp.Regexp{"inherited_set": regexp.MustCompile(`^own$`)}}}}}},
 		{name: "a tag value keeps a quote, a backslash and bytes above 0x7F as sent", keys: []string{"tracing", "tracing.tags.<tag name>.header"}, overlap: true,
 			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/t22", raw: true,
 				headers: map[string]string{"x-request-id": drawnID("000000000022"), "x-tenant": `a"b\cé`}},

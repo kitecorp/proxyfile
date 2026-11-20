@@ -275,9 +275,12 @@ var haproxyTarget = Target{Name: "haproxy", Title: "HAProxy", Keys: map[string]S
 			Applies: func(value, _ *tree.Node) bool { whole, _ := coveredBy(value, HAProxyFramedBy); return whole }},
 			haproxyRemovalPrefix}},
 	// The check is told the scheme of the client's connection (measured on HAProxy 3.2.26 and 3.4.7 beside Envoy
-	// 1.40.2, :scheme http over TLS and https without).
+	// 1.40.2, :scheme http over TLS and https without). Under forwarded the script tells it the X-Forwarded-Proto the
+	// request arrived with, which the file keeps as Envoy keeps it for the service: X-Forwarded-Proto: ftp is told ftp,
+	// where the Envoy output tells the connection's scheme (the battery's row "an x-forwarded-proto that is neither http
+	// nor https", on two-checks).
 	"auth.send_request": {Level: Partial,
-		Note: "over HTTP/2 a request whose :scheme differs from its connection's scheme is told in x-forwarded-proto the connection's, where Envoy tells it the :scheme"},
+		Note: "over HTTP/2 a request whose :scheme differs from its connection's scheme is told in x-forwarded-proto the connection's under client_address connection, and under forwarded the x-forwarded-proto it arrived with, or the connection's when it arrived with none, where Envoy tells it the :scheme; under client_address forwarded, an x-forwarded-proto that is neither http nor https, such as ftp, is told as it arrived, where Envoy tells the connection's scheme"},
 	"auth.jwt":                      haproxyNoJWT,
 	"auth.jwt.issuer":               haproxyNoJWT,
 	"auth.jwt.audiences":            haproxyNoJWT,
@@ -418,10 +421,12 @@ var haproxyTarget = Target{Name: "haproxy", Title: "HAProxy", Keys: map[string]S
 }, LessStrict: haproxyLessStrict}
 
 // haproxyLessStrict are the ways the HAProxy output is less strict than the Envoy output. HAProxy's parsers decide
-// each before any rule of the file reads the request, and its timeout counts the time without data, so the file can
-// close none of them: the file refuses a control byte in a header value with a rule, but no fetch reads a request
-// trailer, which option http-drop-request-trailers removes before the service. Each was measured on HAProxy 3.2.26 and
-// 3.4.7 beside Envoy 1.40.2, the two images alike.
+// each but the last before any rule of the file reads the request, and its timeout counts the time without data, so
+// the file can close none of them: the file refuses a control byte in a header value with a rule, but no fetch reads a
+// request trailer, which option http-drop-request-trailers removes before the service. The last is the file's own: it
+// keeps the X-Forwarded-Proto a request arrived with under forwarded, as the Envoy output keeps it for the service, and
+// tells the check that header. Each was measured on HAProxy 3.2.26 and 3.4.7 beside Envoy 1.40.2, the two images
+// alike.
 var haproxyLessStrict = []LessStrict{
 	{Row: requestLine, Name: "an HTTP/2 :authority with a default or empty port reaches the service without it",
 		Measured: "Over HTTP/2, `:authority: api.example.com:` and, over plain HTTP, `api.example.com:80` reach the service as `Host: api.example.com`, where the Envoy output sends them as written."},
@@ -443,4 +448,7 @@ var haproxyLessStrict = []LessStrict{
 		Measured: "A request trailer value holding one of the bytes 0x01 to 0x08, 0x0B, 0x0C, 0x0E to 0x1F or 0x7F is served, the service receiving the body and no trailer, where Envoy answers `400` over HTTP/1.1 and closes the connection over HTTP/2. A header value holding one is answered `400` over HTTP/1.1, as by Envoy, and its stream is reset over HTTP/2, where Envoy closes the connection; HAProxy refuses 0x00, a line feed and a carriage return in either value, with `400` over HTTP/1.1 and a reset stream over HTTP/2."},
 	{Row: "timeouts.request", Name: "without timeouts.request, an answer that keeps arriving runs past 15 s",
 		Measured: "Without `timeouts.request`, a service that keeps sending runs past 15 s, where the Envoy output ends a request 15 s after it starts: HAProxy's `timeout server` counts the time without data (on HAProxy 3.4.7, a service that sent one byte a second for 10 s under a 2 s `timeout server` was served)."},
+	// The battery's row "an x-forwarded-proto that is neither http nor https" holds it on two-checks.
+	{Row: "auth.send_request", Name: "under forwarded, an x-forwarded-proto that is neither http nor https is told to the check as it arrived",
+		Measured: "With `client_address: forwarded` and `auth.send_request: true`, a request sent over plain HTTP with `X-Forwarded-Proto: ftp`, such as `GET /products/1 HTTP/1.1`, is told `x-forwarded-proto: ftp` in the request to the check, where the Envoy output tells the check `http`, the connection's scheme. Both send the service `X-Forwarded-Proto: ftp`. Under `connection`, over TLS, both tell the check and the service `https`, the connection's scheme."},
 }

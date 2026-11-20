@@ -369,8 +369,11 @@ worker's exit line).
 ### Where HAProxy answers the check otherwise than the Envoy output
 
 Each difference below is declared on HAProxy's row of its key in
-[Portability](portability.md#support-by-proxy-from-the-generators), and none is on
-[the list of ways HAProxy is less strict](#where-haproxy-is-less-strict-than-the-envoy-output). In every case measured
+[Portability](portability.md#support-by-proxy-from-the-generators), and one alone is on
+[the list of ways HAProxy is less strict](#where-haproxy-is-less-strict-than-the-envoy-output): under `forwarded` the
+check is told an `x-forwarded-proto` that is neither `http` nor `https` as it arrived, where the Envoy output tells it
+the connection's scheme, so a check that decides by the scheme it is told reads the word of the client or of the proxy
+in front. In every case measured
 on HAProxy 3.2.26 and 3.4.7 beside Envoy 1.40.2, the service received a request the check was asked about only after the
 check let it through; each case counted the requests the service and the check received.
 
@@ -378,7 +381,7 @@ check let it through; each case counted the requests the service and the check r
 - **`auth.only_with_header`**: over HTTP/2 a request that carries the header with every value empty is asked, where Envoy does not ask it: HAProxy reads an HTTP/2 value of spaces alone as empty, and Envoy asks one, so HAProxy asks both.
 - **`auth.send`**: the check receives each byte of 0x80 or more that is not part of well-formed UTF-8 in a header it is sent as the client sent it, where Envoy writes a ! for each such byte.
 - **`auth.when_unavailable`**: with allow, an answer that breaks off inside its header lines, a chunk-size line or a trailer line, by a close or by passing auth.timeout, a 200 or a denial whose body never ends, an answer whose head or trailer section passes 81,920 bytes, a head of more than 100 header lines with a name on two of them, such as set-cookie, and an answer HAProxy cannot read as RFC 9112 writes one (a Content-Length that is not one line of digits, a control byte in a header value, a status line that does not end, a chunk-size line that ends in a bare LF) are answered 403, where Envoy serves the request with the unchecked mark, x-envoy-auth-failure-mode-allowed: true.
-- **`auth.send_request`**: over HTTP/2 a request whose :scheme differs from its connection's scheme is told in x-forwarded-proto the connection's, where Envoy tells it the :scheme.
+- **`auth.send_request`**: over HTTP/2 a request whose :scheme differs from its connection's scheme is told in x-forwarded-proto the connection's under client_address connection, and under forwarded the x-forwarded-proto it arrived with, or the connection's when it arrived with none, where Envoy tells it the :scheme; under client_address forwarded, an x-forwarded-proto that is neither http nor https, such as ftp, is told as it arrived, where Envoy tells the connection's scheme.
 - **`auth.accept`**: an accepted header too large for HAProxy's request buffer is answered 403, where Envoy sets it on the request (the sizes are in HAProxy's row of `auth.accept` in [Portability](portability.md#support-by-proxy-from-the-generators)); a * prefix never sets transfer-encoding, host or te from the check's answer, where Envoy sets each; a folded header line of the check's answer reaches the service joined to the value before it by one space, where Envoy keeps the spaces and tabs of both lines and drops the line end. Two forms are refused at render, naming the key: `auth.accept` naming content-length, transfer-encoding, host, te, connection or upgrade in full is refused by `--target haproxy`: HAProxy frames or routes a request by these headers, so the check's answer never sets them; remove the name from auth.accept. And `auth.accept` holding a * prefix that covers content-length, connection or upgrade is refused by `--target haproxy`: the Envoy output sends the body chunked once Content-Length is removed, and leaves a WebSocket upgrade unanswered once Connection or Upgrade is removed, which HAProxy cannot write; write the other names in full, or a longer prefix, or render it for envoy.
 - **`remove_from_clients`**: names and * prefixes that cover none of content-length, connection and upgrade. A value holding content-length, connection or upgrade, in full or under a * prefix, is refused by `--target haproxy`: the Envoy output sends the body chunked once Content-Length is removed, and leaves a WebSocket upgrade unanswered once Connection or Upgrade is removed, which HAProxy cannot write; write the other names in full, or a longer prefix, or render it for envoy.
 - **`origins.<environment name>.origins` and `origins.<environment name>.patterns`**: an admitted Origin longer than 872 bytes less the length of cors.expose_headers is answered 403 with the body Invalid CORS request before the check and the service, where the Envoy output echoes it: HAProxy has 1,024 bytes for the lines it adds to an answer.
@@ -567,11 +570,12 @@ service what Envoy would not, are in [the next section](#where-haproxy-is-less-s
 ## Where HAProxy is less strict than the Envoy output
 
 These differences are not stricter than the Envoy output: in each, HAProxy serves a request the Envoy output refuses or
-ends, or sends a service what the Envoy output would not. HAProxy's parsers decide each before any rule of the file
-reads the request, its timeout counts the time without data, and no fetch reads a request trailer, which
+ends, or sends a service what the Envoy output would not. HAProxy's parsers decide each but the last before any rule of
+the file reads the request, its timeout counts the time without data, and no fetch reads a request trailer, which
 `option http-drop-request-trailers` removes before the service, so the file cannot close them. A header value that holds
 a control byte is not among them: the file refuses it with a rule, as Envoy does, and the entry on a trailer's value is
-the one that stays.
+the one that stays. The last is the file's own: under `client_address: forwarded` it keeps the `X-Forwarded-Proto` a
+request arrived with, as the Envoy output keeps it for the service, and tells the check that header.
 `proxyfile render --target haproxy` counts them on standard error after it writes the files, and HAProxy's column in
 [Portability](portability.md#support-by-proxy-from-the-generators) names each on its row. Measured on HAProxy 3.2.26 and
 3.4.7 beside Envoy 1.40.2:
@@ -587,6 +591,7 @@ the one that stays.
 - **a WebSocket upgrade a service answers without switching passes the service's body**: A WebSocket upgrade a service answers `200` without switching reaches the client with the service's body, where Envoy passes the status and headers with no body.
 - **a trailer value holding a control byte is served**: A request trailer value holding one of the bytes 0x01 to 0x08, 0x0B, 0x0C, 0x0E to 0x1F or 0x7F is served, the service receiving the body and no trailer, where Envoy answers `400` over HTTP/1.1 and closes the connection over HTTP/2. A header value holding one is answered `400` over HTTP/1.1, as by Envoy, and its stream is reset over HTTP/2, where Envoy closes the connection; HAProxy refuses 0x00, a line feed and a carriage return in either value, with `400` over HTTP/1.1 and a reset stream over HTTP/2.
 - **without timeouts.request, an answer that keeps arriving runs past 15 s**: Without `timeouts.request`, a service that keeps sending runs past 15 s, where the Envoy output ends a request 15 s after it starts: HAProxy's `timeout server` counts the time without data (on HAProxy 3.4.7, a service that sent one byte a second for 10 s under a 2 s `timeout server` was served).
+- **under forwarded, an x-forwarded-proto that is neither http nor https is told to the check as it arrived**: With `client_address: forwarded` and `auth.send_request: true`, a request sent over plain HTTP with `X-Forwarded-Proto: ftp`, such as `GET /products/1 HTTP/1.1`, is told `x-forwarded-proto: ftp` in the request to the check, where the Envoy output tells the check `http`, the connection's scheme. Both send the service `X-Forwarded-Proto: ftp`. Under `connection`, over TLS, both tell the check and the service `https`, the connection's scheme.
 <!-- /keys -->
 
 ## What a file holds to load

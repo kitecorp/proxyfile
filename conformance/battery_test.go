@@ -44,7 +44,8 @@ func TestBattery(t *testing.T) {
 	// literals were measured (rowProblems); every key Envoy's rows exercise is exercised on the files of each version's
 	// entries or refused by its target (coverage); every row that runs on an Envoy entry's file runs on one of the files
 	// of each version's entries or names a key its target refuses (rowCoverage), the entries of one target and version
-	// judged together (versions); and each entry's target has a declaration and a generator (in its subtest).
+	// judged together (versions); each count of rows docs/conformance.md gives is the rows the entries run
+	// (pageCountProblems); and each entry's target has a declaration and a generator (in its subtest).
 	keys := format.CoreKeys(format.Proxyfile)
 	for _, s := range scenarios {
 		for _, e := range s.exchanges {
@@ -60,7 +61,8 @@ func TestBattery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, problem := range slices.Concat(rowProblems(entries, byEntry), coverage(entries, byEntry), rowCoverage(entries, byEntry)) {
+	for _, problem := range slices.Concat(rowProblems(entries, byEntry), coverage(entries, byEntry), rowCoverage(entries, byEntry),
+		pageCountProblems(entries, byEntry)) {
 		t.Error(problem)
 	}
 	// The run takes the conformance lock once, when its first file needs Docker, and gives it back when TestBattery

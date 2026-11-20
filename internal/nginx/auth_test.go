@@ -170,6 +170,9 @@ func TestCheckLines(t *testing.T) {
 	keepAlive := generate(t, rewritten(t, checks, "  accept: [x-user-check]\n", "  accept: [x-user-id, keep-alive]\n"))
 	// A name remove_from_clients lists that accept names too.
 	both := generate(t, rewritten(t, checks, "remove_from_clients: [x-request-id]\n", "remove_from_clients: [x-request-id, x-user-check]\n"))
+	// The file under deny with client_address connection and still no tls.
+	connectionChecks := generate(t, rewritten(t, checks, "admin: 9901\n", "admin: 9901\nclient_address: connection\n"))
+	toldByTarget := `  map $request $pf_told_proto { "~*^[^ ]+ +https://" https; "~*^[^ ]+ +http://" http; default $pf_forwarded_proto; }`
 	cases := []struct {
 		name   string
 		out    string
@@ -197,7 +200,7 @@ func TestCheckLines(t *testing.T) {
 				`  map "" $pf_counted_address { default ""; }`,
 				`  map $request_uri $pf_query { "~^[^?]*(?<pf_query_text>\\?.*)" $pf_query_text; default ""; }`,
 				"  map $pf_mode $pf_told_uri { uri $pf_path$pf_query; default $request_uri; }",
-				`  map $request $pf_told_proto { "~*^[^ ]+ +https://" https; "~*^[^ ]+ +http://" http; default $pf_forwarded_proto; }`,
+				toldByTarget,
 			},
 			{`    "~^1" dotparam;`},
 			{
@@ -236,6 +239,16 @@ func TestCheckLines(t *testing.T) {
 				"}",
 			},
 		}, absent: []string{`    "~^1" refused;`, "      types {}"}},
+		// With connection the check is told the scheme the service is sent, the connection's, whatever scheme an
+		// absolute target names, with tls and without; with forwarded the target's (above).
+		{name: "connection without tls, the scheme the check is told", out: connectionChecks, want: [][]string{
+			{`  map "" $pf_forwarded_proto { default $scheme; }`},
+			{`  map "" $pf_told_proto { default $pf_forwarded_proto; }`},
+			{"      proxy_set_header x-forwarded-proto $pf_told_proto;"},
+		}, absent: []string{toldByTarget}},
+		{name: "connection with tls, the scheme the check is told", out: authOut, want: [][]string{
+			{`  map "" $pf_told_proto { default $pf_forwarded_proto; }`},
+		}, absent: []string{toldByTarget}},
 		{name: "deny, the request log", out: checksOut, want: [][]string{
 			{requestLog("pf_request", `"$pf_authz_us"`), requestLog("pf_request_not_asked", "null")},
 			{

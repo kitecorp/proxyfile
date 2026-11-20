@@ -684,8 +684,8 @@ func TestHeaderNamesNeedNoEscaping(t *testing.T) {
 func TestLessStrictWarning(t *testing.T) {
 	for _, c := range []struct{ target, want string }{
 		{"envoy", ""},
-		{"nginx", `this nginx configuration is less strict than the Envoy output in 15 ways; docs/nginx.md lists them under "Where nginx is less strict than the Envoy output"`},
-		{"haproxy", `this HAProxy configuration is less strict than the Envoy output in 10 ways; docs/haproxy.md lists them under "Where HAProxy is less strict than the Envoy output"`},
+		{"nginx", `this nginx configuration is less strict than the Envoy output in 19 ways; docs/nginx.md lists them under "Where nginx is less strict than the Envoy output"`},
+		{"haproxy", `this HAProxy configuration is less strict than the Envoy output in 11 ways; docs/haproxy.md lists them under "Where HAProxy is less strict than the Envoy output"`},
 	} {
 		target, _ := TargetNamed(c.target)
 		if got := LessStrictWarning(target); got != c.want {
@@ -723,6 +723,7 @@ func TestLessStrictWays(t *testing.T) {
 			{line, "a WebSocket upgrade a service answers without switching passes the service's body"},
 			{line, "a trailer value holding a control byte is served"},
 			{"timeouts.request", "without timeouts.request, an answer that keeps arriving runs past 15 s"},
+			{"auth.send_request", "under forwarded, an x-forwarded-proto that is neither http nor https is told to the check as it arrived"},
 		}},
 		{"nginx", []way{
 			{line, "a request trailer whose name is outside the token characters or whose value holds a control byte is served over HTTP/1.1"},
@@ -730,14 +731,18 @@ func TestLessStrictWays(t *testing.T) {
 			{line, "a header line with no colon reaches the service as a header with an empty value"},
 			{line, "a request with no body reaches the service without content-length: 0"},
 			{line, "a Referer the Envoy output removes reaches the service"},
+			{line, "over HTTP/1.1, a tab before or after a header value reaches the service"},
 			{line, "a WebSocket upgrade a service answers without switching passes the service's body"},
 			{line, "a service's answer with a malformed header line or a malformed status line reaches the client"},
 			{line, "over HTTP/2, empty frames in a row are served"},
+			{"admin", "the admin listener serves an absolute target of http or https as the path it names"},
+			{"client_address", "under connection, an absolute https target sent over plain HTTP is served"},
 			{"timeouts.request", "without timeouts.request, an answer that keeps arriving runs past 15 s"},
 			{"timeouts.request", "without timeouts.request, a request body its service does not read, or reads slowly, runs past 15 s"},
 			{"auth.when_unavailable", "with allow, a check service that does not close its connection right after its answer leaves requests unchecked past about 470 checks a second"},
 			{"auth.when_unavailable", "with allow, a worker with none of its 8192 connections left serves requests unchecked"},
 			{"auth.ask", "a request whose client closes its connection during the check can still reach the service"},
+			{"auth.send_request", "under forwarded, an x-forwarded-proto that is neither http nor https is told to the check as it arrived"},
 			{"routes[].rpc.retries", "a retried request or call is sent again at once and with no limit on retries at the same time"},
 			{"log", "a chunked answer its service cuts short writes no upstream-failure line"},
 		}},
@@ -852,7 +857,7 @@ func TestHAProxyWrites(t *testing.T) {
 			refuses: "naming content-length, transfer-encoding, host, te, connection or upgrade in full: HAProxy frames or routes a request by these headers, so the check's answer never sets them; remove the name from auth.accept" + "; " +
 				"holding a * prefix that covers content-length, connection or upgrade: the Envoy output sends the body chunked once Content-Length is removed, and leaves a WebSocket upgrade unanswered once Connection or Upgrade is removed, which HAProxy cannot write; write the other names in full, or a longer prefix, or render it for envoy"},
 		{key: "auth.send_request", level: Partial,
-			note: "over HTTP/2 a request whose :scheme differs from its connection's scheme is told in x-forwarded-proto the connection's, where Envoy tells it the :scheme"},
+			note: "over HTTP/2 a request whose :scheme differs from its connection's scheme is told in x-forwarded-proto the connection's under client_address connection, and under forwarded the x-forwarded-proto it arrived with, or the connection's when it arrived with none, where Envoy tells it the :scheme; under client_address forwarded, an x-forwarded-proto that is neither http nor https, such as ftp, is told as it arrived, where Envoy tells the connection's scheme"},
 		{key: "remove_from_clients", level: Partial, note: "names and * prefixes that cover none of content-length, connection and upgrade",
 			refuses: "holding content-length, connection or upgrade, in full or under a * prefix: the Envoy output sends the body chunked once Content-Length is removed, and leaves a WebSocket upgrade unanswered once Connection or Upgrade is removed, which HAProxy cannot write; write the other names in full, or a longer prefix, or render it for envoy"},
 		{key: "cors", level: Supported},
