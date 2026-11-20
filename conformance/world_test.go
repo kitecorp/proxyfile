@@ -51,6 +51,11 @@ const (
 // battery reads the spans it kept on port 8080 inside its container (world.spans).
 const collector, collectorAddress, collectorName = "proxyfile-conformance-collector", "10.0.3.40", "collector.internal.example"
 
+// proxyEnvironment is the environment every proxy runs with, which the env tags of nginx-tracing.yaml read: a variable
+// set to a value, and one set under a name every object has as a property, which njs leaves out of process.env. Each is
+// a name no other file reads, so only the rows of those tags see it.
+var proxyEnvironment = []string{"APP_REGION=eu-1", "toString=ts1"}
+
 // runFolder holds all a run writes to disk: the rendered file in config, the stub's build in stub, and the TLS files
 // with the server's key in tls and jwt. The battery names it as it names its Docker objects, so a run killed before
 // its cleanup leaves it where the next run's start removes it.
@@ -128,8 +133,8 @@ func claimWorld(t *testing.T) {
 // the proxy so its first spans have somewhere to go; for every other file that address is left unreachable, and no
 // request waits for it. 10.0.0.0/22 is the smallest block holding every one of them. The ports 10000 and 9901 and the
 // folders /config, /etc/gateway/tls and /etc/gateway/jwt are the examples' listen, admin and tls keys and
-// examples/full's auth.jwt.ca, the same for every target. plain says the rendered file's listener speaks plain HTTP, so
-// the clients do too.
+// examples/full's auth.jwt.ca, the same for every target, and the proxy runs with proxyEnvironment. plain says the
+// rendered file's listener speaks plain HTTP, so the clients do too.
 func startWorld(t *testing.T, tg target, config string, plain, held, collects bool) *world {
 	buildStub(t, filepath.Join(runFolder, "stub"))
 	files := certificates(t, runFolder)
@@ -172,9 +177,13 @@ func startWorld(t *testing.T, tg target, config string, plain, held, collects bo
 		waitSpans(t)
 	}
 	// The listener is published on a port Docker picks, so a run never meets a port another program holds.
-	mustDocker(t, append([]string{"run", "-d", "--name", proxy, "--network", network, "--ip", "10.0.0.10",
+	run := []string{"run", "-d", "--name", proxy, "--network", network, "--ip", "10.0.0.10",
 		"-p", "127.0.0.1::10000", "-v", config + ":/config:ro", "-v", files.tls + ":/etc/gateway/tls:ro",
-		"-v", files.jwt + ":/etc/gateway/jwt:ro", tg.image}, tg.args...)...)
+		"-v", files.jwt + ":/etc/gateway/jwt:ro"}
+	for _, variable := range proxyEnvironment {
+		run = append(run, "-e", variable)
+	}
+	mustDocker(t, append(append(run, tg.image), tg.args...)...)
 	mustDocker(t, "run", "-d", "--name", accounts, "--network", "container:"+proxy,
 		"-v", state, image, "serve", "-service", "accounts", "-instance", "accounts", "-ports", "7070")
 	waitReady(t, tg.ready)

@@ -199,10 +199,12 @@ It also empties `x-envoy-decorator-operation`, `x-envoy-downstream-service-clust
 `x-envoy-original-host` and `x-envoy-original-path`, which only a proxy in front may send, besides the `x-envoy-`
 headers every file empties. A client's own `X-Real-IP` and `Forwarded` pass, as through the Envoy output. With
 `forwarded` the file writes none of these: the client's `X-Forwarded-For` passes as received, and the client's
-`X-Forwarded-Proto` and `x-request-id` are kept when it sends them. These answers are equal to the Envoy output's but
-for three refusals, measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2 and named on nginx's request-line row of
-[Portability](portability.md#support-by-proxy-from-the-generators), which `proxyfile.js` makes before a route is
-picked:
+`X-Forwarded-Proto` and `x-request-id` are kept when it sends them. These answers are equal to the Envoy output's,
+measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2, but for an absolute `https` target sent over plain HTTP under
+`connection`, which nginx serves (below), a tab before or after a value, which reaches the service where Envoy removes
+it ([the list](#where-nginx-is-less-strict-than-the-envoy-output)), and three refusals, named on nginx's request-line
+row of [Portability](portability.md#support-by-proxy-from-the-generators), which `proxyfile.js` makes before a route
+is picked:
 
 - **A header name that holds `_` and that nginx reads as one of its own is answered `400`**:
   `access-control-request-method`, `access-control-request-headers`, `x-request-id`, `x-forwarded-proto`,
@@ -229,6 +231,14 @@ empty or, over HTTP/1.1, holds only spaces and tabs; the configuration alone can
 `proxyfile.js` does. The same name on a line with no colon is answered `404` too, where the Envoy output answers `400`.
 With `connection` the line is not read and the request is served. Measured on nginx 1.30.6 and 1.31.8 beside Envoy
 1.40.2.
+
+With `connection` and no `tls`, an absolute `https` target sent over plain HTTP, such as
+`GET https://localhost/products/1 HTTP/1.1`, is served: the service receives `X-Forwarded-Proto: http`, and with
+`auth.send_request: true` the check is told `x-forwarded-proto: http`, the connection's scheme, where the Envoy output
+answers `403` with the body `Forbidden`, closes the connection and asks no check; with `forwarded` both serve it. It is
+a way nginx is less strict than the Envoy output, named in [the list](#where-nginx-is-less-strict-than-the-envoy-output)
+and on the `client_address` row of [Portability](portability.md#support-by-proxy-from-the-generators) (measured on nginx
+1.30.6 and 1.31.8 beside Envoy 1.40.2). proxyfile 2.2.0 told the check `https` for it, the scheme the target names.
 
 `remove_from_clients` names headers a client may not send. For each name, every route's location sets the header empty
 (`proxy_set_header <name> ""`, and `grpc_set_header` where the location sends to a gRPC service), and every place
@@ -806,14 +816,17 @@ With `admin`, nginx listens on `127.0.0.1` at that port and answers three paths 
   `text/plain`, a `QUERY` sent with no `Content-Type` or with an empty one, which over HTTP/1.1 is also one of spaces
   and tabs alone, and a `#` in the target, `400` with no body and no `content-type`, and HTTP/1.0 `426` with `Upgrade
   Required` as `text/plain`, the connection closed after each.
-- An absolute target is answered as the path it names, or `400` when nginx or the public listener's checks refuse it, as
-  one with an empty port, user information, a query right after its host or a scheme other than `http` and `https`,
-  where the Envoy output answers every absolute target `404`.
+- An absolute target of `http` or `https` is answered as the path it names, `GET http://localhost/ready` with `200` and
+  `LIVE`, where the Envoy output answers every absolute target `404`, a way nginx is less strict than the Envoy output
+  ([the list](#where-nginx-is-less-strict-than-the-envoy-output)). One that nginx or the public listener's checks
+  refuse, as one with an empty port, user information, a query right after its host or a scheme other than `http` and
+  `https`, is answered `400`, where the Envoy output answers `404`.
 - The admin port writes no log line for a request, as the Envoy output writes none.
 
 None of the three paths is answered on the public listener: a route takes them as it takes any other path, on both
-proxies. The contents of `/stats` and `/server_info`, the status of a refused path, the answer to `TRACE` and to an
-absolute target are declared on nginx's `admin` row.
+proxies. The contents of `/stats` and `/server_info`, the status of a refused path, the answer to `TRACE` and the `400`
+to a refused absolute target are declared on nginx's `admin` row, and the absolute target served as a path is named
+there as a way nginx is less strict.
 
 ## The auth check
 
@@ -1007,8 +1020,11 @@ nginx versions sent the check `GET /auth/é/ü?x=ß`. The request holds:
 - with `tracing`, `traceparent` and `tracestate`, as [Tracing](#tracing) says;
 - with `send_request: true`, `x-forwarded-uri`, the path the route matched, normalised, with each byte of 0x80 or more
   escaped as the service receives it, and the query as the client wrote it, before a rewrite; `x-forwarded-method`;
-  `x-forwarded-proto`, the scheme of an absolute target in the letter case it was written in, and otherwise the
-  connection's scheme, or the client's own `x-forwarded-proto` under `client_address: forwarded`; and
+  `x-forwarded-proto`, under `client_address: connection` the connection's scheme, the one the service is sent,
+  whatever scheme an absolute target names, and under `forwarded` the scheme of an absolute target, written in any
+  letter case, and otherwise the client's own `x-forwarded-proto` as it arrived, whatever word it holds, or the
+  connection's scheme: the Envoy output tells the check the connection's scheme for an `x-forwarded-proto` of `ftp`,
+  which nginx tells as `ftp` ([the list](#where-nginx-is-less-strict-than-the-envoy-output)); and
   `x-forwarded-host`, the host nginx routes by. A client's own copies of those four are replaced, and a client's own
   `x-gateway-timeout-ms` is never sent.
 
@@ -1308,22 +1324,24 @@ lets the request through, closing the connection after it, as the Envoy output d
 ### Where nginx answers the check otherwise than the Envoy output
 
 Each difference below is declared on nginx's row of its key in
-[Portability](portability.md#support-by-proxy-from-the-generators). Three entries of [the list of ways nginx is less
+[Portability](portability.md#support-by-proxy-from-the-generators). Four entries of [the list of ways nginx is less
 strict](#where-nginx-is-less-strict-than-the-envoy-output) concern the check: past the bound of local ports the
 `auth.ask` note gives, a check fails for want of a port, and with `allow` its request is served with the unchecked mark,
 so a request the check would refuse can be served; a worker with none of its 8192 connections left cannot ask the check
 either, with the same result under `allow`, as [Checks in flight on few workers](#checks-in-flight-on-few-workers) says;
-and the request of a client that closes its connection while its check is asked can still reach the service once the
-check allows it, as the last sentence on the request line says. In each of the others, a request the check refuses stays
-refused, and nginx either refuses or holds a request the Envoy output serves, or answers or writes a line otherwise. The
-words are the words of the declaration.
+the request of a client that closes its connection while its check is asked can still reach the service once the
+check allows it, as the last sentence on the request line says; and under `client_address: forwarded` the check is told
+an `x-forwarded-proto` that is neither `http` nor `https` as it arrived, where the Envoy output tells it the
+connection's scheme, so a check that decides by the scheme it is told reads the word of the client or of the proxy in
+front. In each of the others, a request the check refuses stays refused, and nginx either refuses or holds a request
+the Envoy output serves, or answers or writes a line otherwise. The words are the words of the declaration.
 
 - **`auth.ask`**: a request whose check answers in one of these forms is answered 403: a status outside 100 to 599, such as 2, 99, 600 or 2000, or 101, where Envoy passes the status on to the client; HTTP/2.0 or HTTP/1.2, two spaces or a tab after the version, a + before the status, a tab between the status and the reason, a lone CR, a space or a tab after a chunk size, a chunk size of nine hex digits, a chunk extension holding a control byte or a quoted CR LF, a chunk-size line past 1,024 bytes, bytes between a chunk's data and its line end, a folded trailer line, or a head of exactly 81,920 bytes with a line in a bare LF, which nginx counts a byte longer, where Envoy reads the answer; a 200 whose body passes 1 MiB, where Envoy serves the request; a denial whose body passes 1 MiB, where Envoy passes the denial on; a denial whose head has more than 100 header lines, folded lines not counted, with a name on two of them, where Envoy counts a name it keeps inline, such as date, once and passes the denial on; over HTTP/2, a gRPC call refused for the check's denial, or with deny for want of a readable answer, is answered as Envoy answers it, with one more header, content-length: 0; a check's 301, 302, 303, 307 or 308 to an HTTP/1.1 request that carries a body reaches the client with nginx's own page in place of the check's body, and a check's 304 to such a request with content-length: 0, as nginx discards the request's body, so that no byte of it is read as the next request; a denial reaches the client with Server: nginx where the check sent no Server header, with nginx's own reason phrase (302 Moved Temporarily, where Envoy writes Found), without a header line the check sent with an empty value, with the check's Access-Control-Allow-Origin beside the listed origin's own, where Envoy sends the origin's alone, and, to a HEAD request, with Content-Length: 0, where Envoy sends transfer-encoding: chunked; an error in proxyfile.js itself as it asks the check or reads its answer is answered 403, with allow too, and writes no log line; the check is sent connection: close on a new connection for each check, where Envoy sends no Connection header and keeps its connections to the check open, so nginx's local ports bound how many checks a second it can send to one check address: near 340,000 a second when the check closes its connection first after it answers, derived from the 0.13% of connections nginx's side then kept in TIME_WAIT and not reached, and about 470 a second when it does not, at most 28,231 checks to one address in any 60 s from the 28,232 ports of 32768 to 60999 (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2); past that bound a check fails for want of a port, and its request is answered 403 with deny and served with the unchecked mark with allow; the relay listens on a socket file, /run/proxyfile-<listen>/check.sock, which nginx removes when it stops and a kill leaves, and nginx then does not start, its bind() to the file failing (98: Address already in use), until the file is removed or /run is a tmpfs.
 - **`auth.timeout`**: with allow, the request goes on with the unchecked mark at the first byte the check sends after auth.timeout, or after one auth.timeout with no byte from it, so a check that sends a byte just before each auth.timeout of silence holds the request up to twice auth.timeout, where Envoy goes on at auth.timeout.
 - **`auth.when_unavailable`**: with allow, a request whose check answers in a form Envoy reads as no answer (a malformed header line, framing or status line, a head or a trailer section past the 81,920 bytes Envoy reads, a head of more than 100 header lines with a name on two of them, such as set-cookie, or a body that never ends) is answered 403, where Envoy serves it with the unchecked mark, x-envoy-auth-failure-mode-allowed: true.
 - **`auth.only_with_header`**: over HTTP/1.1 a request whose header is a lone tab is asked, where Envoy does not ask it: nginx keeps the tab, which Envoy removes; over HTTP/2 a cookie sent as two or three empty cookie fields is asked, where Envoy does not ask it. One form is refused at render, naming the key: `auth.only_with_header` naming a header that remove_from_clients, auth.accept or the proxy itself removes from clients is refused by `--target nginx`: the Envoy output removes that header before it reads it and never asks the check, where nginx asks it; name a header the proxy passes on.
 - **`auth.send`**: a client's own x-proxyfile-method and x-proxyfile-path are not sent to the check when send covers them, where Envoy sends them; what the check is asked does not change.
-- **`auth.send_request`**: in a file with no pattern route, a path holding a character Envoy escapes before it picks a route (" < > ^ ` { | }) is told in x-forwarded-uri as the client wrote that character, where Envoy tells it escaped; the service receives it escaped from both; over HTTP/2 a request whose :scheme differs from its connection's scheme is told in x-forwarded-proto the connection's, where Envoy tells it the :scheme.
+- **`auth.send_request`**: in a file with no pattern route, a path holding a character Envoy escapes before it picks a route (" < > ^ ` { | }) is told in x-forwarded-uri as the client wrote that character, where Envoy tells it escaped; the service receives it escaped from both; over HTTP/2 a request whose :scheme differs from its connection's scheme is told in x-forwarded-proto the connection's under client_address connection, and under forwarded the x-forwarded-proto it arrived with, or the connection's when it arrived with none, where Envoy tells it the :scheme; under client_address connection, so is an absolute target over HTTP/1.1 whose scheme differs from its connection's: an http target sent over TLS is told https, where Envoy tells it http; under client_address forwarded, an x-forwarded-proto that is neither http nor https, such as ftp, is told as it arrived, where Envoy tells the connection's scheme.
 - **`auth.accept`**: names written in full, none of them a header nginx writes itself on the request it passes on; a request the accepted headers take past limits.request_headers is answered 500 as by Envoy, counted with the client's own Connection line, its own copies of the headers the proxy sets, each line of a name sent on several lines and each cookie field over HTTP/2, which Envoy drops, replaces or joins into one before it counts, so such a request can be answered 500 by those lines sooner; an accepted header the check sends empty reaches a gRPC service as no header, where Envoy sends it empty. Two forms are refused at render, naming the key: `auth.accept` holding a name with a `*` prefix is refused by `--target nginx`: nginx sets a request header only by a name its configuration writes; write each name in full. And `auth.accept` naming a header nginx frames or routes a request by is refused by `--target nginx`: nginx writes this header itself on the request it passes on, to frame or route it or to keep a client's copy from the service, x-forwarded-for, x-envoy-external-address and the five x-envoy- names Envoy removes from clients only with client_address: connection, and a check service must never change how nginx frames or routes that request; each is refused with either client_address, so a list stays valid when it changes; remove the name from `auth.accept`.
 - **`log`**: the request line holds `authz_us` in whole milliseconds, and a request refused for a dot segment with a `;` parameter logs `route` empty on each of its lines, where the Envoy output names the route that refuses it, `refused:dot-segment-with-parameter` ([The request log with the check](#the-request-log-with-the-check)).
 - **the request line and header names read before a route is picked**: a client that closes its side of the connection right after its request gets nginx's answer when nginx refuses the request itself, an Origin on none of the hosts, a target holding a fragment, a dot segment with a ; parameter or HTTP/1.0, where Envoy closes the connection with no answer. For a request a service answers, each proxy gives the client no answer when it reads the FIN before the service answers, and the service's answer when the answer comes first: with the FIN sent with the request, the service received 148 of 300 such requests through Envoy and 1 and 0 of 300 through nginx 1.30.6 and 1.31.8, and no client got an answer; with the FIN 1 ms later, the service received 298, 297 and 299 of 300, and nearly every client got its answer; with a service that answers 50 ms late, no client got an answer (measured with no `auth` beside Envoy 1.40.2, from the host through Docker's port forwarder). The same rule holds for both proxies, so it is not on the list of ways nginx is less strict. With the check asked it does not hold: a client that half-closed while its check was asked got no answer from either proxy (200 of 200 each), but once the check allowed the request nginx still sent it to the service, 17 and 23 times of 30 when it held idle connections to the service, where the Envoy output sent none; that, with a close and a reset, is on [the list of ways nginx is less strict](#where-nginx-is-less-strict-than-the-envoy-output).
@@ -1706,13 +1724,16 @@ their `service.name` (`otel_service_name`), as the Envoy output sends them.
   `user_agent`, `http.protocol`, `peer.address`, `request_size`, `response_size`, `component`, `upstream_cluster` and
   `upstream_cluster.name`, whose values equalled the Envoy output's over HTTP/1.1 and HTTP/2, with a body, for a `503`
   and for a gRPC call. The scheme of `http.url` is `http` or `https` alone, as in the Envoy output's: an absolute
-  target's own, otherwise, under `client_address: forwarded` over HTTP/1.1, a client's `X-Forwarded-Proto` that is one
-  of the two words in any letter case, with spaces or tabs around it, and otherwise the connection's; over HTTP/2 nginx
-  writes the connection's, where the Envoy output writes the client's `:scheme` when it is `http` or `https`. Its host
-  is the one the Envoy output's holds: the route's service's `host_header` when it writes one, and otherwise the host
-  the request names. Beside them the module sets fields of its own, which no line removes: `http.method`, `http.target`,
-  `http.route`, `http.scheme`, `http.flavor`, `http.user_agent`, `http.status_code`, `http.request_content_length`,
-  `http.response_content_length`, `net.host.name`, `net.host.port`, `net.sock.peer.addr` and `net.sock.peer.port`.
+  target's own, so `https` for one sent over plain HTTP under `client_address: connection` too, though the service and
+  the check are sent `http` for it and the Envoy output answers it `403` with no span (measured on nginx 1.30.6 and
+  1.31.8 beside Envoy 1.40.2), otherwise, under `client_address: forwarded` over HTTP/1.1, a client's
+  `X-Forwarded-Proto` that is one of the two words in any letter case, with spaces or tabs around it, and otherwise the
+  connection's; over HTTP/2 nginx writes the connection's, where the Envoy output writes the client's `:scheme` when it
+  is `http` or `https`. Its host is the one the Envoy output's holds: the route's service's `host_header` when it writes
+  one, and otherwise the host the request names. Beside them the module sets fields of its own, which no line removes:
+  `http.method`, `http.target`, `http.route`, `http.scheme`, `http.flavor`, `http.user_agent`, `http.status_code`,
+  `http.request_content_length`, `http.response_content_length`, `net.host.name`, `net.host.port`, `net.sock.peer.addr`
+  and `net.sock.peer.port`.
   `http.route` holds the name of the location nginx generated for the route, such as `@pf_r_1`, not the route's name,
   which the span's name holds, and `net.host.name` the server's name, or, on the server that answers a host no
   environment names, the `Host` the client sent, which that span's `http.url` holds too. None of them carries a header
@@ -1804,9 +1825,11 @@ in these words:
   escaped or rewrote, cut to 256 characters, or a client's x-envoy-original-path.
 
 Tracing adds no entry to [the list of ways nginx is less strict than the Envoy
-output](#where-nginx-is-less-strict-than-the-envoy-output), which has 15 entries: each difference above was measured and
-is declared on its key's row, none sends the collector, the service or the check a header or a token the Envoy output
-does not send, and no request waits for the collector ([What tracing costs](#what-tracing-costs)).
+output](#where-nginx-is-less-strict-than-the-envoy-output): each difference above was measured and is declared on its
+key's row, none sends the collector, the service or the check a header or a token the Envoy output does not send, and
+no request waits for the collector ([What tracing costs](#what-tracing-costs)). A tab before or after a header value,
+such as a client's `x-request-id` under `forwarded` or a `User-Agent`, reaches the service with tracing as without it,
+one of the entries of that list.
 
 ### What nginx refuses of tracing
 
@@ -1869,9 +1892,11 @@ The figures below were measured on one Mac running Docker with 12 CPUs, so nginx
 other container above 3% of one CPU. Each is the median of five runs with their range in brackets, unless it names
 another number of runs, for nginx 1.30.6 and
 1.31.8 on their images tagged `-otel` beside the Envoy output on Envoy 1.40.2, all rendered from one file with
-`sample.rate` at 100%, so each request makes a span, with two tags, and a route with the auth check beside one without;
-the proxies started afresh for each run, and a client on the same Docker network sent the requests. One proxy is said to
-answer sooner, hold less or lose fewer spans than another only where their ranges do not overlap.
+`sample.rate` at 100%, so each request makes a span, with two tags, one of an environment variable and one of a header,
+and a route with the auth check beside one without; the proxies started afresh for each run, and a client on the same
+Docker network sent the requests. One proxy is said to answer sooner, hold less or lose fewer spans than another only
+where their ranges do not overlap. The answer times, the memory at rest and the collector's states were measured before
+this version changed how an `env` tag's variable is read, and the memory under load with it.
 
 With a collector that answers each call at once, every request was answered `200` and every span reached the collector
 in each run: 201 requests one at a time, 201 one at a time through the check, then 1,000 a second for 30 s, of which
@@ -1895,29 +1920,40 @@ without it the ranges just overlap, and they overlap through the check and at 1,
 
 Tracing costs nginx memory under load, which it keeps. Over 300 s of 1,000 requests a second to the route with no check,
 each proxy started afresh with nothing sent to it before, the memory Docker counted, in MiB, was as follows, one run of
-each: nginx 1.31.8 with the collector asked by its address, nginx 1.30.6 through the relay with the collector found by
-name, a run of 900 s, and the file without `tracing` and the Envoy output, taken before with the same file and client.
-nginx 1.31.8 through the relay and 1.30.6 asking the address were not run for 300 s.
+each: nginx 1.31.8 and 1.30.6 with the collector asked by its address, and the file without `tracing` and the Envoy
+output, taken before with the same file and client. Both runs of nginx with tracing started with no other container
+above 3% of one CPU; another project's test containers used about one and a half CPUs at the end of 1.31.8's, and none
+was above 3% at the end of 1.30.6's. Neither version was run for 300 s through the relay, with the collector found by
+name, with this version's script.
 
 | | At rest | 15 s | 60 s | 120 s | 180 s | 240 s | 300 s | 120 s after the load |
 |---|---|---|---|---|---|---|---|---|
-| nginx 1.31.8, by address | 58.2 | 486.6 | 510.7 | 518.5 | 525.2 | 525.6 | 525.1 | 524.2 |
-| nginx 1.30.6, through the relay, 900 s | 58.3 | 301.9 | 308.4 | 311.7 | 325.6 | 326.3 | 324.0 | 325.4 |
+| nginx 1.31.8, by address | 58.1 | 208.2 | 216.5 | 219.7 | 222.1 | 223.0 | 222.7 | 223.0 |
+| nginx 1.30.6, by address | 58.4 | 141.9 | 147.9 | 160.4 | 171.9 | 175.1 | 175.7 | 175.6 |
 | nginx 1.31.8 without `tracing` | 51.3 | 55.3 | 55.1 | 56.6 | 56.7 | 57.9 | 57.6 | 55.8 |
 | nginx 1.30.6 without `tracing` | 51.8 | 56.0 | 56.4 | 56.9 | 57.6 | 57.9 | 58.3 | 57.2 |
 | Envoy output, by address | 22.9 | 25.3 | 25.0 | 25.1 | 24.9 | 24.6 | 25.3 | 25.3 |
 
-nginx 1.31.8 came within 1 MiB of its highest at 180 s, and 1.30.6 at 165 s, where it stayed between 323.9 and 329.0 MiB
-to the end of its 900 s; neither gave more than 1 MiB of it back in the 120 s after the load. The module keeps at most
-four batches of 512 spans in each worker, its defaults, which the file keeps, and keeps each span's strings when a batch
-is sent, to fill them again: memory rises until each worker's 2,048 spans have held their longest values, 24,576 spans
-for the 12 workers here, and stays there. So the cost grows with the number of workers, one a CPU (`worker_processes
-auto`): at the end of the load each worker held 40.0 to 49.7 MiB of its own on 1.31.8 and 25.1 to 33.6 MiB on 1.30.6,
-against 8.4 MiB at rest. More than half of it comes with the work `proxyfile.js` does for the tags of each request, as
-the spans fill: through the relay, 30 s into the load, the file held 305.7 and 365.1 MiB on 1.30.6 and 333.2 and 334.8
-MiB on 1.31.8, where a copy of its script whose tag function returns before it reads anything held 154.6 and 170.2 MiB
-on 1.30.6, two runs each. A file with the module and one proxied location alone levelled at 57.2 MiB on 1.30.6 and 57.1
-MiB on 1.31.8 (one run each).
+nginx 1.31.8 came within 1 MiB of its highest at 150 s and 1.30.6 at 240 s, and neither gave more than 1 MiB of it back
+in the 120 s after the load. The module keeps at most four batches of 512 spans in each worker, its defaults, which the
+file keeps, and keeps each span's strings when a batch is sent, to fill them again: memory rises until each worker's
+2,048 spans have held their longest values, 24,576 spans for the 12 workers here, and stays there. So the cost grows
+with the number of workers, one a CPU (`worker_processes auto`): at the end of the load each worker held 19.9 to 22.4
+MiB of its own on 1.31.8 and 15.9 to 20.7 MiB on 1.30.6, against 8.4 MiB at rest.
+How `proxyfile.js` reads the tags of each request changes it. On nginx 1.31.8 asked by address, the script of proxyfile
+2.2.0, which asked `process.env` with `hasOwnProperty` before it read an `env` tag's variable, held 523.5 MiB at 300 s
+(520.9 to 524.5, three runs), each worker 38.7 to 49.8 MiB; the same script asking `process.env` once for each traced
+request, with no other change, held 219.7 MiB, and with the tags read as before the script read their sources in one
+pass, each source on its own and the values joined in one text, 266.3 MiB (one run each). Another container was above
+3% of one CPU at the start of the 219.7 MiB run, and another project's test containers at the end of one of the three
+runs and of both of these, up to about two CPUs. The three scripts send the same spans, so the module's batches are not
+the one cause of what a worker holds: why the call with `hasOwnProperty` left memory held in each worker, outside the
+script's own heap, was not found, and how much of what a worker holds now comes with the script's work for the tags and
+how much with the module's spans was not measured. This version asks `process.env` once for each traced request and
+takes the variable only when it is a string, which no name every object inherits gives. On nginx 1.30.6 the script of
+2.2.0 was measured under load only through the relay, in one run of 900 s, so how much this version saves there was not
+measured. A file with the module and one proxied location alone levelled at 57.2 MiB on 1.30.6 and 57.1 MiB on 1.31.8
+(one run each).
 
 With the collector in each of five states, 201 requests one at a time and then 5,001 at 500 a second over 16 connections
 were sent to each proxy, each proxy started with the collector already in that state: up; an address nothing answers on;
@@ -2054,7 +2090,9 @@ otherwise.
   `400` and the connection closed**, where Envoy serves it with the host the line names. One of another scheme than
   `http` or `https`, in any letter case, such as `ftp://`, `ws://`, `h2c://`, `httpx://` or `x-y+z.1://`, is answered
   `400`, as by Envoy, and reaches no service, over 33 forms measured. Any other absolute request line routes by the host
-  it names, as Envoy's does, however many spaces come before it; one whose host a query or a fragment follows directly,
+  it names, as Envoy's does, however many spaces come before it, but an `https` one sent over plain HTTP under
+  `client_address: connection`, which the Envoy output answers `403`
+  ([the list](#where-nginx-is-less-strict-than-the-envoy-output)); one whose host a query or a fragment follows directly,
   `GET http://localhost?x=1`, is answered `400` and the connection closed, where Envoy answers `404` and keeps it. A tab
   between the method and the target is answered `400` and the connection closed, where Envoy serves the request.
 - **A `Host` header sent twice is answered `400`**, where Envoy answers `404`; over HTTP/2, a `host` header that differs
@@ -2070,10 +2108,13 @@ otherwise.
   `if-range` is answered `400` by nginx with its own page, where Envoy joins the lines with a comma and serves the
   request. `cookie`, `range`, `x-real-ip`, `accept-language`, `date` and a header of a name of your own reach the
   service alike through both.
-- **Over HTTP/1.1 a tab before or after a header value reaches the service with the value**, where Envoy removes it, the
-  same message written another way: RFC 9110 does not count the white space around a field value as part of the value.
-  A header `X-A` with the value `v` and a tab on each side reached the service as `x-a: v` through Envoy and with its two
-  tabs through nginx 1.30.6 and 1.31.8, which removes the spaces around a value.
+- **Over HTTP/1.1 a tab before or after a header value reaches the service with the value**, where Envoy removes it. A
+  header `X-A` with the value `v` and a tab on each side reached the service as `x-a: v` through Envoy and with its two
+  tabs through nginx 1.30.6 and 1.31.8, which removes the spaces around a value; a `User-Agent`, and a client's
+  `x-request-id` under `client_address: forwarded`, sent with a tab before the value or after it, reached the service
+  with that tab too. RFC 9110 does not count the white space around a field value as part of the value, so a service
+  that reads the value as it says reads the same value through both, but one that reads the bytes reads the tab: [the
+  list of ways nginx is less strict](#where-nginx-is-less-strict-than-the-envoy-output) names it.
 - **`TRACE` and `CONNECT` are answered `405`, and `OPTIONS *` `400` with the connection closed**, where Envoy passes
   `TRACE` to the service and answers the other two `404`.
 - **A `Connection` header naming a header other than `close`, `keep-alive`, `upgrade`, `http2-settings` and `te` is
@@ -2089,8 +2130,8 @@ otherwise.
   closes the connection: the bytes 0x01 to 0x08, 0x0B, 0x0C, 0x0E to 0x1F and 0x7F. Over HTTP/1.1 both answer `400` to
   each of those bytes. nginx alone passes such a value to the service, so `proxyfile.js` refuses it. nginx refuses
   0x00 itself, as Envoy does, and a carriage return, which Envoy serves over HTTP/1.1 with the carriage return dropped
-  (the service receives `x-a: bc` for `x-a: b`, CR, `c`); over HTTP/1.1 a line feed ends the header line. A tab, a byte
-  above 0x7F and UTF-8 reach the service as through Envoy.
+  (the service receives `x-a: bc` for `x-a: b`, CR, `c`); over HTTP/1.1 a line feed ends the header line. A tab inside
+  the value, a byte above 0x7F and UTF-8 reach the service as through Envoy.
 - **A request trailer whose name holds a character outside RFC 9110's token characters, such as `x@at`, or whose value
   holds a control byte, is let through over HTTP/1.1**: nginx serves the request, and the service receives its body and
   no trailer, where Envoy answers `400`. The bytes are 0x00 to 0x08, 0x0B, 0x0C, 0x0E to 0x1F and 0x7F; nginx answers a
@@ -2129,14 +2170,18 @@ ends, sends a service or a client what the Envoy output would not, or leaves out
 - **a header line with no colon reaches the service as a header with an empty value**: A request holding the line `nocolon`, with no colon, is served over HTTP/1.1, and the service receives `nocolon: `, where Envoy answers `400`. nginx stores such a line as a header with an empty value, as it stores `nocolon:`, which Envoy serves too, so neither `nginx.conf` nor `proxyfile.js` can tell the two apart.
 - **a request with no body reaches the service without content-length: 0**: A `POST` with no body reaches the service with no `Content-Length`, over HTTP/1.1 and HTTP/2, where Envoy adds `content-length: 0`.
 - **a Referer the Envoy output removes reaches the service**: Of 104 forms of one Referer line, Envoy removed 46 before the service, such as `a:b`, `/a#f`, `a b`, `/é`, `{`, `http://u@a/`, `http://a/#f`, `http://a:65536/`, `http://a_b/`, `http://[1:2:3]/` and `about:blank`, and nginx passed every one on. The Envoy output removes a Referer that its URL parser reads as a URL with a fragment or user information, or that the parser does not read and that holds a byte outside RFC 3986's query and fragment characters or a colon before its first slash. A rule written from the published grammar of that parser, nodejs's http_parser, answered forms of the 104 otherwise than Envoy: in its strict build it removed `h2://a/` and `x-y://a/`, whose scheme Envoy reads with a digit or a `-` in it, and in its lenient build it also kept `http://a_b/` and `http://a/é`. nginx answers two Referer lines `400`, as the request line's row says.
+- **over HTTP/1.1, a tab before or after a header value reaches the service**: A header value sent over HTTP/1.1 with a tab right after its colon or at its end reaches the service with the tab, where Envoy removes it: the service receives `User-Agent` as a tab and `probe/3`, or as `probe/4` and a tab, and `X-A` as a tab and `b5`, where through Envoy it receives `user-agent: probe/3`, `user-agent: probe/4` and `x-a: b5`, under `client_address: forwarded` and under `connection`. Under `forwarded` a client's `X-Request-Id` sent as a tab and `abc-1`, or as `abc-2` and a tab, reaches the service with the tab too, and nginx's answer gives it back to the client with the tab, where Envoy sends `abc-1` and `abc-2` to both; under `connection` each proxy sends an id of its own in its place. A service that reads the value as RFC 9110 says, without the white space around it, reads the same value through both.
 - **a WebSocket upgrade a service answers without switching passes the service's body**: A WebSocket upgrade a service answers `200` without switching reaches the client with the service's body, where Envoy passes the status and headers with no body.
 - **a service's answer with a malformed header line or a malformed status line reaches the client**: A service's answer holding a header line with no colon reaches the client with it as a header with an empty value (`nocolon: `), and one whose header name holds `@` (`x@bad: 1`) or whose header value holds the byte 0x01 reaches the client with that header as the service wrote it, where Envoy answers `502` and writes an upstream-failure line with the flag `UPE`, which nginx does not write. A malformed status line reaches the client too. A status of three digits that starts with 0, `050`, `000` or `099`, reaches it as that status over HTTP/1.1 and HTTP/2, with the headers nginx writes. A status with spaces between its digits, `HTTP/1.1 2 0 0 X`, reaches an HTTP/2 client as `200` and an HTTP/1.1 client with the status line `HTTP/1.1 0 0 X`, and one with a fraction, `HTTP/1.1 403.1 X`, reaches an HTTP/2 client as `403` and an HTTP/1.1 client as the service wrote it: nginx reads three digits with spaces among them, and takes a `.` after them. A status of one or two digits, such as `5`, `20` or `99`, one of four digits, `HTTP/1.1 2000 OK`, and an answer with no status line at all, such as `hello` and a line end, reach an HTTP/1.1 client byte for byte as the service wrote them, with none of the headers nginx writes, such as `x-request-id` and `Vary`, and an HTTP/2 client as the body of an answer with the status `000`: nginx reads such an answer as one with no head and passes it whole. Envoy answers each of these `502` and writes an upstream-failure line with the flag `UPE`, but the status of four digits, which it passes as `2000` with its own headers; nginx writes no upstream-failure line for any of them, and has no setting that refuses them. nginx stores a line with no colon as it stores `nocolon:`, which Envoy passes too, so `proxyfile.js` cannot tell the two apart.
 - **over HTTP/2, empty frames in a row are served**: An HTTP/2 request whose HEADERS frame is followed by two empty CONTINUATION frames, or whose body comes after two empty DATA frames, is served, where Envoy takes one frame with no payload in a row and closes the connection at the second: nginx sets no such limit, and neither `nginx.conf` nor `proxyfile.js` sees a frame.
+- **the admin listener serves an absolute target of http or https as the path it names**: `GET http://localhost/ready HTTP/1.1` sent to the admin listener is answered `200` with `LIVE`, and so is the same target with `https://` or `HTTP://`, and `http://localhost/stats` and `http://localhost/server_info` are answered `200` with nginx's counters and its version, where the Envoy output's admin listener answers `404` with no body to every absolute target. A path the admin listener does not answer, `http://localhost/nothing`, is answered `404` by both, and a target of another scheme, `ftp://localhost/ready` or `ws://localhost/ready`, `400` with the body `Bad Request` and the connection closed, where the Envoy output answers `404`.
+- **under connection, an absolute https target sent over plain HTTP is served**: With `client_address: connection` and no `tls`, an absolute `https` target sent over plain HTTP, such as `GET https://localhost/products/1 HTTP/1.1`, or the same with `HTTPS://`, is served: the service receives `X-Forwarded-Proto: http`, and with `auth.send_request: true` the check is told `x-forwarded-proto: http`, the connection's scheme, where the Envoy output answers `403` with the body `Forbidden`, writes `http1.https_url_on_plaintext_connection` in its request log, closes the connection and asks no check. Under `forwarded` both serve it, and the service receives `x-forwarded-proto: http` through both.
 - **without timeouts.request, an answer that keeps arriving runs past 15 s**: Without `timeouts.request`, an answer that keeps coming runs past the 15 s at which the Envoy output ends a request: nginx counts its limits between two reads or writes.
 - **without timeouts.request, a request body its service does not read, or reads slowly, runs past 15 s**: On a route with no retries, and for a request a retried route sends on as it arrives, nginx sends the body with its send time, which counts between two writes and is 5 minutes without `timeouts.idle`. A `PUT` of 1 MiB to a service that takes the connection and does not read it, or reads one byte every 20 s, is answered `504` after 300.1 s (300.0 to 300.2 in three runs), where the Envoy output answers `504` after 15.0 s; a `PUT` of 2 MiB or of 64 MiB, or of 2 MiB in chunks, gets nginx's `504` after 300.1 s too, where the Envoy output answers `408` after 300.0 s (on a retried route, in one of three runs, `504` after 15.0 s). Tried: a send time of the read time, 15 s, in each location that streams a body. It answered every one of those `PUT`s `504` after 15.1 s (15.0 to 15.1), those the Envoy output answers `408` after 300 s among them, to the service that reads one byte every 20 s too, so it is not written; a client that stopped its body for 20 s was served by all three with it and without it. Not written either: reading a body of at most 1 MiB whole before sending it, on every route as a retried route does. That answers such a `PUT` as the Envoy output does, `504` after 15.0 s, as the retried route's location answered it, but a route with no retries would then hold each such body in memory, and its service would get nothing of an upload until all of it had arrived. A service that reads a body slowly but takes a write within the send time each time is sent all of it, on every route, and the send time does not end its try; a retried route's location sends the body it read whole with the route's read time as its send time. A `PUT` of 1 MiB to a service that reads 65,536 bytes every 1.5 s, in three runs of each, is answered `504` after 27.0 s by nginx 1.30.6 and 27.1 s by 1.31.8 on a retried route (27.0 to 27.1) and after 18.1 s by both on a route with no retries (18.1 in every run), where the Envoy output answers `504` after 15.0 s on both (15.0 in every run). The retried route's send time of 15 s did not end it, and no setting ends such a try at the route's time, as none ends an answer that keeps arriving: nginx has no time for a whole try.
 - **with allow, a check service that does not close its connection right after its answer leaves requests unchecked past about 470 checks a second**: When the check service does not close its connection right after its answer (measured: 20 ms or more after it, or not at all), nginx closes it first, so each check holds one of nginx's local ports in `TIME_WAIT` for 60 s: with the 28,232 local ports of 32768 to 60999 that is about 470 checks a second to one check address, past which nginx cannot open a connection to the check, and with `allow` the request is then served with the unchecked mark, where the Envoy output keeps its connections to the check open and goes on asking. `proxy_half_close on` does not change which side closes first.
 - **with allow, a worker with none of its 8192 connections left serves requests unchecked**: Each checked request in flight holds four of a worker's connections, and every other connection of the worker, a client's or a service's, counts against the same 8192 (`worker_connections`). A worker with none left cannot ask the check, and with `allow` the request is then served with the unchecked mark, where the Envoy output's check has its own 1,024 connections whatever else the proxy carries. With 1024 connections a worker, 231 and 234 of 800 requests sent at once to 2 workers were served unasked (nginx 1.30.6 and 1.31.8), where the Envoy output served none; with 8192, none were, up to 4,000 at once with nothing else open.
 - **a request whose client closes its connection during the check can still reach the service**: When a client closes its connection while its check is asked, with a close, a reset or a half-close, and the check then allows the request, nginx can still send the request to the service, where the Envoy output ends the request when its client goes and sends the service nothing. Of 30 clients, one after another, that each sent a request and closed 50 ms into a check that allowed it after 300 ms, the service received 16 to 21 `GET` requests and 17 to 29 `POST` requests with their bodies, 12 and 17 after a reset and 17 and 23 after a half-close, once nginx had served other requests to it and so held idle connections to it; from a just-started nginx it received none, and through the Envoy output none in any round. `proxy_ignore_client_abort` is off, nginx's default.
+- **under forwarded, an x-forwarded-proto that is neither http nor https is told to the check as it arrived**: With `client_address: forwarded` and `auth.send_request: true`, a request sent over plain HTTP with `X-Forwarded-Proto: ftp`, such as `GET /products/1 HTTP/1.1`, is told `x-forwarded-proto: ftp` in the request to the check, where the Envoy output tells the check `http`, the connection's scheme. Both send the service `X-Forwarded-Proto: ftp`. nginx tells the check the header's value as it arrived, whatever it holds, so a check that builds a URL from the scheme it is told reads the word of the client, or of the proxy in front. Under `connection` both tell the check and the service the connection's scheme.
 - **a retried request or call is sent again at once and with no limit on retries at the same time**: A call whose first connection was refused is sent to the next backend at once, where the Envoy output waits 25 ms, and every such call is retried, where the Envoy output retries at most 3 at the same time and fails the others. A request of a retried route is retried at once and with no limit too: at 1,000 requests a second for 60 s, each first try refused, nginx served every one of the 60,000 or 60,001 requests on a second try in each of ten runs, where the Envoy output served 13,452 to 13,765 and answered the others 502, and nginx's 99th percentile was 0.49 ms on 1.30.6 and 0.45 ms on 1.31.8, where the Envoy output's was 24.4 ms (the medians of four and five runs on mains power; measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2).
 - **a chunked answer its service cuts short writes no upstream-failure line**: A service that closes its connection after the first chunk of a chunked `200` answer reaches the client as it does through the Envoy output, which then writes the request line with the flag `UPE`, whatever `log` says, and a `gateway_upstream_failure` line; nginx writes no upstream-failure line, and the request line only when `log` takes the request by its status or its share: nginx records the answer as complete, and with no content-length there is no length to compare the bytes it received to. An answer cut short before its content-length is logged as the Envoy output logs it.
 <!-- /keys -->

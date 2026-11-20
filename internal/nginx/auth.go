@@ -132,11 +132,20 @@ func checkLines(in generator.Input, v *values, e edge) (http, stream []string) {
 		// case, over the connection's or the client's X-Forwarded-Proto (measured on Envoy 1.40.2). Inside the
 		// subrequest $request_uri and $request are the client's and $pf_path keeps the value the route choice read; the
 		// query comes from $request_uri, as $args is the subrequest's.
+		// With connection the client that writes the target is not trusted for its scheme, so the check is told the
+		// connection's, the one the service is sent, as docs/auth.md says: the target's would tell it https for an
+		// https target sent over plain HTTP, which nginx serves and the Envoy output answers 403 (measured on nginx
+		// 1.30.6 and 1.31.8 beside Envoy 1.40.2). Over TLS an http target is then told https, where the Envoy output
+		// tells http, as an HTTP/2 :scheme is (the auth.send_request row).
+		toldProto := `  map $request $pf_told_proto { ` + quoted(`~*^[^ ]+ +https://`) + ` https; ` + quoted(`~*^[^ ]+ +http://`) +
+			` http; default $pf_forwarded_proto; }`
+		if e.connection {
+			toldProto = `  map "" $pf_told_proto { default $pf_forwarded_proto; }`
+		}
 		http = append(http,
 			`  map $request_uri $pf_query { `+regexKey(`^[^?]*(?<pf_query_text>\?.*)`)+` $pf_query_text; default ""; }`,
 			"  map $pf_mode $pf_told_uri { uri $pf_path$pf_query; default $request_uri; }",
-			`  map $request $pf_told_proto { `+quoted(`~*^[^ ]+ +https://`)+` https; `+quoted(`~*^[^ ]+ +http://`)+
-				` http; default $pf_forwarded_proto; }`,
+			toldProto,
 		)
 	}
 	service := in.Gateway.Service(a.Service.Value)

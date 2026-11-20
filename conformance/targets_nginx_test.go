@@ -15,8 +15,8 @@ import (
 // a route limited by client; then its two files with the auth check, one asked under deny at two check addresses and
 // one under allow beside the other keys the generator writes and a limited route; then examples/full, whose committed
 // nginx.refused is checked by its render alone, and examples/portable, the full example's world with only the keys
-// every generator is to render alike, which Envoy's entry runs too; and last the file of the connection limit
-// (limitsFile).
+// every generator is to render alike, which Envoy's entry runs too; then the file of the connection limit
+// (limitsFile); and last the file with client_address connection and no tls (connectionFile).
 // After them comes an entry for each image scripts/nginx-otel-images pins, the same versions tagged -otel, which carry
 // ngx_otel_module. Each runs the battery's two files with tracing alone, the collector by address and by name: nginx -t
 // on a plain image stops at the files' load_module line for that module, and the plain entries run every other file.
@@ -54,6 +54,7 @@ func nginxEntries(t testing.TB) []target {
 			{label: "full", proxyfile: "../examples/full/hocon/Proxyfile"},
 			{label: "portable", proxyfile: "../examples/portable/hocon/Proxyfile"},
 			limitsFile,
+			connectionFile,
 		}))
 	}
 	for _, p := range pinnedImages(t, "nginx-otel") {

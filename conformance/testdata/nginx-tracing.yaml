@@ -2,8 +2,10 @@
 # route's limit, with no tls and no client_address key, so the clients speak plain HTTP, forwarded applies as the
 # default and a row's own x-request-id reaches the draw that picks the requests traced, and with tracing to the
 # collector at 10.0.3.40 at a rate of 5%, with a tag of each source the generator writes: an environment variable with
-# a default, the request id, a header with a default and one without, a header whose lines Envoy joins, the check's
-# first accept name, a default holding $, " and \, and a tag named like a field of the Envoy output's span. Only the nginx images tagged -otel load the
+# a default, unset, and one set, the request id, a header with a default and one without, a header whose lines Envoy
+# joins, the check's first accept name, a default holding $, " and \, and a tag named like a field of the Envoy output's
+# span; and two tags of variables named like a property every object has, one unset and one set (the battery sets
+# APP_REGION and toString, proxyEnvironment in world_test.go). Only the nginx images tagged -otel load the
 # tracing module, so only their entries run it, beside Envoy's, which measures its literals. A tracing row sends none
 # of its requests to the catalog route, whose bucket the rate limit rows count on.
 listen: 10000
@@ -217,4 +219,6 @@ tracing:
     component: {header: x-component}
     accepts: {header: accept}
     inherited: {env: constructor, default: own}
+    region: {env: APP_REGION, default: nowhere}
+    inherited_set: {env: toString, default: own}
   path_in_url: true
