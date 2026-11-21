@@ -28,9 +28,11 @@ counts the ways that output is less strict than the Envoy output, serving a requ
 or sending a service what the Envoy output would not, and names the page that lists them, with its exit code
 unchanged:
 
+<!-- keys: render warning: haproxy -->
 ```
-proxyfile render: this HAProxy configuration is less strict than the Envoy output in 11 ways; docs/haproxy.md lists them under "Where HAProxy is less strict than the Envoy output"
+proxyfile render: this HAProxy configuration is less strict than the Envoy output in 12 ways; docs/haproxy.md lists them under "Where HAProxy is less strict than the Envoy output"
 ```
+<!-- /keys -->
 
 nginx's line names [`docs/nginx.md`](nginx.md#where-nginx-is-less-strict-than-the-envoy-output), HAProxy's
 [`docs/haproxy.md`](haproxy.md#where-haproxy-is-less-strict-than-the-envoy-output). A render for Envoy prints no such

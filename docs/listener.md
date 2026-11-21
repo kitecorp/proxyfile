@@ -27,7 +27,12 @@ removes from every client request. HTTPS on the public listener is [`tls`](tls.m
   `X-Forwarded-Proto` from the connection, and on a request it counts as external replaces the client's `x-request-id`
   and removes the client's own `x-envoy-` headers. It also adds `x-envoy-external-address`, the client's address, to the
   request the service receives, in place of a client's own copy. Measured on Envoy 1.40.2: a client's forged
-  `X-Forwarded-For` does not change its address with `connection`, and does with `forwarded`.
+  `X-Forwarded-For` does not change its address with `connection`, and does with `forwarded`. For a peer on a loopback
+  address Envoy appends its own address to `X-Forwarded-For` in place of the peer's, where the nginx and HAProxy files
+  append the peer's: a client at `127.0.0.1` reached the service with Envoy's address on the gateway's network in
+  `X-Forwarded-For` through the Envoy output and with `127.0.0.1` through the others, and with
+  `x-envoy-external-address: 127.0.0.1` through all three (measured once on Envoy 1.40.2, nginx 1.30.6 and 1.31.8 and
+  HAProxy 3.2.26 and 3.4.7).
 
 When not written, `client_address` is `connection` in a file that writes [`tls`](tls.md), because a gateway that
 terminates TLS usually faces its clients, and `forwarded` otherwise, as in every 2.0 file. A gateway that faces its

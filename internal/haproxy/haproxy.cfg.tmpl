@@ -213,7 +213,8 @@ frontend public
 {{- if .Connection}}
   {{- /* Envoy takes the client for one it faces: it removes what only a proxy in front may send, appends the peer's
   address to the client's own X-Forwarded-For on the same line, or writes it alone when the client sent none or an
-  empty one, and replaces x-envoy-external-address and x-forwarded-proto (measured). */}}
+  empty one, and replaces x-envoy-external-address and x-forwarded-proto (measured). For a peer on a loopback address
+  Envoy appends its own address, which this file does not copy (the client_address note). */}}
 {{- range .Faced}}
   http-request del-header {{.}}
 {{- end}}

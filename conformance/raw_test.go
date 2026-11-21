@@ -25,8 +25,8 @@ import (
 // HEADERS frame of the same fields, each a literal HPACK field with no index and no Huffman coding, then the body as a
 // DATA frame and the trailers as a second HEADERS frame, and reads frames until the stream ends. A closed or reset connection, or a
 // GOAWAY, before the answer is an error, as a client sees a proxy that refused the request so. The connection is the
-// clients' own (TLS with the client certificate, or plain), opened for this request alone. With r.halfClose it closes
-// its side once the request is written (closeWrite).
+// clients' own (TLS with the client certificate, or plain), opened for this request alone, and plain with r.plain. With
+// r.halfClose it closes its side once the request is written (closeWrite).
 func (w *world) sendRaw(r request) result {
 	if r.pause != 0 && (r.proto != "http/1.1" || !r.unframed) {
 		// A pause inside any other body is a mistake in the scenario data, which panics, as send does.
@@ -38,9 +38,18 @@ func (w *world) sendRaw(r request) result {
 	if r.then != "" && (r.proto != "http/1.1" || !r.unframed || r.pause != 0 || r.halfClose) {
 		panic(fmt.Sprintf("the battery sends a second request after an unframed http/1.1 body with no pause or half-close only, not %+v", r))
 	}
+	if r.plain && (r.proto != "http/1.1" || w.plain) {
+		panic(fmt.Sprintf("the battery sends plain HTTP over http/1.1 to a listener with tls only, not %+v", r))
+	}
 	start := time.Now()
 	fail := func(err error) result { return result{err: err, elapsed: time.Since(start)} }
-	conn, err := w.dialRaw(r.proto, serverNameFor(r))
+	var conn net.Conn
+	var err error
+	if r.plain {
+		conn, err = (&net.Dialer{Timeout: 20 * time.Second}).Dial("tcp", w.listener)
+	} else {
+		conn, err = w.dialRaw(r.proto, serverNameFor(r))
+	}
 	if err != nil {
 		return fail(err)
 	}

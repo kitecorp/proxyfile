@@ -58,10 +58,10 @@ var (
 	// limitsFile is the battery's file for the connection limit, which Envoy's entry and each plain nginx entry run; it
 	// runs the rows of that scenario alone, as no other row is there for its limit of two.
 	limitsFile = file{label: "nginx-limits", proxyfile: "testdata/nginx-limits.yaml", scenarios: []string{backendLimits.name}}
-	// connectionFile is the battery's file with client_address connection and no tls, which Envoy's entry and each plain
-	// nginx entry run; it runs the rows of the scheme the check is told alone, as no other row is there for plain HTTP
-	// under connection.
-	connectionFile = file{label: "nginx-connection", proxyfile: "testdata/nginx-connection.yaml", scenarios: []string{toldScheme.name}}
+	// connectionFile is the battery's file with client_address connection and no tls, which Envoy's entry, each plain
+	// nginx entry and each HAProxy entry run; it runs the rows of the scheme the check is told alone, as no other row is
+	// there for plain HTTP under connection.
+	connectionFile = file{label: "connection", proxyfile: "testdata/connection.yaml", scenarios: []string{toldScheme.name}}
 )
 
 // haproxyLimitsFile is the battery's file for HAProxy's connection limit, which Envoy's entry and each HAProxy entry

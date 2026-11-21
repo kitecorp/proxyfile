@@ -357,20 +357,30 @@ func check(g *model.Gateway) data {
 	}
 	service := g.Service(a.Service.Value)
 	port, _ := service.Port(model.HTTP)
+	// Under connection every connection the listener takes is of one scheme, which the check is told in place of the
+	// one the client wrote (filter-ext-authz.yaml); under forwarded it stays empty, and the request's own is told.
+	var connectionScheme string
+	if g.ClientAddress == model.ClientConnection {
+		connectionScheme = "http"
+		if g.TLS != nil {
+			connectionScheme = "https"
+		}
+	}
 	return data{
 		// JoinHostPort writes an IPv6 address in brackets, as a URI needs it. ext_authz never sends the uri, so the first
 		// backend names it whatever the number of backends.
-		"URI":            "http://" + net.JoinHostPort(service.Addresses[0].Value, strconv.FormatInt(port.Number, 10)) + a.Path,
-		"Cluster":        service.Cluster(model.HTTP),
-		"Path":           a.Path,
-		"Timeout":        model.FormatSeconds(a.Timeout.Millis),
-		"TimeoutMillis":  a.Timeout.Millis,
-		"Enabled":        a.Enabled,
-		"Allow":          a.Allow,
-		"OnlyWithHeader": a.OnlyWithHeader,
-		"Send":           a.Send,
-		"Accept":         a.Accept,
-		"SendRequest":    a.SendRequest,
+		"URI":              "http://" + net.JoinHostPort(service.Addresses[0].Value, strconv.FormatInt(port.Number, 10)) + a.Path,
+		"Cluster":          service.Cluster(model.HTTP),
+		"Path":             a.Path,
+		"Timeout":          model.FormatSeconds(a.Timeout.Millis),
+		"TimeoutMillis":    a.Timeout.Millis,
+		"Enabled":          a.Enabled,
+		"Allow":            a.Allow,
+		"OnlyWithHeader":   a.OnlyWithHeader,
+		"Send":             a.Send,
+		"Accept":           a.Accept,
+		"SendRequest":      a.SendRequest,
+		"ConnectionScheme": connectionScheme,
 	}
 }
 

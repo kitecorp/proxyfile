@@ -685,7 +685,7 @@ func TestLessStrictWarning(t *testing.T) {
 	for _, c := range []struct{ target, want string }{
 		{"envoy", ""},
 		{"nginx", `this nginx configuration is less strict than the Envoy output in 19 ways; docs/nginx.md lists them under "Where nginx is less strict than the Envoy output"`},
-		{"haproxy", `this HAProxy configuration is less strict than the Envoy output in 11 ways; docs/haproxy.md lists them under "Where HAProxy is less strict than the Envoy output"`},
+		{"haproxy", `this HAProxy configuration is less strict than the Envoy output in 12 ways; docs/haproxy.md lists them under "Where HAProxy is less strict than the Envoy output"`},
 	} {
 		target, _ := TargetNamed(c.target)
 		if got := LessStrictWarning(target); got != c.want {
@@ -701,6 +701,32 @@ func TestLessStrictList(t *testing.T) {
 	want := "- **one**: `x` served, where Envoy answers `400`.\n- **two**: y.\n"
 	if got := string(LessStrictList(target)); got != want {
 		t.Errorf("LessStrictList = %q, want %q", got, want)
+	}
+}
+
+// A page's list of notes gives each row's note in the declaration's words, escaped as the support table escapes them,
+// then each form the target refuses in the words render prints; rows side by side with the same declaration share one
+// item, and a row written with no key is named by its words. A row the target does not declare partial has no note.
+func TestNoteList(t *testing.T) {
+	const noKey = "a dot segment with a ; parameter answered 400"
+	target := Target{Name: "lean", Title: "Lean", Keys: map[string]Support{
+		"a.b": {Level: Partial, Note: "x_y is *served*"},
+		"a.c": {Level: Partial, Note: "x_y is *served*"},
+		"d": {Level: Partial, Note: "z", Refuses: []Refusal{{Form: "of 2 or more", Instead: "write 1"},
+			{Form: "naming e", Instead: "remove it"}}},
+		noKey: {Level: Partial, Note: "w"},
+		"e":   {Level: Supported},
+	}}
+	want := "- **`a.b` and `a.c`**: x\\_y is \\*served\\*.\n" +
+		"- **`d`**: z. \"d\" of 2 or more is refused by --target lean: write 1. \"d\" naming e is refused by --target lean: remove it.\n" +
+		"- **a dot segment with a ; parameter answered 400**: w.\n"
+	got, err := NoteList(target, []string{"a.b", "a.c", "d", noKey})
+	if string(got) != want || err != nil {
+		t.Errorf("NoteList = %q, %v\nwant %q, nil", got, err, want)
+	}
+	if got, err := NoteList(target, []string{"a.b", "e"}); got != nil || err == nil ||
+		err.Error() != `a list of notes names "e", which lean does not declare partial` {
+		t.Errorf("NoteList with a supported row = %q, %v, want nil and the error naming the row", got, err)
 	}
 }
 
@@ -722,6 +748,7 @@ func TestLessStrictWays(t *testing.T) {
 			{line, "over HTTP/2, two host fields and no :authority are served"},
 			{line, "a WebSocket upgrade a service answers without switching passes the service's body"},
 			{line, "a trailer value holding a control byte is served"},
+			{"admin", "the admin listener serves an absolute target of any scheme as the path it names"},
 			{"timeouts.request", "without timeouts.request, an answer that keeps arriving runs past 15 s"},
 			{"auth.send_request", "under forwarded, an x-forwarded-proto that is neither http nor https is told to the check as it arrived"},
 		}},
@@ -784,14 +811,14 @@ func TestHAProxyWrites(t *testing.T) {
 	}
 	wantWritten := []declared{
 		{key: "listen", level: Supported},
-		{key: "admin", level: Partial, note: "/ready answers 200 while HAProxy runs, not when the server is ready; no other admin path in this version"},
+		{key: "admin", level: Partial, note: "/ready answers 200 while HAProxy runs, not when the server is ready; no other admin path in this version; an absolute target whose host or port is not the Host header's is answered 400, where the Envoy output answers 404"},
 		{key: "tls", level: Partial, note: "of the TLS 1.2 suites both take, HAProxy picks by its own order, where Envoy takes the client's among suites it holds equal: a client that offers OpenSSL's default list is given ECDHE-RSA-AES128-GCM-SHA256, where Envoy gives ECDHE-RSA-CHACHA20-POLY1305"},
 		{key: "tls.certificate", level: Supported},
 		{key: "tls.key", level: Supported},
 		{key: "tls.clients", level: Supported},
 		{key: "tls.clients.ca", level: Partial, note: "a client certificate that is not valid yet is refused with the alert bad_certificate, where Envoy sends certificate_expired"},
 		{key: "client_address", level: Partial,
-			note: "under forwarded, a client's own X-Request-Id longer than 980 bytes, or than 908 bytes less an echoed Origin and cors.expose_headers, is answered 400 before the check and the service, where the Envoy output serves it: HAProxy echoes the id in the 1,024 bytes it keeps for the lines it adds to an answer; over HTTP/2 an X-Forwarded-Proto of spaces alone is answered 404, where the Envoy output serves it"},
+			note: "under forwarded, a client's own X-Request-Id longer than 980 bytes, or than 908 bytes less an echoed Origin and cors.expose_headers, is answered 400 before the check and the service, where the Envoy output serves it: HAProxy echoes the id in the 1,024 bytes it keeps for the lines it adds to an answer; over HTTP/2 an X-Forwarded-Proto of spaces alone is answered 404, where the Envoy output serves it; under connection, a client on a loopback address is appended to X-Forwarded-For as that address, where the Envoy output appends its own address, as Envoy does for every loopback peer (measured with a client at 127.0.0.1 on HAProxy 3.2.26 and 3.4.7 beside Envoy 1.40.2)"},
 		{key: "limits", level: Supported},
 		{key: "limits.connections", level: Partial,
 			note: "HAProxy's own maxconn on the listener and on each server: a connection past it waits in the listen queue, and a request past a server's waits up to 5 s in HAProxy's queue and is then answered 503; the limit to a service counts on each of its addresses"},
@@ -857,7 +884,7 @@ func TestHAProxyWrites(t *testing.T) {
 			refuses: "naming content-length, transfer-encoding, host, te, connection or upgrade in full: HAProxy frames or routes a request by these headers, so the check's answer never sets them; remove the name from auth.accept" + "; " +
 				"holding a * prefix that covers content-length, connection or upgrade: the Envoy output sends the body chunked once Content-Length is removed, and leaves a WebSocket upgrade unanswered once Connection or Upgrade is removed, which HAProxy cannot write; write the other names in full, or a longer prefix, or render it for envoy"},
 		{key: "auth.send_request", level: Partial,
-			note: "over HTTP/2 a request whose :scheme differs from its connection's scheme is told in x-forwarded-proto the connection's under client_address connection, and under forwarded the x-forwarded-proto it arrived with, or the connection's when it arrived with none, where Envoy tells it the :scheme; under client_address forwarded, an x-forwarded-proto that is neither http nor https, such as ftp, is told as it arrived, where Envoy tells the connection's scheme"},
+			note: "under client_address forwarded, over HTTP/2 a request whose :scheme differs from its connection's scheme is told in x-forwarded-proto the x-forwarded-proto it arrived with, or the connection's when it arrived with none, where Envoy tells it the :scheme, and an x-forwarded-proto that is neither http nor https, such as ftp, is told as it arrived, where Envoy tells the connection's scheme"},
 		{key: "remove_from_clients", level: Partial, note: "names and * prefixes that cover none of content-length, connection and upgrade",
 			refuses: "holding content-length, connection or upgrade, in full or under a * prefix: the Envoy output sends the body chunked once Content-Length is removed, and leaves a WebSocket upgrade unanswered once Connection or Upgrade is removed, which HAProxy cannot write; write the other names in full, or a longer prefix, or render it for envoy"},
 		{key: "cors", level: Supported},

@@ -162,6 +162,9 @@ type request struct {
 	// scheme, on a raw h2 request, is the :scheme sent in place of the connection's own, https with tls and http
 	// without, as a client in front may send one that differs from the connection it uses.
 	scheme string
+	// plain, on a raw http/1.1 request to a file with tls, opens the connection with no TLS, as a client does that
+	// writes http:// for the TLS port.
+	plain bool
 	// then, on a raw unframed http/1.1 request, is a second request written on the same connection right after the
 	// body, in the same write, as a client that reuses its connection sends its next request: the answer compared is
 	// the second's, and the first's status is answer.first. A proxy that answers the first without reading its body

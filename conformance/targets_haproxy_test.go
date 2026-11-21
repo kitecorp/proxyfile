@@ -37,8 +37,9 @@ const rateMainRow = "requests and burst are admitted, then the route refuses"
 // addresses that refuses such a request and one of the keys HAProxy writes with its own directives, then
 // examples/full and examples/portable, the files Envoy's entry runs: examples/full's committed haproxy.refused is
 // checked by its render alone, and examples/portable is loaded with no row on it, as its rows assert the Envoy output's
-// answers to keys HAProxy writes with its own features. Last comes HAProxy's file of the connection limit
-// (haproxyLimitsFile). The admin listener answers /ready on 127.0.0.1 only, as Envoy's does.
+// answers to keys HAProxy writes with its own features. Then come HAProxy's file of the connection limit
+// (haproxyLimitsFile) and, last, the file with client_address connection and no tls (connectionFile). The admin
+// listener answers /ready on 127.0.0.1 only, as Envoy's does.
 func haproxyEntries(t testing.TB) []target {
 	haproxy, _ := render.TargetNamed("haproxy")
 	var entries []target
@@ -53,6 +54,7 @@ func haproxyEntries(t testing.TB) []target {
 				{label: "full", proxyfile: "../examples/full/hocon/Proxyfile"},
 				{label: "portable", proxyfile: "../examples/portable/hocon/Proxyfile", scenarios: []string{}},
 				haproxyLimitsFile,
+				connectionFile,
 			},
 			mainRows: haproxyMainRows,
 			image:    p.image,

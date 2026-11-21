@@ -697,8 +697,9 @@ func TestSecurityLines(t *testing.T) {
 		}},
 		{"connection: the address is the peer's", func() string {
 			// The Envoy output with client_address connection makes a new request id, sends the connection's scheme,
-			// appends the peer's address to the client's X-Forwarded-For and sends it as x-envoy-external-address, and
-			// removes five more x-envoy- headers; with X-Forwarded-For removed it sends the peer's address alone.
+			// appends the peer's address to the client's X-Forwarded-For, its own for a peer on a loopback address, which
+			// nginx does not copy, sends the peer's as x-envoy-external-address, and removes five more x-envoy- headers;
+			// with X-Forwarded-For removed it sends the peer's address alone.
 			for _, want := range []struct{ out, line string }{
 				{out, `  map "" $pf_request_id { default $pf_new_request_id; }`},
 				{out, `  map "" $pf_forwarded_proto { default $scheme; }`},

@@ -174,6 +174,44 @@ func LessStrictList(t Target) []byte {
 	return []byte(b.String())
 }
 
+// NoteList writes the notes of t on rows as the Markdown list its page holds: each row's name in bold, a key in code and
+// a row written with no key in its words, then its note, escaped as the support table escapes it, and each form of it
+// t refuses in the words render prints (FormRefusedMessage), which name one key. Rows side by side that refuse no form
+// and share a note share one item. The page reads on its own with these words, and TestDocsAreCurrent keeps them the
+// declaration's, so a note changed there cannot leave the page's copy behind. A row t does not declare partial has no
+// note to give.
+func NoteList(t Target, rows []string) ([]byte, error) {
+	var b strings.Builder
+	for i := 0; i < len(rows); {
+		support := t.Keys[rows[i]]
+		if support.Level != Partial {
+			return nil, fmt.Errorf("a list of notes names %q, which %s does not declare partial", rows[i], t.Name)
+		}
+		end := i + 1
+		for end < len(rows) && support.Refuses == nil {
+			next := t.Keys[rows[end]]
+			if next.Level != support.Level || next.Note != support.Note || next.Refuses != nil {
+				break
+			}
+			end++
+		}
+		names := make([]string, end-i)
+		for j, row := range rows[i:end] {
+			names[j] = "`" + row + "`"
+			if slices.Contains(WrittenWithNoKey, row) {
+				names[j] = escape(row)
+			}
+		}
+		b.WriteString("- **" + strings.Join(names, " and ") + "**: " + escape(support.Note) + ".")
+		for _, refusal := range support.Refuses {
+			b.WriteString(" " + escape(FormRefusedMessage(rows[i], refusal.Form, t.Name, refusal.Instead)) + ".")
+		}
+		b.WriteString("\n")
+		i = end
+	}
+	return []byte(b.String()), nil
+}
+
 // LessStrictHeading is the heading of the section of t's page that lists its less strict ways.
 func LessStrictHeading(t Target) string {
 	return "Where " + t.Title + " is less strict than the Envoy output"
