@@ -242,7 +242,7 @@ static_resources:
                     server_uri: {uri: "http://127.0.0.1:7070/auth/check", cluster: "accounts_http", timeout: 1.5s}
                     path_override: "/auth/check"
                     authorization_request:
-                      headers_to_add: [{key: x-gateway-timeout-ms, value: "1500"}, {key: x-forwarded-uri, value: "%REQ(:PATH)%"}, {key: x-forwarded-method, value: "%REQ(:METHOD)%"}, {key: x-forwarded-proto, value: "%REQ(:SCHEME)%"}, {key: x-forwarded-host, value: "%REQ(:AUTHORITY)%"}]
+                      headers_to_add: [{key: x-gateway-timeout-ms, value: "1500"}, {key: x-forwarded-uri, value: "%REQ(:PATH)%"}, {key: x-forwarded-method, value: "%REQ(:METHOD)%"}, {key: x-forwarded-proto, value: "https"}, {key: x-forwarded-host, value: "%REQ(:AUTHORITY)%"}]
                     authorization_response:
                       allowed_upstream_headers:
                         patterns:

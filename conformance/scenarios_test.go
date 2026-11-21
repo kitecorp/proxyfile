@@ -739,6 +739,15 @@ var mutualTLS = scenario{name: "mutual TLS",
 			send: offered(tlsOffer{groups: []tls.CurveID{tls.CurveP384}}), want: answer{refused: true}},
 		{name: "a client that offers only the group X25519MLKEM768 is served", keys: serverKeys,
 			send: offered(tlsOffer{groups: []tls.CurveID{tls.X25519MLKEM768}}), want: answer{status: 200, service: "shop"}},
+		// measured on Envoy 1.40.2 and HAProxy 3.2.26 and 3.4.7: the connection is closed with no answer, and nginx
+		// 1.30.6 and 1.31.8 answer an empty 400 (tls). The request reaches no service, though it carries a token the
+		// check allows, so under client_address connection a file with tls can tell the check https, the listener's
+		// scheme, written as text (filter-ext-authz.yaml).
+		{name: "plain HTTP sent to the TLS port", keys: serverKeys,
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", raw: true, plain: true,
+				headers: map[string]string{"authorization": "Bearer allow", "x-api-key": "key"}},
+			want: answer{refused: true},
+			by:   map[string]own{"nginx": {difference: "tls", literal: literal{want: answer{status: 400}}}}},
 	}}
 
 // serverKeys are what the rows of a client's TLS offer depend on: a listener that speaks TLS.
@@ -1499,15 +1508,17 @@ var auth = scenario{name: "auth",
 				headers: map[string]string{"authorization": "Bearer allow", "x-api-key": "key"}},
 			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "GET /products/1?i={i} action= reports= country="}}},
 		// What a client could send past the check.
-		// Under client_address connection nginx tells the check the connection's scheme, whatever scheme the target
-		// names, so https over TLS on nginx-auth and portable, where the Envoy output tells the target's.
+		// Under client_address connection the check and the service are told the connection's scheme, whatever scheme
+		// the target names, so https over TLS, and under forwarded, on two-checks, nginx-checks and nginx-tracing, the
+		// check is told the target's http.
 		{name: "an absolute target's host is the host the check is told, whatever the Host header", keys: []string{"auth.ask", "auth.accept"},
 			send: request{proto: "http/1.1", host: "127.0.0.1", line: "GET http://localhost/products/1 HTTP/1.1", raw: true,
 				headers: map[string]string{"authorization": "Bearer report-forwarded", "x-api-key": "key"}},
-			want: answer{status: 200, service: "shop", host: "localhost", received: map[string]string{"x-user-check": "proto=http host=localhost"}},
-			by: map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 400}}},
-				"nginx": {difference: "auth.send_request", files: []string{"nginx-auth", "portable"}, literal: literal{want: answer{status: 200,
-					service: "shop", host: "localhost", received: map[string]string{"x-user-check": "proto=https host=localhost"}}}}}},
+			want: answer{status: 200, service: "shop", host: "localhost", received: map[string]string{"x-user-check": "proto=https host=localhost",
+				"x-forwarded-proto": "https"}},
+			on: onEach([]string{"two-checks", "nginx-checks", "nginx-tracing"}, literal{want: answer{status: 200, service: "shop",
+				host: "localhost", received: map[string]string{"x-user-check": "proto=http host=localhost"}}}),
+			by: map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
 		{name: "a client's own user, question and unchecked mark do not reach the service when the check allows with none of them",
 			keys: []string{"auth.ask", "auth.accept"},
 			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", forgedMark: true,
@@ -1619,15 +1630,16 @@ var auth = scenario{name: "auth",
 				literal: literal{want: answer{status: 200, service: "shop", path: "/products/%22x",
 					received: map[string]string{"x-user-check": `GET /products/"x action= reports= country=`}}},
 				other: &own{difference: "routes[].pattern", files: checkedPatternFiles, literal: literal{want: answer{status: 400}}}}}},
-		// An HTTP/2 :scheme that differs from the connection's, which a client in front may send.
+		// An HTTP/2 :scheme that differs from the connection's, which a client in front may send. Under client_address
+		// connection the check and the service are told the connection's scheme, so https over TLS, and under
+		// forwarded, on two-checks, nginx-checks and nginx-tracing, the check is told the :scheme http.
 		{name: "an HTTP/2 request with :scheme http", keys: []string{"auth.ask", "auth.accept", "auth.send_request"},
 			send: request{proto: "h2", method: "GET", host: "localhost", path: "/products/1", raw: true, scheme: "http",
 				headers: map[string]string{"authorization": "Bearer report-forwarded", "x-api-key": "key"}},
-			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "proto=http host=localhost"}},
-			by: map[string]own{"nginx": {difference: "auth.send_request", files: []string{"nginx-auth", "portable"},
-				literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "proto=https host=localhost"}}}},
-				"haproxy": {difference: "auth.send_request", files: []string{"haproxy-file"},
-					literal: literal{want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "proto=https host=localhost"}}}}}},
+			want: answer{status: 200, service: "shop", received: map[string]string{"x-user-check": "proto=https host=localhost",
+				"x-forwarded-proto": "https"}},
+			on: onEach([]string{"two-checks", "nginx-checks", "nginx-tracing"}, literal{want: answer{status: 200, service: "shop",
+				received: map[string]string{"x-user-check": "proto=http host=localhost"}}})},
 		{name: "an HTTP/2 request with :scheme https", keys: []string{"auth.ask", "auth.accept", "auth.send_request"},
 			send: request{proto: "h2", method: "GET", host: "localhost", path: "/products/1", raw: true, scheme: "https",
 				headers: map[string]string{"authorization": "Bearer report-forwarded", "x-api-key": "key"}},
@@ -1799,17 +1811,22 @@ var refusedUnderAllow = map[string]own{
 
 // toldScheme: measured on Envoy 1.40.2 beside nginx 1.30.6 and 1.31.8 and HAProxy 3.2.26 and 3.4.7. Each row asks the
 // check, which reports the scheme it was told, and the service reports the x-forwarded-proto it received. The rows
-// whose keys hold client_address run on the files with client_address connection and send_request; the others on every
-// file with send_request too, two-checks, nginx-checks and nginx-tracing among them, which write no tls and take
-// forwarded. nginx-connection writes connection and no tls, so it is sent over plain HTTP.
+// whose keys hold client_address run on the files with client_address connection and send_request: full, portable,
+// nginx-auth and haproxy-file, which write tls, and connection.yaml, which writes none, so it is sent over plain HTTP.
+// The others run on every file with send_request, two-checks, nginx-checks and nginx-tracing among them, which write no
+// tls and take forwarded.
 //
-// Under connection a client's own x-forwarded-proto, https or ftp, is replaced by the connection's scheme for the
-// check and the service, by every proxy. An absolute https target over TLS is served and told https, but by HAProxy,
-// which answers every absolute target 400 over HTTP/1.1; over plain HTTP, on nginx-connection, the Envoy output answers
-// it 403 and asks no check, and nginx serves it, a way nginx is less strict that its list names, and tells the check
-// http, the scheme the service is sent. An HTTP/2 request with :scheme https sent over plain HTTP on nginx-connection
-// is told https by the Envoy output, while the service is sent http: it tells the check the :scheme, whatever the
-// connection, where nginx, whose variables hold no :scheme, tells the connection's (auth.send_request).
+// Under connection every proxy tells the check the connection's scheme, the one the service is sent, whatever the
+// client writes: the scheme of an absolute target, in any letter case, an HTTP/2 :scheme, ftp among them, or its own
+// x-forwarded-proto of http, https or ftp. Here each way names https, the scheme other than the connection's on
+// connection.yaml, and x-forwarded-proto names http too, the other scheme over TLS; the auth scenario's rows "an
+// absolute target's host is the host the check is told, whatever the Host header" and "an HTTP/2 request with :scheme
+// http" send the request line and the :scheme naming http over TLS, and want the check and the service told https.
+// HAProxy's public listener answers every absolute target 400 over HTTP/1.1, and over plain HTTP the Envoy output
+// answers an absolute https target 403, HTTPS:// too (its codec's https_url_on_plaintext_connection, which compares the
+// scheme in any letter case); neither asks the check, as the same request with a token the check denies shows, which a
+// proxy that asks the check answers 401. nginx serves that https target, in either letter case, and tells the check
+// http, a way nginx is less strict that its list names.
 //
 // Under forwarded an absolute https target sent with x-forwarded-proto http is told https by the Envoy output and nginx,
 // the target's scheme before the header, while the service is sent the header's http, and an HTTP/2 :scheme https
@@ -1818,50 +1835,82 @@ var refusedUnderAllow = map[string]own{
 // connection's scheme, http, where nginx and HAProxy tell it ftp as written (auth.send_request).
 var toldScheme = scenario{name: "the scheme the check is told",
 	exchanges: []exchange{
-		{name: "an absolute https target", keys: []string{"client_address", "auth.ask", "auth.accept", "auth.send_request"},
+		{name: "an absolute https target", keys: connectionKeys,
 			send: request{proto: "http/1.1", host: "localhost", line: "GET https://localhost/products/1 HTTP/1.1", raw: true,
 				headers: map[string]string{"authorization": "Bearer report-forwarded", "x-api-key": "key"}},
 			want: answer{status: 200, service: "shop", host: "localhost", received: map[string]string{"x-user-check": "proto=https host=localhost"}},
-			on:   map[string]literal{"nginx-connection": {want: answer{status: 403}}},
+			on:   map[string]literal{"connection": {want: answer{status: 403}}},
 			by: map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 400}}},
-				"nginx": {difference: "client_address", files: []string{"nginx-connection"}, literal: literal{want: answer{status: 200,
+				"nginx": {difference: "client_address", files: []string{"connection"}, literal: literal{want: answer{status: 200,
 					service: "shop", host: "localhost", received: map[string]string{"x-user-check": "proto=http host=localhost"}}}}}},
-		{name: "an HTTP/2 request with :scheme https under connection", keys: []string{"client_address", "auth.ask", "auth.accept", "auth.send_request"},
+		{name: "an absolute https target with a token the check denies", keys: connectionKeys,
+			send: request{proto: "http/1.1", host: "localhost", line: "GET https://localhost/products/1 HTTP/1.1", raw: true,
+				headers: map[string]string{"authorization": "Bearer deny-401", "x-api-key": "key"}},
+			want: answer{status: 401},
+			on:   map[string]literal{"connection": {want: answer{status: 403}}},
+			by: map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 400}}},
+				"nginx": {difference: "client_address", files: []string{"connection"}, literal: literal{want: answer{status: 401}}}}},
+		{name: "an absolute http target with a token the check denies", keys: connectionKeys,
+			send: request{proto: "http/1.1", host: "localhost", line: "GET http://localhost/products/1 HTTP/1.1", raw: true,
+				headers: map[string]string{"authorization": "Bearer deny-401", "x-api-key": "key"}},
+			want: answer{status: 401},
+			by:   map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 400}}}}},
+		{name: "an absolute HTTPS target in capitals", keys: connectionKeys,
+			send: request{proto: "http/1.1", host: "localhost", line: "GET HTTPS://localhost/products/1 HTTP/1.1", raw: true,
+				headers: schemeReport("")},
+			want: withHost(toldTo("https", "https")),
+			on:   map[string]literal{"connection": {want: answer{status: 403}}},
+			by: map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 400}}},
+				"nginx": {difference: "client_address", files: []string{"connection"}, literal: literal{want: withHost(toldTo("http", "http"))}}}},
+		{name: "an HTTP/2 request with :scheme https under connection", keys: connectionKeys,
 			send: request{proto: "h2", method: "GET", host: "localhost", path: "/products/1", raw: true, scheme: "https",
 				headers: schemeReport("")},
 			want: toldTo("https", "https"),
-			on:   map[string]literal{"nginx-connection": {want: toldTo("https", "http")}},
-			by: map[string]own{"nginx": {difference: "auth.send_request", files: []string{"nginx-connection"},
-				literal: literal{want: toldTo("http", "http")}}}},
-		{name: "a client's own x-forwarded-proto https under connection", keys: []string{"client_address", "auth.ask", "auth.accept", "auth.send_request"},
+			on:   map[string]literal{"connection": {want: toldTo("http", "http")}}},
+		{name: "an HTTP/2 request with :scheme ftp under connection", keys: connectionKeys,
+			send: request{proto: "h2", method: "GET", host: "localhost", path: "/products/1", raw: true, scheme: "ftp",
+				headers: schemeReport("")},
+			want: toldTo("https", "https"),
+			on:   map[string]literal{"connection": {want: toldTo("http", "http")}}},
+		{name: "a client's own x-forwarded-proto https under connection", keys: connectionKeys,
 			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", headers: schemeReport("https")},
 			want: toldTo("https", "https"),
-			on:   map[string]literal{"nginx-connection": {want: toldTo("http", "http")}}},
+			on:   map[string]literal{"connection": {want: toldTo("http", "http")}}},
+		{name: "a client's own x-forwarded-proto http under connection", keys: connectionKeys,
+			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", headers: schemeReport("http")},
+			want: toldTo("https", "https"),
+			on:   map[string]literal{"connection": {want: toldTo("http", "http")}}},
 		{name: "an absolute https target sent with x-forwarded-proto http", keys: []string{"auth.ask", "auth.accept", "auth.send_request"},
 			send: request{proto: "http/1.1", host: "localhost", line: "GET https://localhost/products/1 HTTP/1.1", raw: true,
 				headers: schemeReport("http")},
 			want: withHost(toldTo("https", "https")),
 			on: map[string]literal{"two-checks": {want: withHost(toldTo("https", "http"))}, "nginx-checks": {want: withHost(toldTo("https", "http"))},
-				"nginx-tracing": {want: withHost(toldTo("https", "http"))}, "nginx-connection": {want: answer{status: 403}}},
+				"nginx-tracing": {want: withHost(toldTo("https", "http"))}, "connection": {want: answer{status: 403}}},
 			by: map[string]own{"haproxy": {difference: lineRow, literal: literal{want: answer{status: 400}}},
-				"nginx": {difference: "client_address", files: []string{"nginx-connection"}, literal: literal{want: withHost(toldTo("http", "http"))}}}},
+				"nginx": {difference: "client_address", files: []string{"connection"}, literal: literal{want: withHost(toldTo("http", "http"))}}}},
 		{name: "an HTTP/2 request with :scheme https sent with x-forwarded-proto http", keys: []string{"auth.ask", "auth.accept", "auth.send_request"},
 			send: request{proto: "h2", method: "GET", host: "localhost", path: "/products/1", raw: true, scheme: "https",
 				headers: schemeReport("http")},
 			want: toldTo("https", "https"),
-			on:   onEach([]string{"two-checks", "nginx-checks", "nginx-tracing", "nginx-connection"}, literal{want: toldTo("https", "http")}),
-			by: map[string]own{"nginx": {difference: "auth.send_request", files: []string{"nginx-checks", "nginx-tracing", "nginx-connection"},
+			on: map[string]literal{"two-checks": {want: toldTo("https", "http")}, "nginx-checks": {want: toldTo("https", "http")},
+				"nginx-tracing": {want: toldTo("https", "http")}, "connection": {want: toldTo("http", "http")}},
+			by: map[string]own{"nginx": {difference: "auth.send_request", files: []string{"nginx-checks", "nginx-tracing"},
 				literal: literal{want: toldTo("http", "http")}},
 				"haproxy": {difference: "auth.send_request", files: []string{"two-checks"}, literal: literal{want: toldTo("http", "http")}}}},
 		{name: "an x-forwarded-proto that is neither http nor https", keys: []string{"auth.ask", "auth.accept", "auth.send_request"},
 			send: request{proto: "http/1.1", method: "GET", host: "localhost", path: "/products/1", headers: schemeReport("ftp")},
 			want: toldTo("https", "https"),
 			on: map[string]literal{"two-checks": {want: toldTo("http", "ftp")}, "nginx-checks": {want: toldTo("http", "ftp")},
-				"nginx-tracing": {want: toldTo("http", "ftp")}, "nginx-connection": {want: toldTo("http", "http")}},
+				"nginx-tracing": {want: toldTo("http", "ftp")}, "connection": {want: toldTo("http", "http")}},
 			by: map[string]own{"nginx": {difference: "auth.send_request", files: []string{"nginx-checks", "nginx-tracing"},
 				literal: literal{want: toldTo("ftp", "ftp")}},
 				"haproxy": {difference: "auth.send_request", files: []string{"two-checks"}, literal: literal{want: toldTo("ftp", "ftp")}}}},
 	}}
+
+// connectionKeys are what the rows of toldScheme under client_address connection depend on: the connection's scheme
+// is the check's word only with that key (client_address), and the check reports it (auth.ask, auth.send_request) in a
+// header its answer echoes to the service (auth.accept).
+var connectionKeys = []string{"client_address", "auth.ask", "auth.accept", "auth.send_request"}
 
 // schemeReport is the headers of a request the check answers with the scheme it was told (report-forwarded), with the
 // client's own x-forwarded-proto when forwardedProto is not empty.

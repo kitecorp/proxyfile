@@ -1550,6 +1550,27 @@ headers_to_add: [{key: x-gateway-timeout-ms, value: "1000"}, {key: x-forwarded-u
   {key: x-forwarded-method, value: "%REQ(:METHOD)%"}, {key: x-forwarded-proto, value: "%REQ(:SCHEME)%"},
   {key: x-forwarded-host, value: "%REQ(:AUTHORITY)%"}]
 `},
+		// Under client_address connection the check is told the scheme of the connection, which the listener's tls
+		// decides, whatever the client writes in the request line, an HTTP/2 :scheme or its own X-Forwarded-Proto
+		// (measured on Envoy 1.40.2, where %REQ(:SCHEME)% told the check an HTTP/2 :scheme https sent over plain HTTP).
+		{name: "send_request under connection without tls, what the check is told", proxyfile: askWithRequest + "client_address: connection\n",
+			at: slices.Concat(manager, []any{"http_filters", 4, "typed_config", "http_service", "authorization_request"}), want: `
+headers_to_add: [{key: x-gateway-timeout-ms, value: "1000"}, {key: x-forwarded-uri, value: "%REQ(:PATH)%"},
+  {key: x-forwarded-method, value: "%REQ(:METHOD)%"}, {key: x-forwarded-proto, value: http},
+  {key: x-forwarded-host, value: "%REQ(:AUTHORITY)%"}]
+`},
+		{name: "send_request under connection with tls, what the check is told", proxyfile: askWithRequest + "tls: {certificate: /c.pem, key: /k.pem}\n",
+			at: slices.Concat(manager, []any{"http_filters", 4, "typed_config", "http_service", "authorization_request"}), want: `
+headers_to_add: [{key: x-gateway-timeout-ms, value: "1000"}, {key: x-forwarded-uri, value: "%REQ(:PATH)%"},
+  {key: x-forwarded-method, value: "%REQ(:METHOD)%"}, {key: x-forwarded-proto, value: https},
+  {key: x-forwarded-host, value: "%REQ(:AUTHORITY)%"}]
+`},
+		{name: "send_request under forwarded with tls, what the check is told", proxyfile: askWithRequest + "tls: {certificate: /c.pem, key: /k.pem}\nclient_address: forwarded\n",
+			at: slices.Concat(manager, []any{"http_filters", 4, "typed_config", "http_service", "authorization_request"}), want: `
+headers_to_add: [{key: x-gateway-timeout-ms, value: "1000"}, {key: x-forwarded-uri, value: "%REQ(:PATH)%"},
+  {key: x-forwarded-method, value: "%REQ(:METHOD)%"}, {key: x-forwarded-proto, value: "%REQ(:SCHEME)%"},
+  {key: x-forwarded-host, value: "%REQ(:AUTHORITY)%"}]
+`},
 		{name: "send_request, the path normalised", proxyfile: askWithRequest, at: slices.Concat(manager, []any{"normalize_path"}), want: "true"},
 		{name: "send_request, the slashes merged", proxyfile: askWithRequest, at: slices.Concat(manager, []any{"merge_slashes"}), want: "true"},
 		{name: "send_request, escaped slashes unescaped", proxyfile: askWithRequest,

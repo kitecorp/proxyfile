@@ -333,7 +333,8 @@ var nginxTarget = Target{Name: "nginx", Title: "nginx", Keys: map[string]Support
 	// s_client's, ECDHE-RSA-AES256-GCM-SHA384 where Envoy chose ECDHE-RSA-CHACHA20-POLY1305, and P-256 for an offer
 	// that names it first, where Envoy chose X25519, or X25519MLKEM768 over TLS 1.3. With client certificates nginx
 	// answers 421 to a request whose Host is another name than its TLS server name, when that name is an environment's
-	// host, even one of the same environment (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2).
+	// host, even one of the same environment (measured on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2). The battery's
+	// row "plain HTTP sent to the TLS port", of mutual TLS, holds the 400.
 	"tls": {Level: Partial,
 		Note: "plain HTTP sent to the TLS port is answered 400, where the Envoy output closes the connection; from the same ciphers and key exchange groups nginx can choose others for the same client"},
 	"tls.certificate": {Level: Partial, Note: "a path without $", Refuses: []Refusal{nginxDollarPath}},
@@ -344,9 +345,12 @@ var nginxTarget = Target{Name: "nginx", Title: "nginx", Keys: map[string]Support
 
 	// The Envoy output answers an X-Forwarded-Proto line with no colon 400, and nginx stores it as an empty value,
 	// which the generator answers 404, as the Envoy output answers an empty one (measured on Envoy 1.40.2 beside nginx
-	// 1.30.6 and 1.31.8).
+	// 1.30.6 and 1.31.8). With connection the file appends $remote_addr whatever it is, where Envoy's connection
+	// manager appends its own local address for a peer on a loopback address (Envoy 1.40.2, conn_manager_utility.cc).
+	// The address the file sends is the client's, and the battery cannot send from a loopback address, so it was
+	// measured once, in a rig whose client ran in the proxy's network namespace.
 	"client_address": {Level: Partial,
-		Note: "with forwarded, an X-Forwarded-Proto line with no colon is answered 404, where the Envoy output answers 400"},
+		Note: "with forwarded, an X-Forwarded-Proto line with no colon is answered 404, where the Envoy output answers 400; with connection, a client on a loopback address is appended to X-Forwarded-For as that address, where the Envoy output appends its own address, as Envoy does for every loopback peer (measured with a client at 127.0.0.1 on nginx 1.30.6 and 1.31.8 beside Envoy 1.40.2)"},
 
 	"limits": {Level: Supported},
 	// nginx's own limit_conn (nginx.org, ngx_http_limit_conn_module): a connection counts only while it has a request in
@@ -489,16 +493,16 @@ var nginxTarget = Target{Name: "nginx", Title: "nginx", Keys: map[string]Support
 	// with no pattern route a path holding such a character is matched on $uri, which holds it decoded, and nginx
 	// escapes it again only as it sends it to the service. nginx's $scheme is the connection's, and no variable holds
 	// an HTTP/2 request's :scheme, so no line can tell the check one that differs (measured on nginx 1.30.6 and 1.31.8
-	// beside Envoy 1.40.2, :scheme http over TLS and https without). Under client_address connection the file tells the
-	// check the connection's scheme over HTTP/1.1 too, whatever scheme an absolute target names, as a client writes the
-	// target: GET http://localhost/products/1 over TLS is told https, where the Envoy output tells http (the battery's
-	// row "an absolute target's host is the host the check is told", on nginx-auth and portable). Under forwarded the
-	// file tells the check the client's X-Forwarded-Proto as it arrived, the word a proxy in front writes, which the
-	// generator does not bound: X-Forwarded-Proto: ftp is told ftp, where the Envoy output tells the connection's
-	// scheme, and both send the service ftp (the battery's row "an x-forwarded-proto that is neither http nor https",
-	// on nginx-checks and nginx-tracing; the list of ways nginx is less strict names it).
+	// beside Envoy 1.40.2, :scheme http over TLS and https without). Under client_address connection the file and the
+	// Envoy output tell the check the connection's scheme, whatever an absolute target, an HTTP/2 :scheme or a
+	// client's X-Forwarded-Proto names (the battery's scenario of the scheme the check is told, on nginx-auth,
+	// portable and connection.yaml). Under forwarded the file tells the check the client's X-Forwarded-Proto as it
+	// arrived, the word a proxy in front writes, which the generator does not bound: X-Forwarded-Proto: ftp is told
+	// ftp, where the Envoy output tells the connection's scheme, and both send the service ftp (the battery's row "an
+	// x-forwarded-proto that is neither http nor https", on nginx-checks and nginx-tracing; the list of ways nginx is
+	// less strict names it).
 	"auth.send_request": {Level: Partial,
-		Note: "in a file with no pattern route, a path holding a character Envoy escapes before it picks a route (\" < > ^ ` { | }) is told in x-forwarded-uri as the client wrote that character, where Envoy tells it escaped; the service receives it escaped from both; over HTTP/2 a request whose :scheme differs from its connection's scheme is told in x-forwarded-proto the connection's under client_address connection, and under forwarded the x-forwarded-proto it arrived with, or the connection's when it arrived with none, where Envoy tells it the :scheme; under client_address connection, so is an absolute target over HTTP/1.1 whose scheme differs from its connection's: an http target sent over TLS is told https, where Envoy tells it http; under client_address forwarded, an x-forwarded-proto that is neither http nor https, such as ftp, is told as it arrived, where Envoy tells the connection's scheme"},
+		Note: "in a file with no pattern route, a path holding a character Envoy escapes before it picks a route (\" < > ^ ` { | }) is told in x-forwarded-uri as the client wrote that character, where Envoy tells it escaped; the service receives it escaped from both; under client_address forwarded, over HTTP/2 a request whose :scheme differs from its connection's scheme is told in x-forwarded-proto the x-forwarded-proto it arrived with, or the connection's when it arrived with none, where Envoy tells it the :scheme, and an x-forwarded-proto that is neither http nor https, such as ftp, is told as it arrived, where Envoy tells the connection's scheme"},
 	"auth.jwt":                      nginxNoJWT,
 	"auth.jwt.issuer":               nginxNoJWT,
 	"auth.jwt.audiences":            nginxNoJWT,
@@ -776,7 +780,8 @@ var nginxLessStrict = []LessStrict{
 		Measured: "`GET http://localhost/ready HTTP/1.1` sent to the admin listener is answered `200` with `LIVE`, and so is the same target with `https://` or `HTTP://`, and `http://localhost/stats` and `http://localhost/server_info` are answered `200` with nginx's counters and its version, where the Envoy output's admin listener answers `404` with no body to every absolute target. A path the admin listener does not answer, `http://localhost/nothing`, is answered `404` by both, and a target of another scheme, `ftp://localhost/ready` or `ws://localhost/ready`, `400` with the body `Bad Request` and the connection closed, where the Envoy output answers `404`."},
 	// Measured with the Envoy output of client_address: connection, which writes use_remote_address: true, and of
 	// forwarded, which writes false; the request checks of the nginx output take an absolute http and https target alike.
-	// The battery's row "an absolute https target", of the scheme the check is told, holds it on nginx-connection.
+	// The battery's rows "an absolute https target" and "an absolute HTTPS target in capitals", of the scheme the check
+	// is told, hold it on connection.yaml.
 	{Row: "client_address", Name: "under connection, an absolute https target sent over plain HTTP is served",
 		Measured: "With `client_address: connection` and no `tls`, an absolute `https` target sent over plain HTTP, such as `GET https://localhost/products/1 HTTP/1.1`, or the same with `HTTPS://`, is served: the service receives `X-Forwarded-Proto: http`, and with `auth.send_request: true` the check is told `x-forwarded-proto: http`, the connection's scheme, where the Envoy output answers `403` with the body `Forbidden`, writes `http1.https_url_on_plaintext_connection` in its request log, closes the connection and asks no check. Under `forwarded` both serve it, and the service receives `x-forwarded-proto: http` through both."},
 	{Row: "timeouts.request", Name: "without timeouts.request, an answer that keeps arriving runs past 15 s",

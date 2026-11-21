@@ -122,7 +122,7 @@ var haproxyTarget = Target{Name: "haproxy", Title: "HAProxy", Keys: map[string]S
 
 	// monitor-uri answers 200 while the process runs, where Envoy's /ready reports the server's state (HAProxy 3.4
 	// configuration manual, monitor-uri).
-	"admin": {Level: Partial, Note: "/ready answers 200 while HAProxy runs, not when the server is ready; no other admin path in this version"},
+	"admin": {Level: Partial, Note: "/ready answers 200 while HAProxy runs, not when the server is ready; no other admin path in this version; an absolute target whose host or port is not the Host header's is answered 400, where the Envoy output answers 404"},
 
 	// The versions, the suites and the key exchange groups are Envoy's (measured on HAProxy 3.2.26 and 3.4.7 beside
 	// Envoy 1.40.2 with openssl s_client, one version, suite and group at a time); OpenSSL has no suites of equal
@@ -139,9 +139,13 @@ var haproxyTarget = Target{Name: "haproxy", Title: "HAProxy", Keys: map[string]S
 	// for the lines it adds, beside an echoed Origin: an id that outgrew them got 500 after the service did the work,
 	// so the file refuses one longer than the room left before the check and the service. HAProxy's HTTP/2 decoder drops
 	// the spaces of a value, so X-Forwarded-Proto of spaces alone reads as empty. Measured on HAProxy 3.2.26 and 3.4.7
-	// beside Envoy 1.40.2 (haproxy.cfg.tmpl, idRoom in generate.go).
+	// beside Envoy 1.40.2 (haproxy.cfg.tmpl, idRoom in generate.go). Under connection the file appends the peer's
+	// address, %[src], whatever it is, where Envoy's connection manager appends its own local address for a peer on a
+	// loopback address (Envoy 1.40.2, conn_manager_utility.cc). The address the file sends is the client's, and the
+	// battery cannot send from a loopback address, so it was measured once, in a rig whose client ran in the proxy's
+	// network namespace.
 	"client_address": {Level: Partial,
-		Note: "under forwarded, a client's own X-Request-Id longer than 980 bytes, or than 908 bytes less an echoed Origin and cors.expose_headers, is answered 400 before the check and the service, where the Envoy output serves it: HAProxy echoes the id in the 1,024 bytes it keeps for the lines it adds to an answer; over HTTP/2 an X-Forwarded-Proto of spaces alone is answered 404, where the Envoy output serves it"},
+		Note: "under forwarded, a client's own X-Request-Id longer than 980 bytes, or than 908 bytes less an echoed Origin and cors.expose_headers, is answered 400 before the check and the service, where the Envoy output serves it: HAProxy echoes the id in the 1,024 bytes it keeps for the lines it adds to an answer; over HTTP/2 an X-Forwarded-Proto of spaces alone is answered 404, where the Envoy output serves it; under connection, a client on a loopback address is appended to X-Forwarded-For as that address, where the Envoy output appends its own address, as Envoy does for every loopback peer (measured with a client at 127.0.0.1 on HAProxy 3.2.26 and 3.4.7 beside Envoy 1.40.2)"},
 
 	"limits": {Level: Supported},
 	// maxconn on a server queues the requests past it, for timeout queue, which takes timeout connect's 5 s when not
@@ -274,13 +278,15 @@ var haproxyTarget = Target{Name: "haproxy", Title: "HAProxy", Keys: map[string]S
 			Instead: "HAProxy frames or routes a request by these headers, so the check's answer never sets them; remove the name from auth.accept",
 			Applies: func(value, _ *tree.Node) bool { whole, _ := coveredBy(value, HAProxyFramedBy); return whole }},
 			haproxyRemovalPrefix}},
-	// The check is told the scheme of the client's connection (measured on HAProxy 3.2.26 and 3.4.7 beside Envoy
-	// 1.40.2, :scheme http over TLS and https without). Under forwarded the script tells it the X-Forwarded-Proto the
-	// request arrived with, which the file keeps as Envoy keeps it for the service: X-Forwarded-Proto: ftp is told ftp,
-	// where the Envoy output tells the connection's scheme (the battery's row "an x-forwarded-proto that is neither http
-	// nor https", on two-checks).
+	// Under connection the file and the Envoy output tell the check the connection's scheme, whatever an HTTP/2
+	// :scheme or a client's X-Forwarded-Proto names (the battery's scenario of the scheme the check is told, on
+	// haproxy-file and connection.yaml). Under forwarded the script tells it the X-Forwarded-Proto the request arrived
+	// with, or the connection's scheme without one, and never the :scheme (measured on HAProxy 3.2.26 and 3.4.7 beside
+	// Envoy 1.40.2), which the file keeps as Envoy keeps it for the service: X-Forwarded-Proto: ftp is told ftp, where
+	// the Envoy output tells the connection's scheme (the battery's row "an x-forwarded-proto that is neither http nor
+	// https", on two-checks).
 	"auth.send_request": {Level: Partial,
-		Note: "over HTTP/2 a request whose :scheme differs from its connection's scheme is told in x-forwarded-proto the connection's under client_address connection, and under forwarded the x-forwarded-proto it arrived with, or the connection's when it arrived with none, where Envoy tells it the :scheme; under client_address forwarded, an x-forwarded-proto that is neither http nor https, such as ftp, is told as it arrived, where Envoy tells the connection's scheme"},
+		Note: "under client_address forwarded, over HTTP/2 a request whose :scheme differs from its connection's scheme is told in x-forwarded-proto the x-forwarded-proto it arrived with, or the connection's when it arrived with none, where Envoy tells it the :scheme, and an x-forwarded-proto that is neither http nor https, such as ftp, is told as it arrived, where Envoy tells the connection's scheme"},
 	"auth.jwt":                      haproxyNoJWT,
 	"auth.jwt.issuer":               haproxyNoJWT,
 	"auth.jwt.audiences":            haproxyNoJWT,
@@ -421,12 +427,16 @@ var haproxyTarget = Target{Name: "haproxy", Title: "HAProxy", Keys: map[string]S
 }, LessStrict: haproxyLessStrict}
 
 // haproxyLessStrict are the ways the HAProxy output is less strict than the Envoy output. HAProxy's parsers decide
-// each but the last before any rule of the file reads the request, and its timeout counts the time without data, so
-// the file can close none of them: the file refuses a control byte in a header value with a rule, but no fetch reads a
-// request trailer, which option http-drop-request-trailers removes before the service. The last is the file's own: it
+// each of the request line's before any rule of the file reads the request, and its timeout counts the time without
+// data, so the file can close none of them: the file refuses a control byte in a header value with a rule, but no fetch
+// reads a request trailer, which option http-drop-request-trailers removes before the service. The admin listener's
+// is HAProxy's monitor-uri, which answers an absolute target by the path it names. The last is the file's own: it
 // keeps the X-Forwarded-Proto a request arrived with under forwarded, as the Envoy output keeps it for the service, and
 // tells the check that header. Each was measured on HAProxy 3.2.26 and 3.4.7 beside Envoy 1.40.2, the two images
-// alike.
+// alike. Two ways nginx's list names were measured on HAProxy too and do not hold, as docs/haproxy.md says: under
+// client_address connection an absolute https target sent over plain HTTP is answered 400 and asks no check (the
+// battery's row "an absolute https target with a token the check denies", on connection.yaml), and a tab at either end
+// of a header value is removed before the service.
 var haproxyLessStrict = []LessStrict{
 	{Row: requestLine, Name: "an HTTP/2 :authority with a default or empty port reaches the service without it",
 		Measured: "Over HTTP/2, `:authority: api.example.com:` and, over plain HTTP, `api.example.com:80` reach the service as `Host: api.example.com`, where the Envoy output sends them as written."},
@@ -446,6 +456,8 @@ var haproxyLessStrict = []LessStrict{
 		Measured: "A WebSocket upgrade a service answers `200` without switching reaches the client with the service's body, where Envoy passes the status and headers with no body."},
 	{Row: requestLine, Name: "a trailer value holding a control byte is served",
 		Measured: "A request trailer value holding one of the bytes 0x01 to 0x08, 0x0B, 0x0C, 0x0E to 0x1F or 0x7F is served, the service receiving the body and no trailer, where Envoy answers `400` over HTTP/1.1 and closes the connection over HTTP/2. A header value holding one is answered `400` over HTTP/1.1, as by Envoy, and its stream is reset over HTTP/2, where Envoy closes the connection; HAProxy refuses 0x00, a line feed and a carriage return in either value, with `400` over HTTP/1.1 and a reset stream over HTTP/2."},
+	{Row: "admin", Name: "the admin listener serves an absolute target of any scheme as the path it names",
+		Measured: "`GET http://localhost/ready HTTP/1.1` with `Host: localhost`, sent to the admin listener, is answered `200` with HAProxy's page `Service ready.`, and so is the same target with `https://`, `HTTP://`, `ftp://` or `ws://`, or with user information, `http://u@localhost/ready`, where the Envoy output's admin listener answers `404` with no body to every absolute target. `http://localhost/nothing` and `http://localhost/ready?x=1` are answered `404` by both, and a target whose host or port is not the Host header's, such as `http://other.example/ready` or `http://localhost:9901/ready`, `400`, where the Envoy output answers `404`."},
 	{Row: "timeouts.request", Name: "without timeouts.request, an answer that keeps arriving runs past 15 s",
 		Measured: "Without `timeouts.request`, a service that keeps sending runs past 15 s, where the Envoy output ends a request 15 s after it starts: HAProxy's `timeout server` counts the time without data (on HAProxy 3.4.7, a service that sent one byte a second for 10 s under a 2 s `timeout server` was served)."},
 	// The battery's row "an x-forwarded-proto that is neither http nor https" holds it on two-checks.

@@ -128,15 +128,15 @@ func checkLines(in generator.Input, v *values, e edge) (http, stream []string) {
 	http = append(http, `  map "" $pf_counted_address { default `+address+"; }")
 	if a.SendRequest {
 		// The Envoy output tells the check the path its route matched, normalised as the route sends it, before a
-		// rewrite, with the query as the client wrote it, and the scheme of a target written with one, in any letter
-		// case, over the connection's or the client's X-Forwarded-Proto (measured on Envoy 1.40.2). Inside the
-		// subrequest $request_uri and $request are the client's and $pf_path keeps the value the route choice read; the
-		// query comes from $request_uri, as $args is the subrequest's.
+		// rewrite, with the query as the client wrote it, and, under forwarded, the scheme of a target written with
+		// one, in any letter case, over the connection's or the client's X-Forwarded-Proto (measured on Envoy 1.40.2).
+		// Inside the subrequest $request_uri and $request are the client's and $pf_path keeps the value the route
+		// choice read; the query comes from $request_uri, as $args is the subrequest's.
 		// With connection the client that writes the target is not trusted for its scheme, so the check is told the
 		// connection's, the one the service is sent, as docs/auth.md says: the target's would tell it https for an
 		// https target sent over plain HTTP, which nginx serves and the Envoy output answers 403 (measured on nginx
-		// 1.30.6 and 1.31.8 beside Envoy 1.40.2). Over TLS an http target is then told https, where the Envoy output
-		// tells http, as an HTTP/2 :scheme is (the auth.send_request row).
+		// 1.30.6 and 1.31.8 beside Envoy 1.40.2). Over TLS an http target is then told https, as by the Envoy output,
+		// which under connection writes the listener's scheme as text (filter-ext-authz.yaml).
 		toldProto := `  map $request $pf_told_proto { ` + quoted(`~*^[^ ]+ +https://`) + ` https; ` + quoted(`~*^[^ ]+ +http://`) +
 			` http; default $pf_forwarded_proto; }`
 		if e.connection {

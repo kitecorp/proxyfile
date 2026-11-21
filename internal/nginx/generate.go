@@ -169,7 +169,8 @@ func newRequestID() []string {
 
 // writeForwardingMaps writes the values the routes send as X-Request-Id, X-Forwarded-Proto and, with client_address
 // connection, X-Forwarded-For. With connection the Envoy output makes a new request id whatever the client sent, sends
-// the connection's scheme, and appends the peer's address to the client's X-Forwarded-For with a comma and no space;
+// the connection's scheme, and appends the peer's address to the client's X-Forwarded-For with a comma and no space,
+// its own address for a peer on a loopback address, which this file does not copy (the client_address note);
 // with forwarded it keeps the client's id and scheme when it sent them, and sends X-Forwarded-For as received, which
 // nginx does with no line (measured on Envoy 1.40.2). A header remove_from_clients removes reads as empty.
 func writeForwardingMaps(w *writer, e edge) {

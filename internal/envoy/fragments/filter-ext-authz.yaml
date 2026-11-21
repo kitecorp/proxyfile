@@ -32,12 +32,17 @@ typed_config:
           #
           # With send_request, the request the check judges, in the four headers forward-auth services read: its path
           # and query, its method, its scheme and its host. headers_to_add sets each one, so a client's own copy of
-          # x-forwarded-uri, x-forwarded-method or x-forwarded-host never reaches the check, also when send names it;
-          # the scheme is the request's, which with use_remote_address false comes from the X-Forwarded-Proto it
-          # arrived with (measured on Envoy 1.40.2).
+          # x-forwarded-uri, x-forwarded-method or x-forwarded-host never reaches the check, also when send names it.
+          # Under client_address connection the scheme is the listener's, https with tls and http without, because the
+          # client writes the request line and an HTTP/2 :scheme: the request's own scheme told the check https for an
+          # HTTP/2 request with :scheme https sent over plain HTTP, and http for an absolute http target sent over TLS
+          # (measured on Envoy 1.40.2). The X-Forwarded-Proto Envoy sets from the connection gave the same words; the
+          # scheme written as text reads no header at all. Under forwarded the scheme is the request's, which with
+          # use_remote_address false comes from the X-Forwarded-Proto it arrived with (measured on Envoy 1.40.2).
           headers_to_add: [{key: x-gateway-timeout-ms, value: "{{.Check.TimeoutMillis}}"}
 {{- if .Check.SendRequest}}, {key: x-forwarded-uri, value: "%REQ(:PATH)%"},
-            {key: x-forwarded-method, value: "%REQ(:METHOD)%"}, {key: x-forwarded-proto, value: "%REQ(:SCHEME)%"},
+            {key: x-forwarded-method, value: "%REQ(:METHOD)%"},
+            {key: x-forwarded-proto, value: "{{with .Check.ConnectionScheme}}{{.}}{{else}}%REQ(:SCHEME)%{{end}}"},
             {key: x-forwarded-host, value: "%REQ(:AUTHORITY)%"}
 {{- end}}]
 {{- with .Check.Accept}}

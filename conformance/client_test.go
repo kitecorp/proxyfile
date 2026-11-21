@@ -141,6 +141,10 @@ func (w *world) send(r request) result {
 		}
 		return w.sendRaw(r)
 	}
+	if r.plain {
+		// net/http's clients speak TLS to a file with tls, so plain HTTP to its port is sent by hand.
+		panic(fmt.Sprintf("the battery sends plain HTTP to a listener with tls as a raw request only, not %+v", r))
+	}
 	return w.sendOn(w.client(r), r)
 }
 

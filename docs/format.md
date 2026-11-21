@@ -251,3 +251,13 @@ stands on the line after an anchor. Each problem names its place.
 
 2.2 adds no key. `proxyfile render --target nginx` and `--target haproxy` write nginx's and HAProxy's files
 ([nginx](nginx.md), [HAProxy](haproxy.md)).
+
+## After 2.2.0
+
+Render every nginx file again after the upgrade, because its `proxyfile.js` changes: the tracing script reads an `env`
+tag's variable without asking `process.env` whether it holds the name ([nginx](nginx.md#tracing)). Render an Envoy file
+again when it holds `auth.send_request: true` under `client_address: connection`, which a file with `tls` takes when it
+writes none: the check is told the connection's scheme, whatever the client writes in the request line, an HTTP/2
+`:scheme` or its own `X-Forwarded-Proto` ([What the check is told](auth.md#what-the-check-is-told)), where 2.2.0 told
+it the request's own. Such an nginx file's `nginx.conf` changes too. Until a file is rendered again, `proxyfile check`
+reports its 2.2.0 output as different. HAProxy's files do not change.

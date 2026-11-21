@@ -38,7 +38,7 @@ func TestDocsAreCurrent(t *testing.T) {
 				continue
 			}
 			if text[table.start:table.end] != want && !*update {
-				t.Errorf("%s: the table of %q differs from what Reference or SupportMatrix writes; rewrite it with "+
+				t.Errorf("%s: the block of %q differs from what the description and the targets' declarations write; rewrite it with "+
 					"go test ./internal/format -run TestDocsAreCurrent -update", file, table.name)
 			}
 			current.WriteString(want)
@@ -242,8 +242,10 @@ func keyTables(text string) ([]keyTable, error) {
 // tableNamed returns the table a marker names: "." holds the keys at the top of a proxyfile that hold no keys of
 // their own, "origins file" and "methods file" the keys of those files, "support by proxy" each target's support of
 // every row of MatrixRows, "less strict: <target>" the list of the ways that target is less strict than the Envoy
-// output, and any other name is the path of a key of the proxyfile, whose table holds that key and every key under it,
-// in the class of the key that holds it.
+// output, "notes: <target>: <row>, <row>" the list of that target's notes on those rows of MatrixRows (NoteList),
+// "render warning: <target>" the line render prints after it writes that target's files, as a code block, and any
+// other name is the path of a key of the proxyfile, whose table holds that key and every key under it, in the class of
+// the key that holds it.
 func tableNamed(name string) (string, error) {
 	if target, found := strings.CutPrefix(name, "less strict: "); found {
 		t, known := TargetNamed(target)
@@ -251,6 +253,23 @@ func tableNamed(name string) (string, error) {
 			return "", fmt.Errorf("a list names %q, which is no target", target)
 		}
 		return string(LessStrictList(t)), nil
+	}
+	if rest, found := strings.CutPrefix(name, "notes: "); found {
+		target, rows, _ := strings.Cut(rest, ": ")
+		t, known := TargetNamed(target)
+		if !known {
+			return "", fmt.Errorf("a list of notes names %q, which is no target", target)
+		}
+		notes, err := NoteList(t, strings.Split(rows, ", "))
+		return string(notes), err
+	}
+	if target, found := strings.CutPrefix(name, "render warning: "); found {
+		t, known := TargetNamed(target)
+		if !known || LessStrictWarning(t) == "" {
+			return "", fmt.Errorf("a render warning names %q, which is no target whose render prints one", target)
+		}
+		// The prefix is the one cli.Run writes before the warning, which internal/cli's tests pin.
+		return "```\nproxyfile render: " + LessStrictWarning(t) + "\n```\n", nil
 	}
 	switch name {
 	case ".":

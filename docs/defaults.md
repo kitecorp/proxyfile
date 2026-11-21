@@ -26,7 +26,8 @@ what that is.
   written. With `forwarded` (`use_remote_address: false`) a proxy stands in front: `X-Forwarded-For` passes as it came,
   `X-Forwarded-Proto` is kept when present, and with no trusted hops Envoy takes the last `X-Forwarded-For` entry, the
   one the proxy in front appended, as the client's address. With `connection` (`use_remote_address: true`) the client's
-  address is the peer of the connection, which Envoy appends to `X-Forwarded-For`, and `X-Forwarded-Proto` is set from
+  address is the peer of the connection, which Envoy appends to `X-Forwarded-For`, or its own address for a peer on a
+  loopback address, and `X-Forwarded-Proto` is set from
   the connection. [The listener](listener.md#the-clients-address) says when to write which.
 - **A browser origin that is not admitted gets `403` with the body `Invalid CORS request`**, the answer a Spring service
   gives for a refused origin. Changing it needs a key that does not exist yet.

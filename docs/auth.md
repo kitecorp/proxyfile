@@ -77,21 +77,18 @@ read:
 The request the check receives still goes to the path of `ask`. The proxy sets each of the four headers itself, so a
 client's own `x-forwarded-uri`, `x-forwarded-method` and `x-forwarded-host` never reach the check, also when `send`
 names them. Whose word the scheme is depends on [`client_address`](listener.md#the-clients-address). With
-`connection` it is the connection's own, the scheme the service is sent, but the Envoy output tells the check an HTTP/2
-request's `:scheme`: `https` for a request sent over plain HTTP with `:scheme https`, though the service is sent
-`http`, and `http` for one sent over TLS with `:scheme http`. It also tells `http` for a request sent over TLS whose
-absolute target says `http`, and answers `403` to an absolute `https` target sent over plain HTTP, which the nginx file
-serves and tells the check `http`. With `forwarded`, the default in a file without `tls`, it is the scheme of an
-absolute target when the request line holds one, and through the Envoy output an HTTP/2 request's `:scheme`, then the
-`X-Forwarded-Proto` the request arrived with, and the connection's scheme when it arrived with none; the service is
-sent that header, or the connection's scheme. A proxy in front sets the header, but the client writes the request
-line, and a client that reaches the gateway directly writes the header too, so the check then reads `https` for a
-request sent over plain HTTP. For an `X-Forwarded-Proto` of `ftp` the Envoy output tells the check the connection's
-scheme, where the nginx and HAProxy files tell it `ftp`, as it arrived. A gateway that faces its clients writes
-`client_address: connection`, and a check behind the Envoy output can trust an `https` it is told only with `tls`, as a
-client can send `:scheme https` over plain HTTP. The proxy sets `x-forwarded-uri`, `x-forwarded-method` and
-`x-forwarded-host` on the check's request alone: a client's own copies reach the service as sent, unless
-`remove_from_clients` names them.
+`connection` it is the connection's own, the scheme the service is sent, whatever the client writes in the request
+line, an HTTP/2 `:scheme` or its own `X-Forwarded-Proto`, so a gateway that faces its clients writes
+`client_address: connection` and its check can trust the scheme it is told. With `forwarded`, the default in a file
+without `tls`, it is, through the Envoy output and the nginx file, the scheme of an absolute target when the request
+line holds one, which the HAProxy file answers `400`, and through the Envoy output an HTTP/2 request's `:scheme`, then
+the `X-Forwarded-Proto` the request arrived with, and the connection's scheme when it arrived with none; the service is
+sent that header, or the connection's scheme. A proxy in front sets the header, but the client writes the request line,
+and a client that reaches the gateway directly writes the header too, so the check then reads `https` for a request
+sent over plain HTTP. With `forwarded`, for an `X-Forwarded-Proto` of `ftp` the Envoy output tells the check the
+connection's scheme, where the nginx and HAProxy files tell it `ftp`, as it arrived. The proxy sets
+`x-forwarded-uri`, `x-forwarded-method` and `x-forwarded-host` on the check's request alone: a client's own copies
+reach the service as sent, unless `remove_from_clients` names them.
 
 The proxy normalises every request's path before anything reads it, with or without `send_request`
 ([A route with `auth: off`](#a-route-with-auth-off) says why): dot segments are resolved, repeated slashes merged and
